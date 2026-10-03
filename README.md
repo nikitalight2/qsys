@@ -93,8 +93,9 @@ CASTER UDP API (reference v1.03, firmware 1.4.3 and above) and mirrors every
 documented field on one panel per unit: broadcast (enable, advertised name,
 preset, stereo/dual mono, program info), encryption, audio input (gain, mute,
 link, mono mix, AGC, low-pass, per-channel high-pass), RF (TX power, antenna),
-LEDs, static IP, timecode, plus a raw command box and a reply log. The plugin
-is branded with the Bettear word mark and website, not with mine.
+LEDs and timecode. Static IP, controller port and ID stay on the unit's own
+management page. The plugin is branded with the Bettear word mark and website,
+not with mine.
 
 ### Install
 
@@ -119,8 +120,7 @@ is branded with the Bettear word mark and website, not with mine.
 | Status | OK = answering. Compromised = the unit reported REBOOT REQUIRED. Initializing = rebooting. Missing = three polls unanswered. Not Present = no IP set. |
 | Multicast | Enter a multicast group as the IP and 0 as the device ID to reach several units; replies are matched by the ID the unit puts in its answer. |
 | Knobs | Gain is rounded to the API's 0.5 dB steps (-12 … +32 dB), TX power to 1 %. Both are sent once the knob rests for 150 ms. |
-| Static IP | Only the **APPLY CONFIG** button sends address, mask and gateway, in one command. |
-| Raw command | Anything typed in the RAW COMMAND box is sent after the `Device#<id>` prefix, e.g. `GET version`. |
+| Errors | `ERR ...` replies are printed to the debug output (turn on the *Debug* property to see all traffic). |
 
 Pins are exposed on the useful controls (IP address, online LED, reboot
 required, all broadcast/audio/RF settings, timecode) so a UCI or a script can
@@ -141,7 +141,8 @@ Points that depend on that:
   worked on the Setup page.
 - Whether the unit's `OK` line carries the `Device#<id>` prefix, and whether
   a quoted advertised name comes back with or without its quotes. Both forms
-  are accepted.
+  are accepted. The plugin itself loads and renders in Q-SYS Designer 10.5
+  (checked by the author).
 - The default device ID. The API examples use 255 and `controller.id`
   defaults to 255, so that is the preset; change it on the device page if
   your unit answers to another ID.
