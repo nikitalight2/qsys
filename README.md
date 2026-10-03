@@ -11,7 +11,7 @@ Q-SYS Designer plugins by Nikita Visual Arts.
 | Plugin | File | Version |
 |---|---|---|
 | Mic Mixer | `plugins/NikitaMicMixer.qplug` | 2.0.0 |
-| Color Picker RGBW | `plugins/NikitaColorPickerRGBW.qplug` | 1.0.0 |
+| Color Picker RGBW | `plugins/NikitaColorPickerRGBW.qplug` | 1.1.0 |
 
 ## Mic Mixer
 
@@ -82,34 +82,31 @@ the debug output together with the Q-SYS Designer version.
 
 ## Color Picker RGBW
 
-A basic colour picker for RGBW LED fixtures: 16 fixed swatches in a 4 x 4
-grid plus a brightness knob. No colour wheel and no 16-million-colour
-picker, just the colours you actually call for on a show: red, orange,
-amber, yellow, lime, green, mint, cyan, sky, blue, violet, magenta, pink,
-warm white, white and off.
+A basic colour picker for RGBW LED fixtures, built around the vertical hue
+strip from the Q-SYS Designer colour picker: a rainbow bar with a fader
+beside it, a brightness knob and a white-mix knob. No saturation or value
+plane and no 16-million-colour picker. You pick a hue, set how bright it
+is and how much of the white emitter to add, and the plugin puts the four
+channel values on its output pins.
 
-Press a swatch and the plugin puts the four channel values on its output
-pins, scaled by brightness. Exactly one swatch is lit at a time.
+### Controls
 
-### Outputs
-
-| Control | Type | What it carries |
+| Control | Type | What it does |
 |---|---|---|
+| **Hue** | fader, input/output pin | 0 to 360 degrees, bottom to top, matching the strip (red, yellow, green, cyan, blue, magenta, red) |
+| **Brightness** | knob, input/output pin | 0 to 100 %, master dimmer for all four channels |
+| **WhiteMix** | knob, input/output pin | 0 to 100 %, level of the W emitter on top of the hue |
 | **Red**, **Green**, **Blue**, **White** | knob, output pin | one value per emitter channel |
-| **RGBW** | text, output pin | all four as one string, e.g. `255,96,0,0` |
-| **ColorName** | text, output pin | name of the lit swatch, e.g. `Warm White` |
-| **Swatch 1..16** | toggle, input/output pin | select a colour from a UCI or another block |
-| **Brightness** | knob, input/output pin | 0 to 100 %, applied to all four channels |
+| **RGBW** | text, output pin | all four as one string, e.g. `0,38,255,0` |
+| **ColorName** | text, output pin | plain name and angle of the hue, e.g. `Blue  231°` |
 
 The *Output Scale* property sets the range of the four value pins:
 `0-255` (default, integers), `0-100` (percent) or `0-1` (floats with three
 decimals). The RGBW string follows the same scale.
 
-Saturated colours drive R, G and B only. *White* drives the W emitter only,
-*Warm White* adds red and amber on top of W, and *Off* sends zeros on all
-four channels (a blackout). The channel values are hand-set in the
-`PALETTE` table at the top of the plugin, so a colour can be retuned to a
-fixture by editing four numbers.
+The hue is converted at full saturation, so R, G and B carry the pure
+colour and the W channel is driven only by *WhiteMix*. Brightness 0 is a
+blackout on all four channels.
 
 ### Install
 
@@ -118,16 +115,19 @@ fixture by editing four numbers.
 2. Restart Q-SYS Designer and drag **Nikita Visual Arts → Color Picker RGBW**
    into the schematic.
 3. Wire the **Red / Green / Blue / White** pins (or the **RGBW** string) to
-   whatever drives the fixture.
+   whatever drives the fixture, for example the percent inputs of an sACN
+   Transmit block.
 
 ### Not verified on hardware
 
 Checked with a Lua syntax check and an offline mock of the plugin host
-(design-time functions, layout bounds, and the runtime for every swatch at
-all three output scales). It was not loaded in Q-SYS Designer or run on a
-Core. Two points depend on the Q-SYS build: the preview lamp is recoloured
-from the runtime through the control's `Color` property, and the swatch
-buttons rely on `UnlinkOffColor` for their dimmed unselected look.
+(design-time functions, layout bounds, the hue maths at every 30° step,
+and the runtime at all three output scales). It was not loaded in Q-SYS
+Designer or run on a Core. Two points depend on the Q-SYS build: the
+rainbow strip is an embedded PNG drawn next to a standard fader, so the
+fader's handle sits beside the strip rather than on it, and the preview
+lamp is recoloured from the runtime through the control's `Color`
+property.
 
 ### Repository layout
 
