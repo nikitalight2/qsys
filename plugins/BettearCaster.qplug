@@ -1,0 +1,966 @@
+-- ============================================================
+--  Bettear CASTER – bettear.com
+--  Q-SYS control plugin for the Bettear CASTER Auracast streamer
+--
+--  Talks to one or more CASTER units over the CASTER UDP API
+--  (protocol reference v1.03, firmware 1.4.3 and above):
+--    * one UDP socket on the Core, bound to the controller port
+--      (9000 by default), shared by every device of this instance
+--    * every command is "Device#<id> <command>\n"; the device first
+--      answers OK (or ERR ...), then the in-context response
+--    * a poll timer sends PING plus a GET of every field, so the
+--      panel always mirrors the unit and the Status LED follows it
+--
+--  Product page:  https://bettear.com/products/caster
+-- ============================================================
+
+PluginInfo = {
+  Name = "Bettear~CASTER",
+  Version = "1.0.0",
+  BuildVersion = "1.0.0.0",
+  Id = "991bfdba-8a38-4556-a4f5-6b9d6dd64246",
+  Author = "Bettear – bettear.com",
+  Description = "Control for the Bettear CASTER Auracast streamer over its UDP API (v1.03, FW 1.4.3+): broadcast, encryption, audio input, RF, LEDs, network and timecode. bettear.com",
+  ShowDebug = false,
+}
+
+-- ---------- Brand ----------
+BrandName = "Bettear"
+BrandSite = "bettear.com"
+ProductName = "CASTER"
+
+-- Colours: a neutral dark panel with a light header band so the
+-- Bettear word mark (black on transparent) shows as supplied.
+Brand = {
+  Header    = { 250, 250, 250 },  -- #FAFAFA  light header band behind the logo
+  HeaderTxt = {  20,  20,  20 },  -- #141414
+  BG        = {  24,  26,  30 },  -- #181A1E
+  Panel     = {  34,  37,  43 },  -- #22252B
+  Stroke    = {  58,  62,  70 },  -- #3A3E46
+  Text      = { 242, 243, 245 },  -- #F2F3F5
+  Muted     = { 160, 166, 178 },  -- #A0A6B2
+  Accent    = {   0, 160, 227 },  -- #00A0E3  primary control colour
+  Accent2   = {  36, 196, 160 },  -- #24C4A0  secondary (audio)
+  Warn      = { 240, 160,  32 },  -- #F0A020  reboot-required, raw command
+  Danger    = { 224,  64,  80 },  -- #E04050  mute / reboot
+  OK        = {  46, 204, 143 },  -- #2ECC8F
+}
+
+BrandAssets = {
+  -- Bettear word mark, 300x147 PNG (base64), rasterised from the
+  -- SVG in assets/brand/bettear-logo.svg
+  Logo = "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",
+}
+
+-- ============================================================
+-- Protocol tables (shared by design time and runtime)
+-- ============================================================
+DEFAULT_PORT = 9000
+DEFAULT_DEVICE_ID = 255
+
+-- Enumerated fields: API token, index, and the label shown in the
+-- combo box. The token is what goes on the wire.
+ENUMS = {
+  preset  = { { "LOW",  "LOW – 16 kHz" }, { "MED", "MED – 24 kHz" }, { "HIGH", "HIGH – 48 kHz" } },
+  btype   = { { "STEREO", "STEREO" }, { "DUALMONO", "DUALMONO" } },
+  lpf     = { { "NONE", "NONE" }, { "LPF8K", "LPF 8 kHz" }, { "LPF12K", "LPF 12 kHz" } },
+  hpf     = { { "NONE", "NONE" }, { "HPF80", "HPF 80 Hz" }, { "HPF130", "HPF 130 Hz" }, { "HPF250", "HPF 250 Hz" } },
+  antenna = { { "INTERNAL", "INTERNAL" }, { "EXTERNAL", "EXTERNAL" } },
+  leds    = { { "NORMAL", "NORMAL" }, { "OFF", "OFF" }, { "AUDIO_INDICATOR", "AUDIO INDICATOR" } },
+}
+
+function EnumChoices(name)
+  local t = {}
+  for _, e in ipairs(ENUMS[name]) do table.insert(t, e[2]) end
+  return t
+end
+
+-- Label -> token (what the device wants)
+function EnumToken(name, label)
+  for _, e in ipairs(ENUMS[name]) do
+    if e[2] == label or e[1] == label then return e[1] end
+  end
+  return nil
+end
+
+-- Token or numeric index (as returned by the device) -> label
+function EnumLabel(name, value)
+  if value == nil then return nil end
+  local n = tonumber(value)
+  if n then
+    local e = ENUMS[name][math.floor(n) + 1]
+    return e and e[2] or nil
+  end
+  value = tostring(value):upper()
+  for _, e in ipairs(ENUMS[name]) do
+    if e[1] == value then return e[2] end
+  end
+  return nil
+end
+
+-- Fields that the API flags REBOOT REQUIRED; listed on the Setup page.
+REBOOT_FIELDS = "controller.port, broadcast.enabled, broadcast.names.0, broadcast.preset, broadcast.type,"
+REBOOT_FIELDS2 = "broadcast.encryption.enabled, broadcast.encryption.key, filters.lpf, static_ip.enabled, static_ip.config"
+
+-- ============================================================
+-- Design time
+-- ============================================================
+function GetColor(props) return Brand.BG end
+
+function GetPrettyName(props)
+  local n = props["Device Count"].Value
+  if n == 1 then return BrandName .. " " .. ProductName end
+  return string.format("%s %s (%d devices)", BrandName, ProductName, n)
+end
+
+function GetProperties()
+  return {
+    { Name = "Device Count", Type = "integer", Min = 1, Max = 16, Value = 1 },
+    { Name = "Poll Interval (s)", Type = "integer", Min = 1, Max = 120, Value = 5 },
+    { Name = "Local UDP Port", Type = "integer", Min = 1, Max = 65535, Value = DEFAULT_PORT },
+    -- "Any" listens on every Core interface. Pick one when the Core has
+    -- several networks and the units (or the multicast group) live on one of them.
+    { Name = "Network Interface", Type = "enum", Choices = { "Any", "LAN A", "LAN B", "AUX A", "AUX B" }, Value = "Any" },
+    { Name = "Debug", Type = "boolean", Value = false },
+  }
+end
+
+function RectifyProperties(props)
+  return props
+end
+
+-- One page per device, then a Setup page.
+function GetPages(props)
+  local pages = {}
+  local n = props["Device Count"].Value
+  if n == 1 then
+    table.insert(pages, { name = "CASTER" })
+  else
+    for d = 1, n do table.insert(pages, { name = string.format("Device %d", d) }) end
+  end
+  table.insert(pages, { name = "Setup" })
+  return pages
+end
+
+-- Every per-device control is declared with Count = device count, so
+-- Controls.<Name>[d] (or the bare control when the count is 1) belongs
+-- to device d.
+function GetControls(props)
+  local n = props["Device Count"].Value
+  local c = {}
+  local function add(t) t.Count = t.Count or n; table.insert(c, t) end
+
+  -- Connection
+  add({ Name = "IPAddress", ControlType = "Text", PinStyle = "Both", UserPin = true })
+  add({ Name = "Port", ControlType = "Text" })
+  add({ Name = "DeviceID", ControlType = "Text" })
+  add({ Name = "Status", ControlType = "Indicator", IndicatorType = "Status", PinStyle = "Output" })
+  add({ Name = "Online", ControlType = "Indicator", IndicatorType = "Led", PinStyle = "Output", UserPin = true })
+  add({ Name = "Firmware", ControlType = "Indicator", IndicatorType = "Text", PinStyle = "Output" })
+  add({ Name = "RebootRequired", ControlType = "Indicator", IndicatorType = "Led", PinStyle = "Output", UserPin = true })
+  add({ Name = "Reboot", ControlType = "Button", ButtonType = "Trigger", PinStyle = "Input", UserPin = true })
+  add({ Name = "Refresh", ControlType = "Button", ButtonType = "Trigger", PinStyle = "Input", UserPin = true })
+  add({ Name = "Identify", ControlType = "Button", ButtonType = "Toggle", PinStyle = "Both", UserPin = true })
+
+  -- Broadcast
+  add({ Name = "BroadcastEnabled", ControlType = "Button", ButtonType = "Toggle", PinStyle = "Both", UserPin = true })
+  add({ Name = "BroadcastName", ControlType = "Text", PinStyle = "Both", UserPin = true })
+  add({ Name = "BroadcastPreset", ControlType = "Text", PinStyle = "Both", UserPin = true })
+  add({ Name = "BroadcastType", ControlType = "Text", PinStyle = "Both", UserPin = true })
+  add({ Name = "ProgramInfo1", ControlType = "Text", PinStyle = "Both", UserPin = true })
+  add({ Name = "ProgramInfo2", ControlType = "Text", PinStyle = "Both", UserPin = true })
+  add({ Name = "EncryptionEnabled", ControlType = "Button", ButtonType = "Toggle", PinStyle = "Both", UserPin = true })
+  add({ Name = "EncryptionKey", ControlType = "Text", PinStyle = "Both", UserPin = true })
+
+  -- Audio input & processing. Gain: API 0..88 in 0.5 dB steps = -12..+32 dB.
+  add({ Name = "InputGain1", ControlType = "Knob", ControlUnit = "dB", Min = -12, Max = 32, DefaultValue = 0, PinStyle = "Both", UserPin = true })
+  add({ Name = "InputGain2", ControlType = "Knob", ControlUnit = "dB", Min = -12, Max = 32, DefaultValue = 0, PinStyle = "Both", UserPin = true })
+  add({ Name = "InputMute1", ControlType = "Button", ButtonType = "Toggle", PinStyle = "Both", UserPin = true })
+  add({ Name = "InputMute2", ControlType = "Button", ButtonType = "Toggle", PinStyle = "Both", UserPin = true })
+  add({ Name = "InputLink", ControlType = "Button", ButtonType = "Toggle", PinStyle = "Both", UserPin = true })
+  add({ Name = "MonoMix", ControlType = "Button", ButtonType = "Toggle", PinStyle = "Both", UserPin = true })
+  add({ Name = "AGC", ControlType = "Button", ButtonType = "Toggle", PinStyle = "Both", UserPin = true })
+  add({ Name = "LPF", ControlType = "Text", PinStyle = "Both", UserPin = true })
+  add({ Name = "HPF1", ControlType = "Text", PinStyle = "Both", UserPin = true })
+  add({ Name = "HPF2", ControlType = "Text", PinStyle = "Both", UserPin = true })
+
+  -- RF & antenna
+  add({ Name = "TXPower", ControlType = "Knob", ControlUnit = "Percent", Min = 0, Max = 100, DefaultValue = 100, PinStyle = "Both", UserPin = true })
+  add({ Name = "Antenna", ControlType = "Text", PinStyle = "Both", UserPin = true })
+
+  -- Indicators
+  add({ Name = "LEDMode", ControlType = "Text", PinStyle = "Both", UserPin = true })
+
+  -- Network (static IP). Applied only by the APPLY button.
+  add({ Name = "StaticIPEnabled", ControlType = "Button", ButtonType = "Toggle", PinStyle = "Both", UserPin = true })
+  add({ Name = "StaticIP", ControlType = "Text" })
+  add({ Name = "StaticMask", ControlType = "Text" })
+  add({ Name = "StaticGateway", ControlType = "Text" })
+  add({ Name = "ApplyStaticIP", ControlType = "Button", ButtonType = "Trigger" })
+
+  -- Timecode
+  add({ Name = "TimecodeEnabled", ControlType = "Button", ButtonType = "Toggle", PinStyle = "Both", UserPin = true })
+  add({ Name = "TimecodeID", ControlType = "Text", PinStyle = "Both", UserPin = true })
+  add({ Name = "TimecodePlay", ControlType = "Button", ButtonType = "Toggle", PinStyle = "Both", UserPin = true })
+  add({ Name = "TimecodeTimestamp", ControlType = "Text", PinStyle = "Both", UserPin = true })
+  add({ Name = "TimecodeOffset", ControlType = "Text", PinStyle = "Both", UserPin = true })
+  add({ Name = "SendTimecode", ControlType = "Button", ButtonType = "Trigger", PinStyle = "Input", UserPin = true })
+
+  -- Raw command (anything after "Device#<id> "), last reply, log
+  add({ Name = "RawCommand", ControlType = "Text", PinStyle = "Input", UserPin = true })
+  add({ Name = "SendRaw", ControlType = "Button", ButtonType = "Trigger" })
+  add({ Name = "LastResponse", ControlType = "Indicator", IndicatorType = "Text", PinStyle = "Output" })
+  add({ Name = "LastError", ControlType = "Indicator", IndicatorType = "Text", PinStyle = "Output" })
+  add({ Name = "Log", ControlType = "Indicator", IndicatorType = "Text" })
+
+  -- Global (one per plugin instance)
+  add({ Name = "SocketStatus", ControlType = "Indicator", IndicatorType = "Text", Count = 1 })
+
+  return c
+end
+
+-- ---------- Layout ----------
+function GetControlLayout(props)
+  local n = props["Device Count"].Value
+  local pageIndex = props["page_index"].Value
+  local pageCount = n + 1
+  local isSetup = (pageIndex == pageCount)
+  local d = isSetup and 1 or pageIndex
+
+  local layout, graphics = {}, {}
+
+  local HEADER, M, GAP, G = 56, 16, 12, 8
+  local W = 740
+  local PW = W - 2 * M            -- full-width panel (708)
+  local HALF = (PW - GAP) / 2     -- two-column panel (348)
+  local THIRD = (PW - 2 * GAP) / 3 -- three-column panel (228)
+
+  local function idx(name) return name .. (n == 1 and "" or (" " .. d)) end
+
+  local function panel(x, y, w, h, titleText)
+    table.insert(graphics, { Type = "GroupBox", Fill = Brand.Panel, StrokeColor = Brand.Stroke, StrokeWidth = 1, CornerRadius = 4, Position = { x, y }, Size = { w, h } })
+    table.insert(graphics, { Type = "GroupBox", Fill = Brand.Accent, StrokeWidth = 0, CornerRadius = 0, Position = { x + 1, y + 1 }, Size = { w - 2, 2 } })
+    if titleText then
+      table.insert(graphics, { Type = "Label", Text = titleText, FontSize = 10, FontStyle = "Bold", HTextAlign = "Left", Color = Brand.Muted, Position = { x + G, y + 6 }, Size = { w - 2 * G, 12 } })
+    end
+  end
+  local function caption(text, x, y, w, align)
+    table.insert(graphics, { Type = "Label", Text = text, FontSize = 8, FontStyle = "Bold", HTextAlign = align or "Left", Color = Brand.Muted, Position = { x, y }, Size = { w, 10 } })
+  end
+  local function note(text, x, y, w, h)
+    table.insert(graphics, { Type = "Label", Text = text, FontSize = 9, HTextAlign = "Left", VTextAlign = "Top", Color = Brand.Muted, Position = { x, y }, Size = { w, h or 12 } })
+  end
+  -- caption + text box; ry is the caption row (control sits 12 px below)
+  local function field(name, label, x, ry, w, readOnly)
+    caption(label, x, ry, w)
+    layout[idx(name)] = { Style = "Text", HTextAlign = "Left", FontSize = 10, IsReadOnly = readOnly or false, Position = { x, ry + 12 }, Size = { w, 22 } }
+  end
+  local function combo(name, label, x, ry, w)
+    caption(label, x, ry, w)
+    layout[idx(name)] = { Style = "ComboBox", FontSize = 10, Position = { x, ry + 12 }, Size = { w, 22 } }
+  end
+  local function toggle(name, legend, x, y, w, color, h)
+    layout[idx(name)] = { Style = "Button", ButtonStyle = "Toggle", Legend = legend, Color = color or Brand.Accent, UnlinkOffColor = true, OffColor = Brand.BG, FontSize = 10, CornerRadius = 4, Position = { x, y }, Size = { w, h or 22 } }
+  end
+  local function trigger(name, legend, x, y, w, color, h)
+    layout[idx(name)] = { Style = "Button", ButtonStyle = "Trigger", Legend = legend, Color = color or Brand.Accent, FontSize = 10, CornerRadius = 4, Position = { x, y }, Size = { w, h or 22 } }
+  end
+  local function led(name, label, x, ry, color)
+    caption(label, x, ry, 60)
+    layout[idx(name)] = { Style = "Led", Color = color or Brand.OK, Position = { x, ry + 14 }, Size = { 18, 18 } }
+  end
+  local function knob(name, label, x, ry, size, color)
+    caption(label, x, ry, size + 8)
+    layout[idx(name)] = { Style = "Knob", Color = color or Brand.Accent, Position = { x, ry + 12 }, Size = { size, size } }
+  end
+
+  -- Page heights
+  local devH = 60 + 92 + GAP + 176 + GAP + 140 + GAP + 116 + GAP + 150 + M
+  local setupH = 60 + 108 + GAP + 236 + M
+  local H = isSetup and setupH or devH
+
+  -- Background + header band with the Bettear word mark (as supplied,
+  -- black on a light band), the website, and the plugin name.
+  table.insert(graphics, { Type = "GroupBox", Fill = Brand.BG, StrokeWidth = 0, Position = { 0, 0 }, Size = { W, H } })
+  table.insert(graphics, { Type = "GroupBox", Fill = Brand.Header, StrokeWidth = 0, CornerRadius = 0, Position = { 0, 0 }, Size = { W, HEADER } })
+  table.insert(graphics, { Type = "Image", Image = BrandAssets.Logo, Position = { M, 4 }, Size = { 98, 48 } })
+  table.insert(graphics, { Type = "Label", Text = BrandSite, FontSize = 9, HTextAlign = "Left", Color = Brand.HeaderTxt, Position = { M + 106, 36 }, Size = { 120, 14 } })
+  table.insert(graphics, { Type = "Label", Text = GetPrettyName(props) .. (isSetup and " – Setup" or (n > 1 and string.format(" – Device %d", d) or "")), FontSize = 13, FontStyle = "Bold", HTextAlign = "Right", Color = Brand.HeaderTxt, Position = { W - 320 - M - 26, 18 }, Size = { 320, 20 } })
+  table.insert(graphics, { Type = "GroupBox", Fill = Brand.Accent, StrokeWidth = 0, CornerRadius = 0, Position = { 0, HEADER - 3 }, Size = { W, 3 } })
+
+  if not isSetup then
+    layout[idx("Status")] = { Style = "Led", Position = { W - M - 18, 19 }, Size = { 18, 18 } }
+
+    -- Row 1: device / connection
+    local y = HEADER + GAP
+    local x = M
+    panel(x, y, PW, 92, "DEVICE")
+    local ry = y + 22
+    field("IPAddress", "IP ADDRESS", x + G, ry, 130)
+    field("Port", "PORT", x + 146, ry, 56)
+    field("DeviceID", "DEVICE ID", x + 210, ry, 60)
+    field("Firmware", "FIRMWARE", x + 278, ry, 104, true)
+    led("Online", "ONLINE", x + 392, ry, Brand.OK)
+    led("RebootRequired", "REBOOT REQ", x + 446, ry, Brand.Warn)
+    trigger("Refresh", "REFRESH", x + 514, ry + 12, 58)
+    toggle("Identify", "IDENTIFY", x + 580, ry + 12, 58, Brand.Accent2)
+    trigger("Reboot", "REBOOT", x + 646, ry + 12, 54, Brand.Danger)
+    note("Device ID 0 is the wildcard for a multicast IP address. REBOOT REQ lit: reboot the unit to apply the flagged settings.", x + G, y + 72, PW - 2 * G)
+
+    -- Row 2: broadcast (left) + audio input (right)
+    y = y + 92 + GAP
+    panel(x, y, HALF, 176, "BROADCAST")
+    ry = y + 22
+    caption("ACTIVITY", x + G, ry, 100)
+    toggle("BroadcastEnabled", "ENABLED", x + G, ry + 12, 100, Brand.Accent)
+    field("BroadcastName", "ADVERTISED NAME", x + 116, ry, HALF - 116 - G)
+    ry = y + 58
+    combo("BroadcastPreset", "PRESET (SAMPLE RATE)", x + G, ry, 162)
+    combo("BroadcastType", "TYPE", x + 178, ry, HALF - 178 - G)
+    ry = y + 94
+    field("ProgramInfo1", "DUAL MONO INFO CH 1", x + G, ry, 162)
+    field("ProgramInfo2", "DUAL MONO INFO CH 2", x + 178, ry, HALF - 178 - G)
+    ry = y + 130
+    caption("ENCRYPTION", x + G, ry, 100)
+    toggle("EncryptionEnabled", "ENCRYPTED", x + G, ry + 12, 100, Brand.Accent)
+    field("EncryptionKey", "BROADCAST KEY (MAX 16 CHARS)", x + 116, ry, HALF - 116 - G)
+
+    local ax = x + HALF + GAP
+    panel(ax, y, HALF, 176, "AUDIO INPUT")
+    for ch = 1, 2 do
+      ry = y + 22 + (ch - 1) * 48
+      knob("InputGain" .. ch, "GAIN " .. ch, ax + G, ry, 36, Brand.Accent2)
+      caption("MUTE " .. ch, ax + 60, ry, 52)
+      toggle("InputMute" .. ch, "MUTE", ax + 60, ry + 12, 52, Brand.Danger)
+      combo("HPF" .. ch, "HIGH-PASS " .. ch, ax + 120, ry, 110)
+    end
+    ry = y + 118
+    caption("LINK L/R", ax + G, ry, 60)
+    toggle("InputLink", "LINK", ax + G, ry + 12, 60, Brand.Accent2)
+    caption("MONO MIX", ax + 76, ry, 70)
+    toggle("MonoMix", "MONO", ax + 76, ry + 12, 70, Brand.Accent2)
+    caption("AGC", ax + 154, ry, 50)
+    toggle("AGC", "AGC", ax + 154, ry + 12, 50, Brand.Accent2)
+    combo("LPF", "LOW-PASS (GLOBAL)", ax + 212, ry, HALF - 212 - G)
+    note("Gain -12 to +32 dB", ax + 238, y + 34, 102)
+    note("in 0.5 dB steps", ax + 238, y + 46, 102)
+
+    -- Row 3: RF, LEDs, timecode
+    y = y + 176 + GAP
+    panel(x, y, THIRD, 140, "RF & ANTENNA")
+    ry = y + 22
+    knob("TXPower", "TX POWER", x + G, ry, 40, Brand.Accent)
+    combo("Antenna", "ANTENNA", x + 64, ry, THIRD - 64 - G)
+    note("0 % = -10 dB, 100 % = maximum", x + G, y + 84, THIRD - 2 * G)
+    note("(+10 or +20 dB, model dependent)", x + G, y + 98, THIRD - 2 * G)
+
+    local lx = x + THIRD + GAP
+    panel(lx, y, THIRD, 140, "LEDS")
+    combo("LEDMode", "LED MODE", lx + G, ry, THIRD - 2 * G)
+    note("IDENTIFY (top row) blinks the LEDs", lx + G, y + 64, THIRD - 2 * G)
+    note("so the unit can be found in a rack.", lx + G, y + 78, THIRD - 2 * G)
+
+    local tx = lx + THIRD + GAP
+    panel(tx, y, THIRD, 140, "TIMECODE")
+    caption("MODE", tx + G, ry, 70)
+    toggle("TimecodeEnabled", "ENABLED", tx + G, ry + 12, 70, Brand.Accent)
+    field("TimecodeID", "ID (0-99)", tx + 86, ry, 54)
+    caption("STATE", tx + 148, ry, 72)
+    toggle("TimecodePlay", "PLAY", tx + 148, ry + 12, THIRD - 148 - G, Brand.Accent2)
+    ry = y + 58
+    field("TimecodeTimestamp", "TIMESTAMP (MS)", tx + G, ry, 100)
+    field("TimecodeOffset", "OFFSET (± MS)", tx + 116, ry, THIRD - 116 - G)
+    trigger("SendTimecode", "SEND TIMECODE", tx + G, y + 106, THIRD - 2 * G)
+
+    -- Row 4: network (left) + raw command (right)
+    y = y + 140 + GAP
+    panel(x, y, HALF, 116, "NETWORK (STATIC IP)")
+    ry = y + 22
+    caption("MODE", x + G, ry, 90)
+    toggle("StaticIPEnabled", "STATIC IP", x + G, ry + 12, 90, Brand.Accent)
+    field("StaticIP", "IP ADDRESS", x + 106, ry, 110)
+    field("StaticMask", "SUBNET MASK", x + 224, ry, HALF - 224 - G)
+    ry = y + 58
+    field("StaticGateway", "GATEWAY", x + G, ry, 110)
+    trigger("ApplyStaticIP", "APPLY CONFIG", x + 126, ry + 12, 100, Brand.Warn)
+    note("APPLY sends address, mask and gateway at once. Reboot required.", x + G, y + 96, HALF - 2 * G)
+
+    local rx = x + HALF + GAP
+    panel(rx, y, HALF, 116, "RAW COMMAND")
+    ry = y + 22
+    field("RawCommand", "COMMAND (WITHOUT THE Device#<id> PREFIX)", rx + G, ry, HALF - 2 * G - 70)
+    trigger("SendRaw", "SEND", rx + HALF - G - 62, ry + 12, 62, Brand.Warn)
+    note("e.g.  GET version   or   SET leds.mode OFF", rx + G, ry + 40, HALF - 2 * G)
+    note("Press Enter in the box or click SEND.", rx + G, ry + 54, HALF - 2 * G)
+
+    -- Row 5: last reply, last error, log
+    y = y + 116 + GAP
+    panel(x, y, PW, 150, "REPLIES")
+    ry = y + 22
+    field("LastResponse", "LAST REPLY", x + G, ry, HALF - G)
+    field("LastError", "LAST ERROR", x + HALF + GAP, ry, HALF - G, true)
+    caption("LOG (NEWEST LAST)", x + G, y + 60, 200)
+    layout[idx("Log")] = { Style = "Text", HTextAlign = "Left", VTextAlign = "Top", FontSize = 8, IsReadOnly = true, WordWrap = true, Position = { x + G, y + 72 }, Size = { PW - 2 * G, 150 - 72 - G } }
+  else
+    -- Setup page: socket state, notes, brand footer
+    local y = HEADER + GAP
+    local x = M
+    panel(x, y, PW, 108, "CONNECTION")
+    caption("UDP SOCKET", x + G, y + 22, 200)
+    layout["SocketStatus"] = { Style = "Text", HTextAlign = "Left", FontSize = 10, IsReadOnly = true, Position = { x + G, y + 34 }, Size = { PW - 2 * G, 22 } }
+    note(string.format("The CASTER listens on UDP %d and answers to the sender's IP on port %d, so the Core binds that port (property Local UDP Port).", DEFAULT_PORT, DEFAULT_PORT), x + G, y + 62, PW - 2 * G)
+    note("Property Network Interface: Any = every Core interface; pick LAN A/B or AUX when the units or the multicast group sit on one network.", x + G, y + 76, PW - 2 * G)
+    note("One socket serves every device of this instance. A second instance on the same Core cannot bind the same port: raise Device Count instead.", x + G, y + 90, PW - 2 * G)
+
+    y = y + 108 + GAP
+    panel(x, y, PW, 236, "PROTOCOL NOTES")
+    local lines = {
+      { "Every command is  Device#<id> <command>  ended with LF. The unit answers OK, then the field with its value.",
+        "Errors come back as ERR bad_<type>, ERR range, ERR usage or ERR not_implemented and show in LAST ERROR." },
+      { "Device ID 0 is a wildcard: set the IP address to a multicast group and the ID to 0 to reach several units at once.",
+        "Replies then arrive from each unit's own IP and are matched to the device by the ID in the reply." },
+      { "The panel polls PING and every GET field each " .. props["Poll Interval (s)"].Value .. " s (property Poll Interval).",
+        "A unit that misses three polls shows as Missing; its next reply brings it back and triggers a full refresh." },
+      { "Settings the API flags REBOOT REQUIRED light the REBOOT REQ LED when the unit says so. Press REBOOT to apply them:",
+        REBOOT_FIELDS, REBOOT_FIELDS2 },
+      { "Advertised name and program info are quoted on the wire when they contain spaces. The encryption key is cut to 16 characters.",
+        "Static IP settings are only sent by APPLY CONFIG, never on each keystroke." },
+      { "Knob values are rounded to the API's 0.5 dB gain steps and 1 % power steps and sent once the knob rests,",
+        "so dragging a knob does not flood the unit." },
+    }
+    local ly = y + 24
+    for _, l in ipairs(lines) do
+      note("• " .. l[1], x + G, ly, PW - 2 * G)
+      note("   " .. l[2], x + G, ly + 13, PW - 2 * G)
+      if l[3] then note("   " .. l[3], x + G, ly + 26, PW - 2 * G); ly = ly + 13 end
+      ly = ly + 30
+    end
+    table.insert(graphics, { Type = "Label", Text = BrandName .. " " .. ProductName .. " plugin " .. PluginInfo.Version .. "  ·  " .. BrandSite .. "  ·  API reference v1.03 (FW 1.4.3+)", FontSize = 9, HTextAlign = "Right", Color = Brand.Muted, Position = { x, H - M - 12 }, Size = { PW, 12 } })
+  end
+
+  return layout, graphics
+end
+
+-- No audio pins, no embedded components: this is a pure control plugin.
+function GetPins(props) return {} end
+function GetComponents(props) return {} end
+function GetWiring(props) return {} end
+
+-- ============================================================
+-- Runtime
+-- ============================================================
+if Controls then
+  print(string.format("%s %s plugin %s – %s", BrandName, ProductName, PluginInfo.Version, BrandSite))
+
+  local N = Properties["Device Count"].Value
+  local POLL = Properties["Poll Interval (s)"].Value
+  local LOCAL_PORT = Properties["Local UDP Port"].Value
+  local IFACE = (Properties["Network Interface"] and Properties["Network Interface"].Value) or "Any"
+  local OFFLINE_AFTER = 3        -- missed polls before a unit is Missing
+  local TX_GAP = 0.03            -- seconds between queued datagrams
+  local KNOB_SETTLE = 0.15       -- seconds a knob must rest before SET
+  local LOG_LINES = 40
+
+  local function debugOn() return Properties["Debug"] and Properties["Debug"].Value end
+  local function dbg(...) if debugOn() then print(...) end end
+
+  -- A control declared with Count = 1 arrives as a single object, not a
+  -- one-element array. arr() normalises both shapes.
+  local function arr(c) return N == 1 and { c } or c end
+  local C = {}
+  for _, name in ipairs({
+    "IPAddress", "Port", "DeviceID", "Status", "Online", "Firmware", "RebootRequired", "Reboot", "Refresh", "Identify",
+    "BroadcastEnabled", "BroadcastName", "BroadcastPreset", "BroadcastType", "ProgramInfo1", "ProgramInfo2", "EncryptionEnabled", "EncryptionKey",
+    "InputGain1", "InputGain2", "InputMute1", "InputMute2", "InputLink", "MonoMix", "AGC", "LPF", "HPF1", "HPF2",
+    "TXPower", "Antenna", "LEDMode",
+    "StaticIPEnabled", "StaticIP", "StaticMask", "StaticGateway", "ApplyStaticIP",
+    "TimecodeEnabled", "TimecodeID", "TimecodePlay", "TimecodeTimestamp", "TimecodeOffset", "SendTimecode",
+    "RawCommand", "SendRaw", "LastResponse", "LastError", "Log",
+  }) do
+    C[name] = arr(Controls[name])
+  end
+
+  -- ---------- helpers ----------
+  local function trim(s) return (tostring(s or ""):gsub("^%s+", ""):gsub("%s+$", "")) end
+  local function clamp(v, lo, hi) if v < lo then return lo elseif v > hi then return hi end return v end
+  local function round(v) return math.floor(v + 0.5) end
+  local function boolArg(b) return b and "1" or "0" end
+  local function parseBool(s)
+    s = tostring(s or ""):upper()
+    return s == "1" or s == "TRUE" or s == "ON"
+  end
+  local function quoteIfNeeded(s)
+    s = trim(s):gsub('"', "")
+    if s:find("%s") then return '"' .. s .. '"' end
+    return s
+  end
+  local function unquote(s)
+    s = trim(s)
+    if #s >= 2 and s:sub(1, 1) == '"' and s:sub(-1) == '"' then s = s:sub(2, -2) end
+    return s
+  end
+  local function isMulticast(ip)
+    local a = tonumber(ip:match("^(%d+)%."))
+    return a ~= nil and a >= 224 and a <= 239
+  end
+
+  local function deviceIP(d) return trim(C.IPAddress[d].String) end
+  local function devicePort(d)
+    local p = tonumber(trim(C.Port[d].String))
+    if not p or p < 1 or p > 65535 then return DEFAULT_PORT end
+    return math.floor(p)
+  end
+  local function deviceID(d)
+    local id = tonumber(trim(C.DeviceID[d].String))
+    if not id then return DEFAULT_DEVICE_ID end
+    return math.floor(clamp(id, 0, 255))
+  end
+
+  -- ---------- per-device state ----------
+  local missed, online, rebooting, logLines = {}, {}, {}, {}
+  for d = 1, N do missed[d] = 0; online[d] = false; rebooting[d] = false; logLines[d] = {} end
+
+  local function log(d, line)
+    local t = logLines[d]
+    table.insert(t, line)
+    while #t > LOG_LINES do table.remove(t, 1) end
+    C.Log[d].String = table.concat(t, "\n")
+    dbg(string.format("[%d] %s", d, line))
+  end
+
+  local function setStatus(d, value, text)
+    C.Status[d].Value = value
+    C.Status[d].String = text
+  end
+
+  local function refreshStatus(d)
+    if deviceIP(d) == "" then
+      setStatus(d, 3, "No IP address set")
+    elseif not online[d] then
+      if rebooting[d] and missed[d] < OFFLINE_AFTER * 4 then
+        setStatus(d, 5, "Rebooting, waiting for the unit to answer")
+      else
+        setStatus(d, 4, string.format("No reply from %s:%d", deviceIP(d), devicePort(d)))
+      end
+    elseif C.RebootRequired[d].Boolean then
+      setStatus(d, 1, "Reboot required to apply changes")
+    else
+      local fw = trim(C.Firmware[d].String)
+      setStatus(d, 0, fw ~= "" and ("Online, firmware " .. fw) or "Online")
+    end
+    C.Online[d].Boolean = online[d]
+  end
+
+  -- ---------- UDP socket + send queue ----------
+  local sock = UdpSocket.New()
+  local txQueue, txTimer, txRunning = {}, Timer.New(), false
+
+  local function pump()
+    local item = table.remove(txQueue, 1)
+    if item then
+      local ok, err = pcall(function() sock:Send(item.ip, item.port, item.line .. "\n") end)
+      if not ok then log(item.d, "send failed: " .. tostring(err)) end
+    end
+    if #txQueue == 0 then txTimer:Stop(); txRunning = false end
+  end
+  txTimer.EventHandler = pump
+
+  local function send(d, body)
+    local ip = deviceIP(d)
+    if ip == "" then return end
+    local line = string.format("Device#%d %s", deviceID(d), body)
+    table.insert(txQueue, { d = d, ip = ip, port = devicePort(d), line = line })
+    log(d, "> " .. line)
+    if not txRunning then txRunning = true; txTimer:Start(TX_GAP) end
+  end
+
+  local function openSocket()
+    -- The unit replies to port 9000 on the sender, so the Core must own
+    -- that port. Try the bind forms in order; the last resort is an
+    -- ephemeral port, which only works if the unit answers the source port.
+    local attempts = {}
+    local function anyInterface()
+      table.insert(attempts, { desc = string.format("all interfaces, port %d", LOCAL_PORT), fn = function() sock:Open(nil, LOCAL_PORT) end })
+      table.insert(attempts, { desc = string.format("all interfaces (0.0.0.0), port %d", LOCAL_PORT), fn = function() sock:Open("0.0.0.0", LOCAL_PORT) end })
+      table.insert(attempts, { desc = string.format("all interfaces (empty address), port %d", LOCAL_PORT), fn = function() sock:Open("", LOCAL_PORT) end })
+    end
+    local ifaces = {}
+    if type(Network) == "table" and type(Network.Interfaces) == "function" then
+      local okI, list = pcall(Network.Interfaces)
+      if okI and type(list) == "table" then
+        for _, i in ipairs(list) do
+          if type(i) == "table" and i.Address and i.Address ~= "" then table.insert(ifaces, i) end
+        end
+      end
+    end
+    local function addInterface(i)
+      local addr = i.Address
+      table.insert(attempts, { desc = string.format("%s (%s), port %d", tostring(i.Interface or "interface"), addr, LOCAL_PORT), fn = function() sock:Open(addr, LOCAL_PORT) end })
+    end
+    if IFACE == "Any" then
+      anyInterface()
+      for _, i in ipairs(ifaces) do addInterface(i) end
+    else
+      -- the chosen interface first; the others only as a fallback
+      local found = false
+      for _, i in ipairs(ifaces) do
+        if tostring(i.Interface or ""):upper() == IFACE:upper() then addInterface(i); found = true end
+      end
+      if not found then
+        Controls.SocketStatus.String = string.format("Interface %s not found on this Core; ", IFACE)
+      end
+      anyInterface()
+      for _, i in ipairs(ifaces) do
+        if tostring(i.Interface or ""):upper() ~= IFACE:upper() then addInterface(i) end
+      end
+    end
+    table.insert(attempts, { desc = "ephemeral port (replies to port " .. LOCAL_PORT .. " will not arrive)", fn = function() sock:Open() end })
+    local errors = {}
+    local prefix = Controls.SocketStatus.String or ""
+    for _, a in ipairs(attempts) do
+      local ok, err = pcall(a.fn)
+      if ok then
+        Controls.SocketStatus.String = prefix .. "Open on " .. a.desc
+        return true
+      end
+      table.insert(errors, tostring(err))
+    end
+    Controls.SocketStatus.String = prefix .. "Could not open the UDP socket: " .. table.concat(errors, " | ")
+    return false
+  end
+
+  -- ---------- outgoing commands ----------
+  local function gainToApi(db) return math.floor(clamp(round((db + 12) * 2), 0, 88)) end
+  local function apiToGain(n) return clamp(tonumber(n) or 24, 0, 88) / 2 - 12 end
+
+  local function sendBool(d, field, b) send(d, string.format("SET %s %s", field, boolArg(b))) end
+  local function sendEnum(d, field, enum, label)
+    local token = EnumToken(enum, label)
+    if token then send(d, string.format("SET %s %s", field, token)) end
+  end
+  local function sendGain(d) send(d, string.format("SET input.gain %d %d", gainToApi(C.InputGain1[d].Value), gainToApi(C.InputGain2[d].Value))) end
+  local function sendMute(d) send(d, string.format("SET input.mute %s %s", boolArg(C.InputMute1[d].Boolean), boolArg(C.InputMute2[d].Boolean))) end
+  local function sendTXPower(d) send(d, string.format("SET tx_power_pct %d", math.floor(clamp(round(C.TXPower[d].Value), 0, 100)))) end
+
+  local function timecodeID(d)
+    local id = tonumber(trim(C.TimecodeID[d].String)) or 0
+    return math.floor(clamp(id, 0, 99))
+  end
+  local function sendTimecode(d)
+    local ts = tonumber(trim(C.TimecodeTimestamp[d].String)) or 0
+    ts = math.floor(clamp(ts, 0, 4294967295))
+    send(d, string.format("SET timecode %d %s %d", timecodeID(d), boolArg(C.TimecodePlay[d].Boolean), ts))
+  end
+  local function sendTimecodeOffset(d)
+    local off = tonumber(trim(C.TimecodeOffset[d].String))
+    if off == nil then return end
+    send(d, string.format("SET timecode.offsets %d %d", timecodeID(d), math.floor(off)))
+  end
+
+  local function queryAll(d)
+    for _, f in ipairs({
+      "version", "broadcast.enabled", "broadcast.names.0", "broadcast.preset", "broadcast.type",
+      "broadcast.dualmono.ch1.programInfo", "broadcast.dualmono.ch2.programInfo",
+      "broadcast.encryption.enabled", "broadcast.encryption.key",
+      "input.gain", "input.mute", "input.link", "input.mono_mix", "agc.enabled", "filters.lpf",
+      "filters.hpf 0", "filters.hpf 1", "tx_power_pct", "antsel.ant_mode",
+      "static_ip.enabled", "static_ip.config", "leds.mode", "leds.blink", "timecode.enabled",
+    }) do
+      send(d, "GET " .. f)
+    end
+    send(d, string.format("GET timecode %d", timecodeID(d)))
+    send(d, string.format("GET timecode.offsets %d", timecodeID(d)))
+  end
+
+  -- Knob settle: coalesce a burst of knob events into one SET.
+  local pendingKnob = {}
+  local function settle(key, fn)
+    pendingKnob[key] = fn
+    Timer.CallAfter(function()
+      local f = pendingKnob[key]
+      if f == fn then pendingKnob[key] = nil; f() end
+    end, KNOB_SETTLE)
+  end
+
+  -- ---------- incoming replies ----------
+  local function setCombo(ctl, enum, value)
+    local label = EnumLabel(enum, value)
+    if label then ctl.String = label end
+  end
+
+  -- field name -> handler(d, args, rest) where args = whitespace tokens
+  -- after the field name and rest = the raw remainder of the line.
+  local fields = {}
+  fields["version"] = function(d, a, rest) C.Firmware[d].String = rest end
+  fields["broadcast.enabled"] = function(d, a) C.BroadcastEnabled[d].Boolean = parseBool(a[1]) end
+  fields["broadcast.names.0"] = function(d, a, rest) C.BroadcastName[d].String = unquote(rest) end
+  fields["broadcast.preset"] = function(d, a) setCombo(C.BroadcastPreset[d], "preset", a[1]) end
+  fields["broadcast.type"] = function(d, a) setCombo(C.BroadcastType[d], "btype", a[1]) end
+  fields["broadcast.dualmono.ch1.programInfo"] = function(d, a, rest) C.ProgramInfo1[d].String = unquote(rest) end
+  fields["broadcast.dualmono.ch2.programInfo"] = function(d, a, rest) C.ProgramInfo2[d].String = unquote(rest) end
+  fields["broadcast.encryption.enabled"] = function(d, a) C.EncryptionEnabled[d].Boolean = parseBool(a[1]) end
+  fields["broadcast.encryption.key"] = function(d, a, rest) C.EncryptionKey[d].String = unquote(rest) end
+  fields["input.gain"] = function(d, a)
+    if a[1] then C.InputGain1[d].Value = apiToGain(a[1]) end
+    if a[2] then C.InputGain2[d].Value = apiToGain(a[2]) end
+  end
+  fields["input.mute"] = function(d, a)
+    if a[1] then C.InputMute1[d].Boolean = parseBool(a[1]) end
+    if a[2] then C.InputMute2[d].Boolean = parseBool(a[2]) end
+  end
+  fields["input.link"] = function(d, a) C.InputLink[d].Boolean = parseBool(a[1]) end
+  fields["input.mono_mix"] = function(d, a) C.MonoMix[d].Boolean = parseBool(a[1]) end
+  fields["agc.enabled"] = function(d, a) C.AGC[d].Boolean = parseBool(a[1]) end
+  fields["filters.lpf"] = function(d, a) setCombo(C.LPF[d], "lpf", a[1]) end
+  fields["filters.hpf"] = function(d, a)
+    local ch = tonumber(a[1])
+    if ch == 0 then setCombo(C.HPF1[d], "hpf", a[2]) elseif ch == 1 then setCombo(C.HPF2[d], "hpf", a[2]) end
+  end
+  fields["tx_power_pct"] = function(d, a) local v = tonumber(a[1]); if v then C.TXPower[d].Value = clamp(v, 0, 100) end end
+  fields["antsel.ant_mode"] = function(d, a) setCombo(C.Antenna[d], "antenna", a[1]) end
+  fields["static_ip.enabled"] = function(d, a) C.StaticIPEnabled[d].Boolean = parseBool(a[1]) end
+  fields["static_ip.config"] = function(d, a)
+    C.StaticIP[d].String = a[1] or ""
+    C.StaticMask[d].String = a[2] or ""
+    C.StaticGateway[d].String = a[3] or ""
+  end
+  fields["leds.mode"] = function(d, a) setCombo(C.LEDMode[d], "leds", a[1]) end
+  fields["leds.blink"] = function(d, a) C.Identify[d].Boolean = parseBool(a[1]) end
+  fields["timecode.enabled"] = function(d, a) C.TimecodeEnabled[d].Boolean = parseBool(a[1]) end
+  fields["timecode"] = function(d, a)
+    -- only mirror the timecode slot the panel is looking at
+    if tonumber(a[1]) ~= timecodeID(d) then return end
+    local st = tostring(a[2] or ""):upper()
+    C.TimecodePlay[d].Boolean = (st == "1" or st == "PLAY")
+    if a[3] then C.TimecodeTimestamp[d].String = a[3] end
+  end
+  fields["timecode.offsets"] = function(d, a)
+    if tonumber(a[1]) ~= timecodeID(d) then return end
+    if a[2] then C.TimecodeOffset[d].String = a[2] end
+  end
+  fields["controller.id"] = function(d, a) if a[1] then C.DeviceID[d].String = a[1] end end
+  fields["controller.port"] = function(d, a) end   -- shown in the log only
+
+  local function handleLine(d, line)
+    line = trim(line)
+    if line == "" then return end
+    log(d, "< " .. line)
+    local id, body = line:match("^Device#(%d+)%s*(.*)$")
+    body = body or line
+    body = trim(body)
+    local upper = body:upper()
+    if upper == "OK" then
+      return
+    elseif upper == "PONG" then
+      return
+    elseif upper == "REBOOTING" then
+      C.RebootRequired[d].Boolean = false
+      C.LastResponse[d].String = body
+      online[d] = false
+      rebooting[d] = true
+      missed[d] = 0
+      return
+    elseif upper == "REBOOT REQUIRED" then
+      C.RebootRequired[d].Boolean = true
+      refreshStatus(d)
+      return
+    elseif upper:sub(1, 3) == "ERR" then
+      C.LastError[d].String = body
+      C.LastResponse[d].String = body
+      return
+    end
+    C.LastResponse[d].String = body
+    local field, rest = body:match("^(%S+)%s*(.*)$")
+    if not field then return end
+    local args = {}
+    for tok in rest:gmatch("%S+") do table.insert(args, tok) end
+    local h = fields[field]
+    if h then
+      local ok, err = pcall(h, d, args, rest)
+      if not ok then log(d, "parse error: " .. tostring(err)) end
+    end
+  end
+
+  local function deviceForPacket(packet)
+    -- Match the sender's IP first; when a device is addressed through a
+    -- multicast group its replies come from its own IP, so fall back to
+    -- the device ID in the reply, and finally to the only device there is.
+    for d = 1, N do
+      if deviceIP(d) == packet.Address then return d end
+    end
+    local id = tonumber(tostring(packet.Data):match("Device#(%d+)"))
+    if id then
+      local found
+      for d = 1, N do
+        if isMulticast(deviceIP(d)) and (deviceID(d) == id or deviceID(d) == 0) then
+          if found then return nil end   -- ambiguous
+          found = d
+        end
+      end
+      if found then return found end
+    end
+    if N == 1 then return 1 end
+    return nil
+  end
+
+  sock.EventHandler = function(s, packet)
+    local d = deviceForPacket(packet)
+    if not d then
+      dbg("reply from unknown address " .. tostring(packet.Address) .. ": " .. tostring(packet.Data))
+      return
+    end
+    local wasOnline = online[d]
+    missed[d] = 0
+    online[d] = true
+    rebooting[d] = false
+    for line in tostring(packet.Data):gmatch("[^\r\n]+") do handleLine(d, line) end
+    if not wasOnline then
+      refreshStatus(d)
+      queryAll(d)
+    else
+      refreshStatus(d)
+    end
+  end
+
+  -- ---------- polling ----------
+  local pollTimer = Timer.New()
+  pollTimer.EventHandler = function()
+    for d = 1, N do
+      if deviceIP(d) ~= "" then
+        missed[d] = missed[d] + 1
+        if missed[d] >= OFFLINE_AFTER and online[d] then
+          online[d] = false
+          refreshStatus(d)
+        elseif missed[d] >= OFFLINE_AFTER then
+          refreshStatus(d)
+        end
+        send(d, "PING")
+        if online[d] then queryAll(d) end
+      else
+        online[d] = false
+        refreshStatus(d)
+      end
+    end
+  end
+
+  local function restartDevice(d)
+    missed[d] = 0
+    online[d] = false
+    rebooting[d] = false
+    C.RebootRequired[d].Boolean = false
+    C.Firmware[d].String = ""
+    C.LastError[d].String = ""
+    refreshStatus(d)
+    if deviceIP(d) ~= "" then
+      send(d, "PING")
+      queryAll(d)
+    end
+  end
+
+  -- ---------- event handlers ----------
+  for d = 1, N do
+    C.IPAddress[d].EventHandler = function() restartDevice(d) end
+    C.Port[d].EventHandler = function()
+      C.Port[d].String = tostring(devicePort(d))
+      restartDevice(d)
+    end
+    C.DeviceID[d].EventHandler = function()
+      C.DeviceID[d].String = tostring(deviceID(d))
+      restartDevice(d)
+    end
+    C.Refresh[d].EventHandler = function() queryAll(d) end
+    C.Reboot[d].EventHandler = function() send(d, "REBOOT") end
+    C.Identify[d].EventHandler = function() sendBool(d, "leds.blink", C.Identify[d].Boolean) end
+
+    C.BroadcastEnabled[d].EventHandler = function() sendBool(d, "broadcast.enabled", C.BroadcastEnabled[d].Boolean) end
+    C.BroadcastName[d].EventHandler = function()
+      local name = quoteIfNeeded(C.BroadcastName[d].String)
+      if name ~= "" then send(d, "SET broadcast.names.0 " .. name) end
+    end
+    C.BroadcastPreset[d].EventHandler = function() sendEnum(d, "broadcast.preset", "preset", C.BroadcastPreset[d].String) end
+    C.BroadcastType[d].EventHandler = function() sendEnum(d, "broadcast.type", "btype", C.BroadcastType[d].String) end
+    C.ProgramInfo1[d].EventHandler = function()
+      local v = quoteIfNeeded(C.ProgramInfo1[d].String)
+      if v ~= "" then send(d, "SET broadcast.dualmono.ch1.programInfo " .. v) end
+    end
+    C.ProgramInfo2[d].EventHandler = function()
+      local v = quoteIfNeeded(C.ProgramInfo2[d].String)
+      if v ~= "" then send(d, "SET broadcast.dualmono.ch2.programInfo " .. v) end
+    end
+    C.EncryptionEnabled[d].EventHandler = function() sendBool(d, "broadcast.encryption.enabled", C.EncryptionEnabled[d].Boolean) end
+    C.EncryptionKey[d].EventHandler = function()
+      local key = trim(C.EncryptionKey[d].String):gsub("%s", "")
+      if #key > 16 then key = key:sub(1, 16) end
+      C.EncryptionKey[d].String = key
+      if key ~= "" then send(d, "SET broadcast.encryption.key " .. key) end
+    end
+
+    C.InputGain1[d].EventHandler = function() settle("gain" .. d, function() sendGain(d) end) end
+    C.InputGain2[d].EventHandler = function() settle("gain" .. d, function() sendGain(d) end) end
+    C.InputMute1[d].EventHandler = function() sendMute(d) end
+    C.InputMute2[d].EventHandler = function() sendMute(d) end
+    C.InputLink[d].EventHandler = function() sendBool(d, "input.link", C.InputLink[d].Boolean) end
+    C.MonoMix[d].EventHandler = function() sendBool(d, "input.mono_mix", C.MonoMix[d].Boolean) end
+    C.AGC[d].EventHandler = function() sendBool(d, "agc.enabled", C.AGC[d].Boolean) end
+    C.LPF[d].EventHandler = function() sendEnum(d, "filters.lpf", "lpf", C.LPF[d].String) end
+    C.HPF1[d].EventHandler = function() sendEnum(d, "filters.hpf 0", "hpf", C.HPF1[d].String) end
+    C.HPF2[d].EventHandler = function() sendEnum(d, "filters.hpf 1", "hpf", C.HPF2[d].String) end
+
+    C.TXPower[d].EventHandler = function() settle("tx" .. d, function() sendTXPower(d) end) end
+    C.Antenna[d].EventHandler = function() sendEnum(d, "antsel.ant_mode", "antenna", C.Antenna[d].String) end
+    C.LEDMode[d].EventHandler = function() sendEnum(d, "leds.mode", "leds", C.LEDMode[d].String) end
+
+    C.StaticIPEnabled[d].EventHandler = function() sendBool(d, "static_ip.enabled", C.StaticIPEnabled[d].Boolean) end
+    C.ApplyStaticIP[d].EventHandler = function()
+      local ip, mask, gw = trim(C.StaticIP[d].String), trim(C.StaticMask[d].String), trim(C.StaticGateway[d].String)
+      if ip == "" or mask == "" or gw == "" then
+        C.LastError[d].String = "Static IP: fill in address, mask and gateway first"
+        return
+      end
+      send(d, string.format("SET static_ip.config %s %s %s", ip, mask, gw))
+    end
+
+    C.TimecodeEnabled[d].EventHandler = function() sendBool(d, "timecode.enabled", C.TimecodeEnabled[d].Boolean) end
+    C.TimecodeID[d].EventHandler = function()
+      C.TimecodeID[d].String = tostring(timecodeID(d))
+      send(d, string.format("GET timecode %d", timecodeID(d)))
+      send(d, string.format("GET timecode.offsets %d", timecodeID(d)))
+    end
+    C.TimecodePlay[d].EventHandler = function() sendTimecode(d) end
+    C.TimecodeTimestamp[d].EventHandler = function() sendTimecode(d) end
+    C.SendTimecode[d].EventHandler = function() sendTimecode(d) end
+    C.TimecodeOffset[d].EventHandler = function() sendTimecodeOffset(d) end
+
+    local function sendRaw()
+      local cmd = trim(C.RawCommand[d].String)
+      if cmd ~= "" then send(d, cmd) end
+    end
+    C.RawCommand[d].EventHandler = sendRaw
+    C.SendRaw[d].EventHandler = sendRaw
+  end
+
+  -- ---------- init ----------
+  local function init()
+    for d = 1, N do
+      C.BroadcastPreset[d].Choices = EnumChoices("preset")
+      C.BroadcastType[d].Choices = EnumChoices("btype")
+      C.LPF[d].Choices = EnumChoices("lpf")
+      C.HPF1[d].Choices = EnumChoices("hpf")
+      C.HPF2[d].Choices = EnumChoices("hpf")
+      C.Antenna[d].Choices = EnumChoices("antenna")
+      C.LEDMode[d].Choices = EnumChoices("leds")
+      if trim(C.Port[d].String) == "" then C.Port[d].String = tostring(DEFAULT_PORT) end
+      if trim(C.DeviceID[d].String) == "" then C.DeviceID[d].String = tostring(DEFAULT_DEVICE_ID) end
+      if trim(C.TimecodeID[d].String) == "" then C.TimecodeID[d].String = "0" end
+      C.RebootRequired[d].Boolean = false
+      C.LastError[d].String = ""
+      C.Log[d].String = ""
+      setStatus(d, 5, "Initializing")
+    end
+    openSocket()
+    for d = 1, N do restartDevice(d) end
+    pollTimer:Start(POLL)
+  end
+
+  init()
+end

@@ -11,6 +11,7 @@ Q-SYS Designer plugins by Nikita Visual Arts.
 | Plugin | File | Version |
 |---|---|---|
 | Mic Mixer | `plugins/NikitaMicMixer.qplug` | 2.0.0 |
+| Bettear CASTER | `plugins/BettearCaster.qplug` | 1.0.0 |
 
 ## Mic Mixer
 
@@ -79,11 +80,83 @@ ear:
 If an engine shows **NOT AVAILABLE**, enable the *Debug* property and send
 the debug output together with the Q-SYS Designer version.
 
+## Bettear CASTER
+
+<p>
+  <img src="assets/brand/bettear-logo.png" alt="Bettear" width="100"><br>
+  Bettear – <a href="https://bettear.com">bettear.com</a> ·
+  <a href="https://bettear.com/products/caster">CASTER product page</a>
+</p>
+
+Control plugin for the Bettear CASTER Auracast streamer. It speaks the
+CASTER UDP API (reference v1.03, firmware 1.4.3 and above) and mirrors every
+documented field on one panel per unit: broadcast (enable, advertised name,
+preset, stereo/dual mono, program info), encryption, audio input (gain, mute,
+link, mono mix, AGC, low-pass, per-channel high-pass), RF (TX power, antenna),
+LEDs, static IP, timecode, plus a raw command box and a reply log. The plugin
+is branded with the Bettear word mark and website, not with mine.
+
+### Install
+
+1. Copy `plugins/BettearCaster.qplug` to your Q-SYS plugin folder
+   (`%USERPROFILE%\Documents\QSC\Q-Sys Designer\Plugins` on Windows).
+2. Restart Q-SYS Designer and drag **Bettear → CASTER** into the schematic.
+3. Set *Device Count* (one page per unit), *Poll Interval* and, if the Core
+   must use a different controller port, *Local UDP Port* (default 9000).
+   *Network Interface* stays on **Any** (the socket listens on every Core
+   interface) unless the units or the multicast group live on one specific
+   network; then pick LAN A, LAN B, AUX A or AUX B.
+4. On each device page enter the unit's IP address. Port 9000 and device ID
+   255 are filled in automatically; change them if your unit differs.
+
+### How it talks to the unit
+
+| Item | Behaviour |
+|---|---|
+| Transport | One UDP socket per plugin instance, bound to the controller port (9000). The CASTER answers to the sender's IP on that port, so the Core must own it. A second instance on the same Core cannot bind it: raise *Device Count* instead. |
+| Interface | *Network Interface* = Any binds all interfaces. A named interface binds that interface's address (looked up through the Core's network table) and falls back to Any if it is not found; the Setup page shows what was bound. |
+| Commands | `Device#<id> <command>` + LF. The panel sends SET when you change a control and GET for every field on each poll; PING keeps the Status LED honest. |
+| Status | OK = answering. Compromised = the unit reported REBOOT REQUIRED. Initializing = rebooting. Missing = three polls unanswered. Not Present = no IP set. |
+| Multicast | Enter a multicast group as the IP and 0 as the device ID to reach several units; replies are matched by the ID the unit puts in its answer. |
+| Knobs | Gain is rounded to the API's 0.5 dB steps (-12 … +32 dB), TX power to 1 %. Both are sent once the knob rests for 150 ms. |
+| Static IP | Only the **APPLY CONFIG** button sends address, mask and gateway, in one command. |
+| Raw command | Anything typed in the RAW COMMAND box is sent after the `Device#<id>` prefix, e.g. `GET version`. |
+
+Pins are exposed on the useful controls (IP address, online LED, reboot
+required, all broadcast/audio/RF settings, timecode) so a UCI or a script can
+drive the unit through the plugin.
+
+### Not verified on hardware
+
+This plugin was checked with a Lua 5.3 syntax check and an offline mock of
+the plugin host that includes a simulated CASTER implementing the documented
+protocol (every page's layout, control declarations, and the runtime for 1, 2
+and 3 devices, including a unit reached over multicast). It was not loaded in
+Q-SYS Designer or run on a Core, and it has never spoken to a real CASTER.
+Points that depend on that:
+
+- The exact form of `UdpSocket:Open` that binds only a port. The plugin tries
+  `Open(nil, port)`, `Open("0.0.0.0", port)`, `Open("", port)`, each Core
+  interface address, and finally an ephemeral port, and reports which one
+  worked on the Setup page.
+- Whether the unit's `OK` line carries the `Device#<id>` prefix, and whether
+  a quoted advertised name comes back with or without its quotes. Both forms
+  are accepted.
+- The default device ID. The API examples use 255 and `controller.id`
+  defaults to 255, so that is the preset; change it on the device page if
+  your unit answers to another ID.
+- Program info is quoted when it contains spaces, like the advertised name.
+  The API only states the quoting rule for the name.
+- Label wrapping in Designer: all notes are kept to single lines so nothing
+  depends on it.
+
 ### Repository layout
 
 ```
-plugins/NikitaMicMixer.qplug   the plugin
-assets/brand/                  logo files used by the plugin and this README
+plugins/NikitaMicMixer.qplug   Mic Mixer
+plugins/BettearCaster.qplug    Bettear CASTER control
+assets/brand/                  logo files used by the plugins and this README
+                               (bettear-logo.svg/.png belong to Bettear)
 ```
 
 ---
