@@ -11,7 +11,7 @@ Q-SYS Designer plugins by Nikita Visual Arts.
 | Plugin | File | Version |
 |---|---|---|
 | Mic Mixer | `plugins/NikitaMicMixer.qplug` | 2.0.0 |
-| Bettear CASTER | `plugins/BettearCaster.qplug` | 1.0.0 |
+| Bettear CASTER | `plugins/BettearCaster.qplug` | 1.0.1 |
 
 ## Mic Mixer
 

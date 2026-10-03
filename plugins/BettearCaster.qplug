@@ -16,8 +16,8 @@
 
 PluginInfo = {
   Name = "Bettear~CASTER",
-  Version = "1.0.0",
-  BuildVersion = "1.0.0.0",
+  Version = "1.0.1",
+  BuildVersion = "1.0.1.0",
   Id = "991bfdba-8a38-4556-a4f5-6b9d6dd64246",
   Author = "Bettear – bettear.com",
   Description = "Control for the Bettear CASTER Auracast streamer over its UDP API (v1.03, FW 1.4.3+): broadcast, encryption, audio input, RF, LEDs, network and timecode. bettear.com",
