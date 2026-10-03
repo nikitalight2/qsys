@@ -16,8 +16,8 @@
 
 PluginInfo = {
   Name = "Bettear~CASTER",
-  Version = "1.0.1",
-  BuildVersion = "1.0.1.0",
+  Version = "1.0.2",
+  BuildVersion = "1.0.2.0",
   Id = "991bfdba-8a38-4556-a4f5-6b9d6dd64246",
   Author = "Bettear – bettear.com",
   Description = "Control for the Bettear CASTER Auracast streamer over its UDP API (v1.03, FW 1.4.3+): broadcast, encryption, audio input, RF, LEDs, network and timecode. bettear.com",
@@ -97,10 +97,6 @@ function EnumLabel(name, value)
   end
   return nil
 end
-
--- Fields that the API flags REBOOT REQUIRED; listed on the Setup page.
-REBOOT_FIELDS = "controller.port, broadcast.enabled, broadcast.names.0, broadcast.preset, broadcast.type,"
-REBOOT_FIELDS2 = "broadcast.encryption.enabled, broadcast.encryption.key, filters.lpf, static_ip.enabled, static_ip.config"
 
 -- ============================================================
 -- Design time
@@ -191,6 +187,13 @@ function GetControls(props)
   -- Indicators
   add({ Name = "LEDMode", ControlType = "Text", PinStyle = "Both", UserPin = true })
 
+  -- Network (static IP). Applied only by the APPLY button.
+  add({ Name = "StaticIPEnabled", ControlType = "Button", ButtonType = "Toggle", PinStyle = "Both", UserPin = true })
+  add({ Name = "StaticIP", ControlType = "Text" })
+  add({ Name = "StaticMask", ControlType = "Text" })
+  add({ Name = "StaticGateway", ControlType = "Text" })
+  add({ Name = "ApplyStaticIP", ControlType = "Button", ButtonType = "Trigger" })
+
   -- Timecode
   add({ Name = "TimecodeEnabled", ControlType = "Button", ButtonType = "Toggle", PinStyle = "Both", UserPin = true })
   add({ Name = "TimecodeID", ControlType = "Text", PinStyle = "Both", UserPin = true })
@@ -199,8 +202,12 @@ function GetControls(props)
   add({ Name = "TimecodeOffset", ControlType = "Text", PinStyle = "Both", UserPin = true })
   add({ Name = "SendTimecode", ControlType = "Button", ButtonType = "Trigger", PinStyle = "Input", UserPin = true })
 
-  -- Global (one per plugin instance)
-  add({ Name = "SocketStatus", ControlType = "Indicator", IndicatorType = "Text", Count = 1 })
+  -- Raw command (anything after "Device#<id> "), last reply, log
+  add({ Name = "RawCommand", ControlType = "Text", PinStyle = "Input", UserPin = true })
+  add({ Name = "SendRaw", ControlType = "Button", ButtonType = "Trigger" })
+  add({ Name = "LastResponse", ControlType = "Indicator", IndicatorType = "Text", PinStyle = "Output" })
+  add({ Name = "LastError", ControlType = "Indicator", IndicatorType = "Text", PinStyle = "Output" })
+  add({ Name = "Log", ControlType = "Indicator", IndicatorType = "Text" })
 
   return c
 end
@@ -221,7 +228,9 @@ function GetControlLayout(props)
   local HALF = (PW - GAP) / 2     -- two-column panel (348)
   local THIRD = (PW - 2 * GAP) / 3 -- three-column panel (228)
 
-  local function idx(name) return name .. (n == 1 and "" or (" " .. d)) end
+  -- idx() follows curDev so the Setup page can place per-device controls for every unit
+  local curDev = d
+  local function idx(name) return name .. (n == 1 and "" or (" " .. curDev)) end
 
   local function panel(x, y, w, h, titleText)
     table.insert(graphics, { Type = "GroupBox", Fill = Brand.Panel, StrokeColor = Brand.Stroke, StrokeWidth = 1, CornerRadius = 4, Position = { x, y }, Size = { w, h } })
@@ -262,7 +271,8 @@ function GetControlLayout(props)
 
   -- Page heights
   local devH = 60 + 92 + GAP + 176 + GAP + 140 + M
-  local setupH = 60 + 108 + GAP + 236 + M
+  local DEV_BLOCK = (n > 1 and 18 or 0) + 116 + GAP + 150 + GAP
+  local setupH = HEADER + GAP + n * DEV_BLOCK - GAP + M
   local H = isSetup and setupH or devH
 
   -- Background + header band with the Bettear word mark (as supplied,
@@ -359,41 +369,45 @@ function GetControlLayout(props)
     trigger("SendTimecode", "SEND TIMECODE", tx + G, y + 106, THIRD - 2 * G)
 
   else
-    -- Setup page: socket state, notes, brand footer
+    -- Setup page: static IP, raw command and replies/log, one block per unit
     local y = HEADER + GAP
     local x = M
-    panel(x, y, PW, 108, "CONNECTION")
-    caption("UDP SOCKET", x + G, y + 22, 200)
-    layout["SocketStatus"] = { Style = "Text", HTextAlign = "Left", FontSize = 10, IsReadOnly = true, Position = { x + G, y + 34 }, Size = { PW - 2 * G, 22 } }
-    note(string.format("The CASTER listens on UDP %d and answers to the sender's IP on port %d, so the Core binds that port (property Local UDP Port).", DEFAULT_PORT, DEFAULT_PORT), x + G, y + 62, PW - 2 * G)
-    note("Property Network Interface: Any = every Core interface; pick LAN A/B or AUX when the units or the multicast group sit on one network.", x + G, y + 76, PW - 2 * G)
-    note("One socket serves every device of this instance. A second instance on the same Core cannot bind the same port: raise Device Count instead.", x + G, y + 90, PW - 2 * G)
+    for dev = 1, n do
+      curDev = dev
+      if n > 1 then
+        table.insert(graphics, { Type = "Label", Text = string.format("DEVICE %d", dev), FontSize = 10, FontStyle = "Bold", HTextAlign = "Left", Color = Brand.Accent, Position = { x, y + 2 }, Size = { PW, 12 } })
+        y = y + 18
+      end
+      local ry
+    panel(x, y, HALF, 116, "NETWORK (STATIC IP)")
+    ry = y + 22
+    caption("MODE", x + G, ry, 90)
+    toggle("StaticIPEnabled", "STATIC IP", x + G, ry + 12, 90, Brand.Accent)
+    field("StaticIP", "IP ADDRESS", x + 106, ry, 110)
+    field("StaticMask", "SUBNET MASK", x + 224, ry, HALF - 224 - G)
+    ry = y + 58
+    field("StaticGateway", "GATEWAY", x + G, ry, 110)
+    trigger("ApplyStaticIP", "APPLY CONFIG", x + 126, ry + 12, 100, Brand.Warn)
+    note("APPLY sends address, mask and gateway at once. Reboot required.", x + G, y + 96, HALF - 2 * G)
 
-    y = y + 108 + GAP
-    panel(x, y, PW, 236, "PROTOCOL NOTES")
-    local lines = {
-      { "Every command is  Device#<id> <command>  ended with LF. The unit answers OK, then the field with its value.",
-        "Errors come back as ERR bad_<type>, ERR range, ERR usage or ERR not_implemented; enable Debug to see them." },
-      { "Device ID 0 is a wildcard: set the IP address to a multicast group and the ID to 0 to reach several units at once.",
-        "Replies then arrive from each unit's own IP and are matched to the device by the ID in the reply." },
-      { "The panel polls PING and every GET field each " .. props["Poll Interval (s)"].Value .. " s (property Poll Interval).",
-        "A unit that misses three polls shows as Missing; its next reply brings it back and triggers a full refresh." },
-      { "Settings the API flags REBOOT REQUIRED light the REBOOT REQ LED when the unit says so. Press REBOOT to apply them:",
-        REBOOT_FIELDS, REBOOT_FIELDS2 },
-      { "Advertised name and program info are quoted on the wire when they contain spaces. The encryption key is cut to 16 characters.",
-        "Static IP, controller port and ID are left to the unit's own management page; the plugin never changes them." },
-      { "Knob values are rounded to the API's 0.5 dB gain steps and 1 % power steps and sent once the knob rests,",
-        "so dragging a knob does not flood the unit." },
-    }
-    local ly = y + 24
-    for _, l in ipairs(lines) do
-      note("• " .. l[1], x + G, ly, PW - 2 * G)
-      note("   " .. l[2], x + G, ly + 13, PW - 2 * G)
-      if l[3] then note("   " .. l[3], x + G, ly + 26, PW - 2 * G); ly = ly + 13 end
-      ly = ly + 30
+    local rx = x + HALF + GAP
+    panel(rx, y, HALF, 116, "RAW COMMAND")
+    ry = y + 22
+    field("RawCommand", "COMMAND (WITHOUT THE Device#<id> PREFIX)", rx + G, ry, HALF - 2 * G - 70)
+    trigger("SendRaw", "SEND", rx + HALF - G - 62, ry + 12, 62, Brand.Warn)
+    note("e.g.  GET version   or   SET leds.mode OFF", rx + G, ry + 40, HALF - 2 * G)
+    note("Press Enter in the box or click SEND.", rx + G, ry + 54, HALF - 2 * G)
+
+    y = y + 116 + GAP
+    panel(x, y, PW, 150, "REPLIES")
+    ry = y + 22
+    field("LastResponse", "LAST REPLY", x + G, ry, HALF - G)
+    field("LastError", "LAST ERROR", x + HALF + GAP, ry, HALF - G, true)
+    caption("LOG (NEWEST LAST)", x + G, y + 60, 200)
+    layout[idx("Log")] = { Style = "Text", HTextAlign = "Left", VTextAlign = "Top", FontSize = 8, IsReadOnly = true, WordWrap = true, Position = { x + G, y + 72 }, Size = { PW - 2 * G, 150 - 72 - G } }
+      y = y + 150 + GAP
     end
-
-    table.insert(graphics, { Type = "Label", Text = BrandName .. " " .. ProductName .. " plugin " .. PluginInfo.Version .. "  ·  " .. BrandSite .. "  ·  API reference v1.03 (FW 1.4.3+)", FontSize = 9, HTextAlign = "Right", Color = Brand.Muted, Position = { x, H - M - 12 }, Size = { PW, 12 } })
+    curDev = d
   end
 
   return layout, graphics
@@ -417,6 +431,7 @@ if Controls then
   local OFFLINE_AFTER = 3        -- missed polls before a unit is Missing
   local TX_GAP = 0.03            -- seconds between queued datagrams
   local KNOB_SETTLE = 0.15       -- seconds a knob must rest before SET
+  local LOG_LINES = 40
 
   local function debugOn() return Properties["Debug"] and Properties["Debug"].Value end
   local function dbg(...) if debugOn() then print(...) end end
@@ -430,7 +445,9 @@ if Controls then
     "BroadcastEnabled", "BroadcastName", "BroadcastPreset", "BroadcastType", "ProgramInfo1", "ProgramInfo2", "EncryptionEnabled", "EncryptionKey",
     "InputGain1", "InputGain2", "InputMute1", "InputMute2", "InputLink", "MonoMix", "AGC", "LPF", "HPF1", "HPF2",
     "TXPower", "Antenna", "LEDMode",
+    "StaticIPEnabled", "StaticIP", "StaticMask", "StaticGateway", "ApplyStaticIP",
     "TimecodeEnabled", "TimecodeID", "TimecodePlay", "TimecodeTimestamp", "TimecodeOffset", "SendTimecode",
+    "RawCommand", "SendRaw", "LastResponse", "LastError", "Log",
   }) do
     C[name] = arr(Controls[name])
   end
@@ -472,11 +489,16 @@ if Controls then
   end
 
   -- ---------- per-device state ----------
-  local missed, online, rebooting = {}, {}, {}
-  for d = 1, N do missed[d] = 0; online[d] = false; rebooting[d] = false end
+  local missed, online, rebooting, logLines = {}, {}, {}, {}
+  for d = 1, N do missed[d] = 0; online[d] = false; rebooting[d] = false; logLines[d] = {} end
 
-  -- Traffic goes to the debug output when the Debug property is on.
-  local function log(d, line) dbg(string.format("[%d] %s", d, line)) end
+  local function log(d, line)
+    local t = logLines[d]
+    table.insert(t, line)
+    while #t > LOG_LINES do table.remove(t, 1) end
+    C.Log[d].String = table.concat(t, "\n")
+    dbg(string.format("[%d] %s", d, line))
+  end
 
   local function setStatus(d, value, text)
     C.Status[d].Value = value
@@ -557,7 +579,7 @@ if Controls then
         if tostring(i.Interface or ""):upper() == IFACE:upper() then addInterface(i); found = true end
       end
       if not found then
-        Controls.SocketStatus.String = string.format("Interface %s not found on this Core; ", IFACE)
+        print(string.format("%s %s: interface %s not found on this Core, falling back", BrandName, ProductName, IFACE))
       end
       anyInterface()
       for _, i in ipairs(ifaces) do
@@ -566,16 +588,15 @@ if Controls then
     end
     table.insert(attempts, { desc = "ephemeral port (replies to port " .. LOCAL_PORT .. " will not arrive)", fn = function() sock:Open() end })
     local errors = {}
-    local prefix = Controls.SocketStatus.String or ""
     for _, a in ipairs(attempts) do
       local ok, err = pcall(a.fn)
       if ok then
-        Controls.SocketStatus.String = prefix .. "Open on " .. a.desc
+        print(string.format("%s %s: UDP socket open on %s", BrandName, ProductName, a.desc))
         return true
       end
       table.insert(errors, tostring(err))
     end
-    Controls.SocketStatus.String = prefix .. "Could not open the UDP socket: " .. table.concat(errors, " | ")
+    print(string.format("%s %s: could not open the UDP socket: %s", BrandName, ProductName, table.concat(errors, " | ")))
     return false
   end
 
@@ -614,7 +635,7 @@ if Controls then
       "broadcast.encryption.enabled", "broadcast.encryption.key",
       "input.gain", "input.mute", "input.link", "input.mono_mix", "agc.enabled", "filters.lpf",
       "filters.hpf 0", "filters.hpf 1", "tx_power_pct", "antsel.ant_mode",
-      "leds.mode", "leds.blink", "timecode.enabled",
+      "static_ip.enabled", "static_ip.config", "leds.mode", "leds.blink", "timecode.enabled",
     }) do
       send(d, "GET " .. f)
     end
@@ -668,6 +689,12 @@ if Controls then
   end
   fields["tx_power_pct"] = function(d, a) local v = tonumber(a[1]); if v then C.TXPower[d].Value = clamp(v, 0, 100) end end
   fields["antsel.ant_mode"] = function(d, a) setCombo(C.Antenna[d], "antenna", a[1]) end
+  fields["static_ip.enabled"] = function(d, a) C.StaticIPEnabled[d].Boolean = parseBool(a[1]) end
+  fields["static_ip.config"] = function(d, a)
+    C.StaticIP[d].String = a[1] or ""
+    C.StaticMask[d].String = a[2] or ""
+    C.StaticGateway[d].String = a[3] or ""
+  end
   fields["leds.mode"] = function(d, a) setCombo(C.LEDMode[d], "leds", a[1]) end
   fields["leds.blink"] = function(d, a) C.Identify[d].Boolean = parseBool(a[1]) end
   fields["timecode.enabled"] = function(d, a) C.TimecodeEnabled[d].Boolean = parseBool(a[1]) end
@@ -699,6 +726,7 @@ if Controls then
       return
     elseif upper == "REBOOTING" then
       C.RebootRequired[d].Boolean = false
+      C.LastResponse[d].String = body
       online[d] = false
       rebooting[d] = true
       missed[d] = 0
@@ -708,9 +736,11 @@ if Controls then
       refreshStatus(d)
       return
     elseif upper:sub(1, 3) == "ERR" then
-      print(string.format("%s %s device %d: %s", BrandName, ProductName, d, body))
+      C.LastError[d].String = body
+      C.LastResponse[d].String = body
       return
     end
+    C.LastResponse[d].String = body
     local field, rest = body:match("^(%S+)%s*(.*)$")
     if not field then return end
     local args = {}
@@ -790,6 +820,7 @@ if Controls then
     rebooting[d] = false
     C.RebootRequired[d].Boolean = false
     C.Firmware[d].String = ""
+    C.LastError[d].String = ""
     refreshStatus(d)
     if deviceIP(d) ~= "" then
       send(d, "PING")
@@ -850,6 +881,16 @@ if Controls then
     C.Antenna[d].EventHandler = function() sendEnum(d, "antsel.ant_mode", "antenna", C.Antenna[d].String) end
     C.LEDMode[d].EventHandler = function() sendEnum(d, "leds.mode", "leds", C.LEDMode[d].String) end
 
+    C.StaticIPEnabled[d].EventHandler = function() sendBool(d, "static_ip.enabled", C.StaticIPEnabled[d].Boolean) end
+    C.ApplyStaticIP[d].EventHandler = function()
+      local ip, mask, gw = trim(C.StaticIP[d].String), trim(C.StaticMask[d].String), trim(C.StaticGateway[d].String)
+      if ip == "" or mask == "" or gw == "" then
+        C.LastError[d].String = "Static IP: fill in address, mask and gateway first"
+        return
+      end
+      send(d, string.format("SET static_ip.config %s %s %s", ip, mask, gw))
+    end
+
     C.TimecodeEnabled[d].EventHandler = function() sendBool(d, "timecode.enabled", C.TimecodeEnabled[d].Boolean) end
     C.TimecodeID[d].EventHandler = function()
       C.TimecodeID[d].String = tostring(timecodeID(d))
@@ -861,6 +902,12 @@ if Controls then
     C.SendTimecode[d].EventHandler = function() sendTimecode(d) end
     C.TimecodeOffset[d].EventHandler = function() sendTimecodeOffset(d) end
 
+    local function sendRaw()
+      local cmd = trim(C.RawCommand[d].String)
+      if cmd ~= "" then send(d, cmd) end
+    end
+    C.RawCommand[d].EventHandler = sendRaw
+    C.SendRaw[d].EventHandler = sendRaw
   end
 
   -- ---------- init ----------
@@ -877,6 +924,8 @@ if Controls then
       if trim(C.DeviceID[d].String) == "" then C.DeviceID[d].String = tostring(DEFAULT_DEVICE_ID) end
       if trim(C.TimecodeID[d].String) == "" then C.TimecodeID[d].String = "0" end
       C.RebootRequired[d].Boolean = false
+      C.LastError[d].String = ""
+      C.Log[d].String = ""
       setStatus(d, 5, "Initializing")
     end
     openSocket()

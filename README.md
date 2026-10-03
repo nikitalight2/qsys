@@ -11,7 +11,7 @@ Q-SYS Designer plugins by Nikita Visual Arts.
 | Plugin | File | Version |
 |---|---|---|
 | Mic Mixer | `plugins/NikitaMicMixer.qplug` | 2.0.0 |
-| Bettear CASTER | `plugins/BettearCaster.qplug` | 1.0.1 |
+| Bettear CASTER | `plugins/BettearCaster.qplug` | 1.0.2 |
 
 ## Mic Mixer
 
@@ -93,9 +93,9 @@ CASTER UDP API (reference v1.03, firmware 1.4.3 and above) and mirrors every
 documented field on one panel per unit: broadcast (enable, advertised name,
 preset, stereo/dual mono, program info), encryption, audio input (gain, mute,
 link, mono mix, AGC, low-pass, per-channel high-pass), RF (TX power, antenna),
-LEDs and timecode. Static IP, controller port and ID stay on the unit's own
-management page. The plugin is branded with the Bettear word mark and website,
-not with mine.
+LEDs and timecode. Static IP, a raw command box and the reply log live on
+the Setup page, one block per unit. The plugin is branded with the Bettear
+word mark and website, not with mine.
 
 ### Install
 
@@ -106,7 +106,8 @@ not with mine.
    must use a different controller port, *Local UDP Port* (default 9000).
    *Network Interface* stays on **Any** (the socket listens on every Core
    interface) unless the units or the multicast group live on one specific
-   network; then pick LAN A, LAN B, AUX A or AUX B.
+   network; then pick LAN A, LAN B, AUX A or AUX B. The bound interface and
+   port are printed to the debug output at start.
 4. On each device page enter the unit's IP address. Port 9000 and device ID
    255 are filled in automatically; change them if your unit differs.
 
@@ -115,12 +116,14 @@ not with mine.
 | Item | Behaviour |
 |---|---|
 | Transport | One UDP socket per plugin instance, bound to the controller port (9000). The CASTER answers to the sender's IP on that port, so the Core must own it. A second instance on the same Core cannot bind it: raise *Device Count* instead. |
-| Interface | *Network Interface* = Any binds all interfaces. A named interface binds that interface's address (looked up through the Core's network table) and falls back to Any if it is not found; the Setup page shows what was bound. |
+| Interface | *Network Interface* = Any binds all interfaces. A named interface binds that interface's address (looked up through the Core's network table) and falls back to Any if it is not found; the debug output shows what was bound. |
 | Commands | `Device#<id> <command>` + LF. The panel sends SET when you change a control and GET for every field on each poll; PING keeps the Status LED honest. |
 | Status | OK = answering. Compromised = the unit reported REBOOT REQUIRED. Initializing = rebooting. Missing = three polls unanswered. Not Present = no IP set. |
 | Multicast | Enter a multicast group as the IP and 0 as the device ID to reach several units; replies are matched by the ID the unit puts in its answer. |
 | Knobs | Gain is rounded to the API's 0.5 dB steps (-12 … +32 dB), TX power to 1 %. Both are sent once the knob rests for 150 ms. |
-| Errors | `ERR ...` replies are printed to the debug output (turn on the *Debug* property to see all traffic). |
+| Static IP | Setup page. Only the **APPLY CONFIG** button sends address, mask and gateway, in one command. |
+| Raw command | Setup page. Anything typed in the RAW COMMAND box is sent after the `Device#<id>` prefix, e.g. `GET version`. |
+| Replies | Setup page. Last reply, last error and a log of the newest 40 lines per unit. |
 
 Pins are exposed on the useful controls (IP address, online LED, reboot
 required, all broadcast/audio/RF settings, timecode) so a UCI or a script can
@@ -137,8 +140,8 @@ Points that depend on that:
 
 - The exact form of `UdpSocket:Open` that binds only a port. The plugin tries
   `Open(nil, port)`, `Open("0.0.0.0", port)`, `Open("", port)`, each Core
-  interface address, and finally an ephemeral port, and reports which one
-  worked on the Setup page.
+  interface address, and finally an ephemeral port, and prints which one
+  worked to the debug output.
 - Whether the unit's `OK` line carries the `Device#<id>` prefix, and whether
   a quoted advertised name comes back with or without its quotes. Both forms
   are accepted. The plugin itself loads and renders in Q-SYS Designer 10.5
@@ -148,8 +151,6 @@ Points that depend on that:
   your unit answers to another ID.
 - Program info is quoted when it contains spaces, like the advertised name.
   The API only states the quoting rule for the name.
-- Label wrapping in Designer: all notes are kept to single lines so nothing
-  depends on it.
 
 ### Repository layout
 
