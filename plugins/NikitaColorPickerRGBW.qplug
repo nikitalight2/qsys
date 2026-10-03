@@ -2,21 +2,22 @@
 --  Nikita Visual Arts – nikitavisual.art
 --  Color Picker (RGBW) for Q-SYS
 --
---  A basic colour picker: one vertical hue strip (the rainbow
---  bar), a brightness knob and a white-mix knob. The chosen
---  colour comes out as four RGBW values (Red / Green / Blue /
---  White) on control pins, plus a combined "R,G,B,W" string,
---  ready to feed an LED controller.
+--  A basic colour picker: a touchable vertical hue bar (24 hue
+--  steps of 15 degrees, stacked like the rainbow strip of the
+--  Q-SYS Designer colour picker), a brightness knob and a
+--  white-mix knob. The chosen colour comes out as four RGBW
+--  values (Red / Green / Blue / White) on control pins, plus a
+--  combined "R,G,B,W" string, ready to feed an LED controller.
 --  Built from the Nikita Visual Arts Q-SYS Plugin Template.
 -- ============================================================
 
 PluginInfo = {
   Name = "Nikita Visual Arts~Color Picker RGBW",
-  Version = "1.1.0",
-  BuildVersion = "1.1.0.0",
+  Version = "1.2.0",
+  BuildVersion = "1.2.0.0",
   Id = "7c2a9d4e-5b31-4f8a-9e6d-2f1c8b7a3d55",
   Author = "Nikita Visual Arts – nikitavisual.art",
-  Description = "Basic colour picker: hue strip + brightness + white mix, output as RGBW values. Nikita Visual Arts – nikitavisual.art",
+  Description = "Basic colour picker: touchable hue bar (24 steps) + brightness + white mix, output as RGBW values. Nikita Visual Arts – nikitavisual.art",
   ShowDebug = false,
 }
 
@@ -52,8 +53,24 @@ NikitaAssets = {
 -- Colour maths (design time AND runtime)
 -- ============================================================
 HUE_MAX = 360
-DEFAULT_HUE = 0          -- red
+HUE_STEPS = 24           -- one button per 15 degrees
+HUE_STEP = HUE_MAX / HUE_STEPS
+DEFAULT_SEGMENT = 1      -- top of the bar = red (360)
 CHANNELS = { "Red", "Green", "Blue", "White" }
+
+-- Segment k (1 = top of the bar) -> hue in degrees. Red at the top
+-- (360) running down through magenta, blue, cyan, green, yellow to
+-- orange-red at the bottom, the same order as the Designer picker.
+function SegmentHue(k) return HUE_MAX - (k - 1) * HUE_STEP end
+
+-- Hue in degrees -> nearest segment.
+function HueToSegment(h)
+  h = h % HUE_MAX
+  if h == 0 then h = HUE_MAX end
+  local k = math.floor((HUE_MAX - h) / HUE_STEP + 0.5) + 1
+  if k < 1 then k = 1 elseif k > HUE_STEPS then k = HUE_STEPS end
+  return k
+end
 
 -- Hue (degrees) at full saturation and full value -> r, g, b in 0..255.
 function HueToRGB(h)
@@ -142,8 +159,12 @@ function GetControls(props)
 
   table.insert(ctls, { Name = "Status", ControlType = "Indicator", IndicatorType = "Status", PinStyle = "Output", Count = 1 })
 
-  -- The three inputs: hue (the rainbow strip), master brightness, white mix.
-  table.insert(ctls, { Name = "Hue", ControlType = "Knob", ControlUnit = "Integer", Min = 0, Max = HUE_MAX, DefaultValue = DEFAULT_HUE, Count = 1, PinStyle = "Both", UserPin = true })
+  -- The hue bar: one toggle per segment; the runtime keeps exactly one on.
+  table.insert(ctls, { Name = "Segment", ControlType = "Button", ButtonType = "Toggle", Count = HUE_STEPS, PinStyle = "Both", UserPin = true })
+  -- Hue in degrees, kept in step with the bar (set it from outside and the
+  -- bar snaps to the nearest segment).
+  table.insert(ctls, { Name = "Hue", ControlType = "Knob", ControlUnit = "Integer", Min = 0, Max = HUE_MAX, DefaultValue = SegmentHue(DEFAULT_SEGMENT), Count = 1, PinStyle = "Both", UserPin = true })
+  -- Master brightness and white mix.
   table.insert(ctls, { Name = "Brightness", ControlType = "Knob", ControlUnit = "Percent", Min = 0, Max = 100, DefaultValue = 100, Count = 1, PinStyle = "Both", UserPin = true })
   table.insert(ctls, { Name = "WhiteMix", ControlType = "Knob", ControlUnit = "Percent", Min = 0, Max = 100, DefaultValue = 0, Count = 1, PinStyle = "Both", UserPin = true })
 
@@ -169,11 +190,13 @@ function GetControlLayout(props)
   -- sections, 8 px between controls.
   local HEADER, M, GAP, G = 48, 16, 12, 8
 
-  -- Left panel: the hue strip (image) with a vertical fader beside it.
-  local STRIP_W, FADER_W, STRIP_H = 56, 44, 288
+  -- Left panel: the touchable hue bar (a stack of segment buttons) with
+  -- the hue angle box under it.
+  local BAR_W, SEG_H = 96, 12
+  local BAR_H = HUE_STEPS * SEG_H
   local hueX, hueY = M, HEADER + GAP
-  local hueW = 12 + STRIP_W + G + FADER_W + 12
-  local panelH = 32 + STRIP_H + 12
+  local hueW = 12 + BAR_W + 12
+  local panelH = 32 + BAR_H + G + 24 + 12
 
   -- Right panel: preview, brightness + white knobs, channel values, string.
   local PREV_Y, KNOB_Y, CH_Y = 32, 92, 164
@@ -182,7 +205,6 @@ function GetControlLayout(props)
   local outX = hueX + hueW + GAP
   local outW = 232
   panelH = math.max(panelH, STR_Y + 12 + 24 + 12)
-  STRIP_H = panelH - 32 - 12
 
   local W = outX + outW + M
   local H = hueY + panelH + M
@@ -197,6 +219,10 @@ function GetControlLayout(props)
 
   local function title(text, pos, size)
     table.insert(graphics, { Type = "Label", Text = text, FontSize = 10, FontStyle = "Bold", HTextAlign = "Left", Color = Nikita.Muted, Position = pos, Size = size })
+  end
+
+  local function dim(r, g, b, f)
+    return { math.floor(r * f), math.floor(g * f), math.floor(b * f) }
   end
 
   -- Background + header: icon, brand name and website on the left,
@@ -216,21 +242,32 @@ function GetControlLayout(props)
   table.insert(graphics, { Type = "GroupBox", Fill = Nikita.Pink, StrokeWidth = 0, CornerRadius = 0, Position = { seg, HEADER - 2 }, Size = { seg, 2 } })
   table.insert(graphics, { Type = "GroupBox", Fill = Nikita.Orange, StrokeWidth = 0, CornerRadius = 0, Position = { 2 * seg, HEADER - 2 }, Size = { W - 2 * seg, 2 } })
 
-  -- ----- Hue panel: rainbow strip + fader -----
+  -- ----- Hue panel: the touchable bar -----
   panel({ hueX, hueY }, { hueW, panelH })
   title("H U E", { hueX + 12, hueY + 10 }, { hueW - 24, 12 })
-  local stripX, stripY = hueX + 12, hueY + 32
-  table.insert(graphics, { Type = "GroupBox", Fill = Nikita.Stroke, StrokeWidth = 0, CornerRadius = 4, Position = { stripX - 1, stripY - 1 }, Size = { STRIP_W + 2, STRIP_H + 2 } })
-  table.insert(graphics, { Type = "Image", Image = NikitaAssets.Hue, Position = { stripX, stripY }, Size = { STRIP_W, STRIP_H } })
-  -- Fader runs 0 (bottom, red) .. 360 (top, red) in step with the strip.
-  layout["Hue"] = { Style = "Fader", Color = Nikita.Magenta, ShowTextbox = true, Position = { stripX + STRIP_W + G, stripY }, Size = { FADER_W, STRIP_H } }
+  local barX, barY = hueX + 12, hueY + 32
+  -- The rainbow image sits under the buttons so any hairline gaps between
+  -- segments still read as part of the bar.
+  table.insert(graphics, { Type = "GroupBox", Fill = Nikita.Stroke, StrokeWidth = 0, CornerRadius = 4, Position = { barX - 1, barY - 1 }, Size = { BAR_W + 2, BAR_H + 2 } })
+  table.insert(graphics, { Type = "Image", Image = NikitaAssets.Hue, Position = { barX, barY }, Size = { BAR_W, BAR_H } })
+  -- One button per segment: selected = full colour, others at 72 %.
+  for k = 1, HUE_STEPS do
+    local r, g, b = HueToRGB(SegmentHue(k))
+    layout["Segment " .. k] = {
+      Style = "Button", ButtonStyle = "Toggle", Legend = "",
+      Color = { r, g, b }, UnlinkOffColor = true, OffColor = dim(r, g, b, 0.72),
+      CornerRadius = 0, Margin = 0, Position = { barX, barY + (k - 1) * SEG_H }, Size = { BAR_W, SEG_H },
+    }
+  end
+  -- Hue angle, editable: type a value and the bar snaps to it.
+  layout["Hue"] = { Style = "Text", HTextAlign = "Center", FontSize = 11, Position = { barX, barY + BAR_H + G }, Size = { BAR_W, 24 } }
 
   -- ----- Output panel -----
   panel({ outX, hueY }, { outW, panelH })
   title("O U T P U T", { outX + 12, hueY + 10 }, { outW - 24, 12 })
 
   -- Preview lamp + colour name.
-  local pr, pg, pb = HueToRGB(DEFAULT_HUE)
+  local pr, pg, pb = HueToRGB(SegmentHue(DEFAULT_SEGMENT))
   layout["Preview"] = { Style = "Led", Color = { pr, pg, pb }, Position = { outX + 12, hueY + PREV_Y }, Size = { 44, 44 } }
   caption("SELECTED", { outX + 64, hueY + PREV_Y + 2 }, { outW - 76, 10 }, "Left")
   layout["ColorName"] = { Style = "Text", HTextAlign = "Left", FontSize = 12, IsReadOnly = true, Position = { outX + 64, hueY + PREV_Y + 16 }, Size = { outW - 76, 24 } }
@@ -280,6 +317,9 @@ if Controls then
 
   local Out = {}
   for _, ch in ipairs(CHANNELS) do Out[ch] = Controls[ch] end
+  local Segment = Controls.Segment
+  local current = DEFAULT_SEGMENT
+  local busy = false   -- guards against re-entrant EventHandlers while we set controls
 
   local function toHex(r, g, b)
     return string.format("#%02X%02X%02X", r, g, b)
@@ -323,9 +363,43 @@ if Controls then
     dbg(string.format("[Color Picker] hue %d %s -> %s", math.floor(hue + 0.5), name, Controls.RGBW.String))
   end
 
-  Controls.Hue.EventHandler = update
+  -- Radio behaviour on the bar: one segment lit, the Hue box in step.
+  local function select(k)
+    if busy then return end
+    busy = true
+    current = k
+    for i = 1, HUE_STEPS do Segment[i].Boolean = (i == k) end
+    Controls.Hue.Value = SegmentHue(k)
+    busy = false
+    update()
+  end
+
+  for k = 1, HUE_STEPS do
+    Segment[k].EventHandler = function(ctl)
+      if busy then return end
+      if ctl.Boolean then
+        select(k)
+      elseif k == current then
+        busy = true
+        ctl.Boolean = true   -- un-pressing the lit segment is ignored
+        busy = false
+      end
+    end
+  end
+  -- Hue set from the box or a pin: snap the bar to the nearest segment.
+  Controls.Hue.EventHandler = function()
+    if busy then return end
+    select(HueToSegment(Controls.Hue.Value))
+  end
   Controls.Brightness.EventHandler = update
   Controls.WhiteMix.EventHandler = update
 
-  update()
+  -- Start-up: restore the segment the design saved as lit, else the Hue
+  -- value, else the default.
+  local saved
+  for k = 1, HUE_STEPS do
+    if Segment[k].Boolean then saved = saved or k end
+  end
+  if not saved and Controls.Hue.Value then saved = HueToSegment(Controls.Hue.Value) end
+  select(saved or DEFAULT_SEGMENT)
 end

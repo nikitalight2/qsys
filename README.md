@@ -11,7 +11,7 @@ Q-SYS Designer plugins by Nikita Visual Arts.
 | Plugin | File | Version |
 |---|---|---|
 | Mic Mixer | `plugins/NikitaMicMixer.qplug` | 2.0.0 |
-| Color Picker RGBW | `plugins/NikitaColorPickerRGBW.qplug` | 1.1.0 |
+| Color Picker RGBW | `plugins/NikitaColorPickerRGBW.qplug` | 1.2.0 |
 
 ## Mic Mixer
 
@@ -83,22 +83,23 @@ the debug output together with the Q-SYS Designer version.
 ## Color Picker RGBW
 
 A basic colour picker for RGBW LED fixtures, built around the vertical hue
-strip from the Q-SYS Designer colour picker: a rainbow bar with a fader
-beside it, a brightness knob and a white-mix knob. No saturation or value
-plane and no 16-million-colour picker. You pick a hue, set how bright it
-is and how much of the white emitter to add, and the plugin puts the four
-channel values on its output pins.
+strip from the Q-SYS Designer colour picker. The bar is touchable: it is a
+stack of 24 colour buttons, one per 15° of hue, from red at the top down
+through magenta, blue, cyan, green and yellow. Tap a segment to pick that
+hue, then set brightness and how much of the white emitter to add. No
+saturation plane and no 16-million-colour picker.
 
 ### Controls
 
 | Control | Type | What it does |
 |---|---|---|
-| **Hue** | fader, input/output pin | 0 to 360 degrees, bottom to top, matching the strip (red, yellow, green, cyan, blue, magenta, red) |
+| **Segment 1..24** | toggle, input/output pin | the bar; exactly one is lit. 1 = red (360°), 24 = orange-red (15°) |
+| **Hue** | integer, input/output pin | hue in degrees, shown in the box under the bar. Type or send any value and the bar snaps to the nearest segment |
 | **Brightness** | knob, input/output pin | 0 to 100 %, master dimmer for all four channels |
 | **WhiteMix** | knob, input/output pin | 0 to 100 %, level of the W emitter on top of the hue |
 | **Red**, **Green**, **Blue**, **White** | knob, output pin | one value per emitter channel |
-| **RGBW** | text, output pin | all four as one string, e.g. `0,38,255,0` |
-| **ColorName** | text, output pin | plain name and angle of the hue, e.g. `Blue  231°` |
+| **RGBW** | text, output pin | all four as one string, e.g. `0,64,255,0` |
+| **ColorName** | text, output pin | plain name and angle of the hue, e.g. `Blue  225°` |
 
 The *Output Scale* property sets the range of the four value pins:
 `0-255` (default, integers), `0-100` (percent) or `0-1` (floats with three
@@ -106,7 +107,8 @@ decimals). The RGBW string follows the same scale.
 
 The hue is converted at full saturation, so R, G and B carry the pure
 colour and the W channel is driven only by *WhiteMix*. Brightness 0 is a
-blackout on all four channels.
+blackout on all four channels. To change the number of steps, edit
+`HUE_STEPS` at the top of the plugin.
 
 ### Install
 
@@ -117,17 +119,18 @@ blackout on all four channels.
 3. Wire the **Red / Green / Blue / White** pins (or the **RGBW** string) to
    whatever drives the fixture, for example the percent inputs of an sACN
    Transmit block.
+4. For a touch panel, drag the plugin's Segment buttons, Brightness and
+   WhiteMix onto the UCI; the segments can be resized to suit a finger.
 
 ### Not verified on hardware
 
 Checked with a Lua syntax check and an offline mock of the plugin host
-(design-time functions, layout bounds, the hue maths at every 30° step,
-and the runtime at all three output scales). It was not loaded in Q-SYS
-Designer or run on a Core. Two points depend on the Q-SYS build: the
-rainbow strip is an embedded PNG drawn next to a standard fader, so the
-fader's handle sits beside the strip rather than on it, and the preview
-lamp is recoloured from the runtime through the control's `Color`
-property.
+(design-time functions, layout bounds, segment-to-hue maths for every
+segment, and the runtime at all three output scales). It was not loaded in
+Q-SYS Designer or run on a Core. Two points depend on the Q-SYS build: the
+segment buttons rely on `UnlinkOffColor` and a zero margin to sit flush
+and show the dimmed unselected look, and the preview lamp is recoloured
+from the runtime through the control's `Color` property.
 
 ### Repository layout
 
