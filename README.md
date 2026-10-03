@@ -11,6 +11,7 @@ Q-SYS Designer plugins by Nikita Visual Arts.
 | Plugin | File | Version |
 |---|---|---|
 | Mic Mixer | `plugins/NikitaMicMixer.qplug` | 2.0.0 |
+| Color Picker RGBW | `plugins/NikitaColorPickerRGBW.qplug` | 1.0.0 |
 
 ## Mic Mixer
 
@@ -79,11 +80,61 @@ ear:
 If an engine shows **NOT AVAILABLE**, enable the *Debug* property and send
 the debug output together with the Q-SYS Designer version.
 
+## Color Picker RGBW
+
+A basic colour picker for RGBW LED fixtures: 16 fixed swatches in a 4 x 4
+grid plus a brightness knob. No colour wheel and no 16-million-colour
+picker, just the colours you actually call for on a show: red, orange,
+amber, yellow, lime, green, mint, cyan, sky, blue, violet, magenta, pink,
+warm white, white and off.
+
+Press a swatch and the plugin puts the four channel values on its output
+pins, scaled by brightness. Exactly one swatch is lit at a time.
+
+### Outputs
+
+| Control | Type | What it carries |
+|---|---|---|
+| **Red**, **Green**, **Blue**, **White** | knob, output pin | one value per emitter channel |
+| **RGBW** | text, output pin | all four as one string, e.g. `255,96,0,0` |
+| **ColorName** | text, output pin | name of the lit swatch, e.g. `Warm White` |
+| **Swatch 1..16** | toggle, input/output pin | select a colour from a UCI or another block |
+| **Brightness** | knob, input/output pin | 0 to 100 %, applied to all four channels |
+
+The *Output Scale* property sets the range of the four value pins:
+`0-255` (default, integers), `0-100` (percent) or `0-1` (floats with three
+decimals). The RGBW string follows the same scale.
+
+Saturated colours drive R, G and B only. *White* drives the W emitter only,
+*Warm White* adds red and amber on top of W, and *Off* sends zeros on all
+four channels (a blackout). The channel values are hand-set in the
+`PALETTE` table at the top of the plugin, so a colour can be retuned to a
+fixture by editing four numbers.
+
+### Install
+
+1. Copy `plugins/NikitaColorPickerRGBW.qplug` to your Q-SYS plugin folder
+   (`%USERPROFILE%\Documents\QSC\Q-Sys Designer\Plugins` on Windows).
+2. Restart Q-SYS Designer and drag **Nikita Visual Arts → Color Picker RGBW**
+   into the schematic.
+3. Wire the **Red / Green / Blue / White** pins (or the **RGBW** string) to
+   whatever drives the fixture.
+
+### Not verified on hardware
+
+Checked with a Lua syntax check and an offline mock of the plugin host
+(design-time functions, layout bounds, and the runtime for every swatch at
+all three output scales). It was not loaded in Q-SYS Designer or run on a
+Core. Two points depend on the Q-SYS build: the preview lamp is recoloured
+from the runtime through the control's `Color` property, and the swatch
+buttons rely on `UnlinkOffColor` for their dimmed unselected look.
+
 ### Repository layout
 
 ```
-plugins/NikitaMicMixer.qplug   the plugin
-assets/brand/                  logo files used by the plugin and this README
+plugins/NikitaMicMixer.qplug          Mic Mixer
+plugins/NikitaColorPickerRGBW.qplug   Color Picker RGBW
+assets/brand/                         logo files used by the plugins and this README
 ```
 
 ---
