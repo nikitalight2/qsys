@@ -76,7 +76,7 @@ def layout(q, page_index):
 def test_joystick_controls_pins_and_choices():
     q = boot()
     names = q.control_names()
-    assert len(names) == 26 + len(MODE_CONTROLS)
+    assert len(names) == 27 + len(MODE_CONTROLS)
     for n in MODE_CONTROLS:
         assert n in names, n
     for n in CAMERA_CONTROLS:
@@ -553,4 +553,33 @@ def test_joystick_zoom_speed_applies_to_the_zoom_in_progress():
     assert cam("return cam.zoomSpeed") == 0
     q.set_pin("ZoomSpeed", 50)
     assert cam("return cam.zoomSpeed") == 0
+    assert q.errors == []
+
+
+def test_joystick_held_home_pin_homes_once_on_its_rising_edge():
+    # A Home pin held longer than the pulse guard (a UCI button held down, a
+    # toggle wired to Home) homes on its rising edge only: its release must
+    # not re-centre a stick the finger is holding, nor send the camera home
+    # a second time. PTZ Pad and Camera Framing already behave this way.
+    q = demo()
+    q.run("TouchPad.__homes = 0; local h = TouchPad.E.camera.home; "
+          "TouchPad.E.camera.home = function(...) TouchPad.__homes = TouchPad.__homes + 1; return h(...) end")
+    q.set_pin("Home", True)
+    q.advance(0.8)                                           # held past HOME_GUARD
+    q.touch([(120, 120), (160, 150), (200, 200)], lift=False)
+    jx, jy = joy(q)[0], joy(q)[1]
+    assert jx < -0.1 and jy > 0.1
+    q.set_pin("Home", False)                                 # trailing edge mid-drag
+    assert q.run("return TouchPad.__homes") == 1
+    assert joy(q)[0] == jx and joy(q)[1] == jy               # the stick stays under the finger
+    q.lift()
+    q.advance(0.5)
+    q.trigger("Home")                                        # ctl:Trigger(): no edge, homes once
+    assert q.run("return TouchPad.__homes") == 2
+    q.trigger("Home")                                        # within HOME_GUARD: a pulse's echo, ignored
+    assert q.run("return TouchPad.__homes") == 2
+    q.advance(0.6)
+    q.set_pin("Home", True)                                  # a plain pulse still homes exactly once
+    q.set_pin("Home", False)
+    assert q.run("return TouchPad.__homes") == 3
     assert q.errors == []

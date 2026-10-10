@@ -511,12 +511,43 @@ return { status = "ok", modes = report }
 """
 
 
+LOCALS_LIMIT = 200       # Lua 5.3: active local variables per function (the main chunk is one)
+LOCALS_MARGIN = 24       # free local slots the main chunk must keep for future modules
+
+
+def locals_headroom(lua, source):
+    """How many more top-level locals the chunk could declare before Lua
+    refuses it ("too many local variables"): the largest n <= LOCALS_LIMIT
+    for which the source plus n appended locals still compiles."""
+    def compiles(n):
+        extra = "\nlocal " + ", ".join("_headroom_%d" % i for i in range(n)) + "\n"
+        try:
+            lua.compile(source + extra)
+            return True
+        except lupa.LuaSyntaxError as exc:
+            if "too many local variables" in str(exc):
+                return False
+            raise
+    lo, hi = 0, LOCALS_LIMIT
+    while lo < hi:
+        mid = (lo + hi + 1) // 2
+        if compiles(mid):
+            lo = mid
+        else:
+            hi = mid - 1
+    return lo
+
+
 def compile_and_smoke(source, starts, verbose):
     lua = lupa.LuaRuntime(unpack_returned_tuples=True)
     try:
         chunk = lua.compile(source)
     except lupa.LuaSyntaxError as exc:
         raise BuildError("syntax error: %s" % locate(starts, str(exc)))
+    headroom = locals_headroom(lua, source)
+    if headroom < LOCALS_MARGIN:
+        raise BuildError("the main chunk keeps only %d of Lua's %d local slots free (margin %d): wrap the "
+                         "module's top-level locals in a do ... end block" % (headroom, LOCALS_LIMIT, LOCALS_MARGIN))
     try:
         chunk()
     except lupa.LuaError as exc:
@@ -544,7 +575,8 @@ def compile_and_smoke(source, starts, verbose):
             lines.append("  %-16s pages %d  controls %3d  layout %3d  variants %d"
                          % (row["mode"], row["pages"], row["controls"], row["layout"], row["variants"]))
     head = ("smoke: %d modes, %d property variants passed GetProperties / GetPages / GetControls / "
-            "GetControlLayout on every page and the layout lint" % (count, variants))
+            "GetControlLayout on every page and the layout lint; main chunk keeps %d of %d local slots free"
+            % (count, variants, headroom, LOCALS_LIMIT))
     return "\n".join([head] + lines)
 
 

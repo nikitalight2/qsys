@@ -6,7 +6,7 @@
 
 # Touch Pad for Q-SYS: user guide
 
-Version 1.0.0. The plugin is `plugins/NikitaTouchPad.qplug`. The pin reference built from
+Version 1.0.1. The plugin is `plugins/NikitaTouchPad.qplug`. The pin reference built from
 it is [PINS.md](PINS.md); the build and test tools are described in
 `tools/touchpad/README.md`.
 
@@ -244,7 +244,7 @@ hidden.
 | Accent Color | `#RRGGBB` | blank | Custom theme only: highlights. Blank or invalid keeps the Nikita accent. |
 | Background Color | `#RRGGBB` | blank | Custom theme only: the pad's background; cards, tracks and hairlines are derived from it, and so is the color the Display page prints. |
 | Text Color | `#RRGGBB` | blank | Custom theme only: text; muted text is mixed from it and the background. |
-| Background | Solid, Transparent, Panel | Solid | Solid fills the pad with the theme's background color. Transparent draws no pad background or frame, so the page art shows through. Panel fills it with the theme's lighter panel color. |
+| Background | Solid, Transparent, Panel | Solid | Solid fills the pad with the theme's background color. Transparent draws no pad background or frame, so the page art shows through. Panel fills it with the theme's lighter panel color at 80 % opacity, so the page art shows through slightly. |
 | Corner Radius | 0..40 | 18 | The radius of the pad's frame. |
 | Font | font family name | Roboto | The font for text in the drawing, followed by Roboto and sans-serif as fallbacks. Use a font the panel or the UCI style has (for example `Heebo Bold`). Text widths are estimated from Roboto metrics. |
 
@@ -288,6 +288,7 @@ control's name for `Component.New` (see [PINS.md](PINS.md) for the full list per
 |---|---|---|---|---|
 | Setup ~ Status | `Status` | Indicator Status | out | The plugin's state: `OK - Ready...` or the problem (see [Status messages](#status-messages-and-troubleshooting)). Also the LED in every page header. |
 | none | `Display` | Button | | The pad's drawing: copy it from the Display page onto the UCI three times. It is disabled at run time so touches pass through it. |
+| none | `SetupVersion` | Text | | On the About page. Blank until the first start, when the plugin writes the documented defaults of its toggles (Source Active, Allow Calls, Exclusive Columns, Masked, Auto Submit, Show Background) once and records `1` here; after that your own settings of those toggles are kept. |
 | Setup ~ Picker | `Picker` | Text | in | The picker's Code Name at run time; blank uses the Color Picker property. Changing it rebinds. |
 | Setup ~ Refresh | `Refresh` | Trigger | in | Rescans the design for the picker and rebinds. |
 | Setup ~ Panel Touch | `PanelTouch` | Toggle | in | Wire the TSC's Status/Control > Touch Activity here for exact press and release and for long press. Leave it off when nothing is wired to it. |
@@ -427,8 +428,9 @@ Designer has no Touch Activity, so the limits of the first list apply in Emulate
 - **Background = Solid** fills the pad with the theme's background color and draws a 1 px
   frame in the theme's line color with the Corner Radius. Use the pad color above.
 - **Background = Panel** fills the pad with the theme's panel color instead (the color of
-  the cards and tiles), so the whole pad reads as one card. Use the panel color above under
-  the copies; in 1.0.0 the Display page still prints the Solid value.
+  the cards and tiles) at 80 % opacity, so the whole pad reads as one card with the page art
+  showing through slightly. Leave the box out, as for Transparent; the Display page prints
+  `Pad colour: none (Panel: r,g,b at 80 % over the page art)` with the panel color above.
 - **Background = Transparent** draws no pad background and no frame, so the page art shows
   through, and the Display page says `Pad colour: none`. The mode's own cards, tiles and
   readouts still draw. Leave the box out.
@@ -450,6 +452,10 @@ These notes come from the Gesture Pad project's published experience with the sa
 technique; this plugin has not been opened in Designer yet (see
 [What has been tested, honestly](#what-has-been-tested-honestly)).
 
+- **Long pin arrays are paged on the Outputs pages**: an output array longer than 16 is shown
+  as mini cells (32 per row), 512 per page; a 64 x 64 Matrix therefore has `Outputs` to
+  `Outputs 9` (4096 Cross toggles and 64 Route knobs), a 32 x 32 one three pages. Every
+  element keeps its pin; the pages only keep Designer's layout work per page small.
 - **Emulate redraws the UCI page lazily**: the pad can look a second or more behind. The
   plugin itself reacts within a frame (Debug Print = Gestures shows the timing), and the
   block's own Pad page updates sooner than the UCI tab. Designer 10.5 is reported to redraw
@@ -540,86 +546,589 @@ they land.
 
 ## Per mode
 
+Every chapter lists only what the mode adds to the [common pins](#common-pins-and-controls).
+Pins are named `Group ~ Name`; the Lua name in backticks is what a script uses through
+`Component.New`. An `n` after a name marks an array whose length comes from a property.
+Camera modes (Joystick, PTZ Pad, Camera Framing, Dial) also carry the Camera group when
+Camera Control is not None: `ZoomIn`, `ZoomOut`, `MaxSpeed`, `ZoomSpeed`, `CameraStatus`,
+`CameraIP` (VISCA over IP) and the `CameraView` display (Demo).
+
 ### XY Pad
 
-Filled in after the mode's tests pass.
+The plainest mode and the one to start with: a card with a dotted grid, crosshair lines that
+follow the finger and a dot at the finger. Hint: `Drag anywhere`. It adds no control of its
+own; everything it reports is the common set: `X` and `Y` live while touching and held after
+the lift, `Touching`, the `Tap`, `DoubleTap`, `LongPress`, `Press`, `Release` and swipe
+pulses, `Gesture`, `DragDistance` and `DragAngle`. Pages: Pad, Setup, Outputs, Display, About.
+
+Use it to drive anything that wants two 0..1 values (a pan and tilt pair, an effect's two
+parameters, a two-axis light position) or as the mode for checking the picker binding and the
+calibration: the dot must sit under the finger everywhere on the pad.
 
 ### Swipe Layer
 
-Filled in after the mode's tests pass.
+A pad that shows almost nothing: a finger trail that fades behind the touch and a brief
+chevron in the direction of a recognised swipe. Hint: `Swipe in any direction`. It is meant
+to sit over page art as an invisible gesture layer, usually with Background = Transparent.
+
+| Pin | Lua name | Type | Dir | What it does |
+|---|---|---|---|---|
+| Setup ~ Swipe Distance | `SwipeDistance` | Knob, 0.05..0.8 | in | Default 0.2. Fraction of the pad diagonal a swipe must cover. |
+
+Behaviour: a swipe needs distance and speed, at most 0.6 s from the start of its stroke to
+the lift, with one axis at least 1.5 times the other. The swipe pulses are the common
+`SwipeLeft`, `SwipeRight`, `SwipeUp` and `SwipeDown`. Quick swipes in a row each count: with
+Panel Touch wired every lift is certain; without it, a finger that lands again after a gap of
+more than three reports, or a report that jumps across the pad, starts a new stroke and the
+stroke that just ended is classified and pulsed at once. A second swipe within 0.25 s of the
+first is not lost.
+
+Recipe (UCI pages): put the Swipe Layer on a UCI layer that is on every page, set the UCI's
+Swipe Disabled on so Q-SYS does not flip pages itself, and let a Text Controller turn the
+pulses into `Uci.SetPage`:
+
+```lua
+local pad = Component.New("Swipe_Pad")               -- the block's Code Name
+local UCI, PAGES = "Lobby UCI", { "Welcome", "Rooms", "Help" }
+local page = 1
+local function show() Uci.SetPage(UCI, PAGES[page]) end
+pad.SwipeLeft.EventHandler = function(ctl)
+  if ctl.Boolean and page < #PAGES then page = page + 1; show() end
+end
+pad.SwipeRight.EventHandler = function(ctl)
+  if ctl.Boolean and page > 1 then page = page - 1; show() end
+end
+```
+
+The full version is in [Recipes](#recipes).
 
 ### Joystick
 
-Filled in after the mode's tests pass.
+A virtual stick: it sits where the finger is, measured from the centre of the pad and scaled
+by the base radius (the rim is full travel). Hint: `Drag the stick. Double tap: home`. Pages:
+Pad, Setup, Camera View (Demo camera), Outputs, Display, About.
+
+| Pin | Lua name | Type | Dir | What it does |
+|---|---|---|---|---|
+| Joystick ~ Joy X | `JoyX` | Knob, -1..1 | out | The stick's horizontal position, -1 left to 1 right. |
+| Joystick ~ Joy Y | `JoyY` | Knob, -1..1 | out | The stick's vertical position, -1 down to 1 up. |
+| Joystick ~ Magnitude | `Magnitude` | Knob, 0..1 | out | How far the stick is from the centre. |
+| Joystick ~ Dir Left / Right / Up / Down | `DirLeft`, `DirRight`, `DirUp`, `DirDown` | LED | out | Eight-way direction sectors. |
+| Joystick ~ Deadzone | `Deadzone` | Knob, 0..0.5 | in | Default 0.08. Radius around the centre that outputs zero. |
+| Joystick ~ Curve | `Curve` | Text, Linear / Squared / Cubed | in | The response curve. |
+| Joystick ~ Sticky | `Sticky` | Toggle | in | On: the stick stays where it is left. Off: it springs back over 0.15 s. |
+| Joystick ~ Home | `Home` | Trigger | both | Re-centres the stick and sends the camera home; pulses when the pad does it. |
+| Joystick ~ Invert Pan / Invert Tilt | `InvertPan`, `InvertTilt` | Toggle | both | Mirror an axis. |
+
+Properties: Camera Control, Camera Name and VISCA Brand (see [Camera](#camera)). With a
+camera the stick's output drives pan and tilt at up to Max Speed; Zoom In and Zoom Out drive
+the zoom at Zoom Speed; the Demo camera's scene is drawn on the Camera View. Safety: a Panel
+Touch that sticks on is released after 30 s without movement, and a Home pin held longer than
+half a second homes once, on its rising edge. Lock returns the stick to the centre.
 
 ### PTZ Pad
 
-Filled in after the mode's tests pass.
+Drag to aim. The pad is a map of everything the camera can reach: a drag moves the aim like
+a trackpad (relative, scaled by Sensitivity), a plain tap moves nothing and a double tap
+sends the aim home. Hint: `Drag to aim. Double tap = home`. Pages as Joystick.
+
+| Pin | Lua name | Type | Dir | What it does |
+|---|---|---|---|---|
+| PTZ Pad ~ Pan / Tilt | `Pan`, `Tilt` | Knob, 0..1 | out | Absolute aim; 0.5 is home. |
+| PTZ Pad ~ Pan Speed / Tilt Speed | `PanSpeed`, `TiltSpeed` | Knob, -1..1 | out | Speed while dragging; 1 is one pad width per half second. |
+| PTZ Pad ~ Dir Left / Right / Up / Down | `DirLeft`, `DirRight`, `DirUp`, `DirDown` | LED | out | Which way the aim is moving. |
+| PTZ Pad ~ Sensitivity | `Sensitivity` | Knob, 0.2..3 | in | Default 1. How far the aim moves for a given drag. |
+| PTZ Pad ~ Home | `Home` | Trigger | both | Sends the aim and the camera home. |
+| PTZ Pad ~ Invert Pan / Invert Tilt | `InvertPan`, `InvertTilt` | Toggle | both | Mirror a direction. |
+| Camera ~ HFOV | `HFOV` | Knob, 20..120 | in | Default 60. The camera's horizontal field of view in degrees; sizes the view box. |
+| Camera ~ Optical Zoom | `OpticalZoom` | Knob, 1..40 | in | Default 12. The camera's maximum optical zoom factor. |
+
+With a camera the aim is sent as an absolute position (pan -170..170 degrees, tilt -90..90)
+at most ten times a second while dragging; Zoom In and Zoom Out drive the zoom. Without a
+camera the Pan and Tilt outputs are the way to drive a camera block of your own.
 
 ### Camera Framing
 
-Filled in after the mode's tests pass.
+Draw a box around the next shot. The pad shows the camera's current view as the widest 16:9
+box on the pad; a box drawn on it is a region of that view. Hint: `Draw a box to frame.
+Double tap = zoom out`. Pages as Joystick.
+
+| Pin | Lua name | Type | Dir | What it does |
+|---|---|---|---|---|
+| Camera Framing ~ Frame Pan / Frame Tilt | `FramePan`, `FrameTilt` | Knob, 0..1 | out | The applied frame's centre within the home view; 0.5 is home. |
+| Camera Framing ~ Frame Zoom | `FrameZoom` | Knob, 0..1 | out | 0 is the whole view, 1 the tightest frame (Min Frame of the home view). |
+| Camera Framing ~ Apply | `Apply` | Trigger | both | Pulses when a shot is sent; pulse it to apply the current box. |
+| Camera Framing ~ Reset | `Reset` | Trigger | both | Zooms all the way out (the whole home view). |
+| Camera Framing ~ Home | `Home` | Trigger | both | Zooms out and sends the camera home. |
+| Camera Framing ~ Min Frame | `MinFrame` | Knob, 0.1..0.6 | in | Default 0.25. The smallest frame as a fraction of the home view. |
+| Camera Framing ~ Invert Pan / Invert Tilt | `InvertPan`, `InvertTilt` | Toggle | both | Mirror the direction of the outputs and the camera. |
+| Camera ~ HFOV, Optical Zoom | `HFOV`, `OpticalZoom` | Knob | in | Turn a frame into camera degrees and a zoom position. |
+
+Behaviour: the box stays on the pad after it is applied. Dragging inside it moves it,
+dragging a corner resizes it, and each is applied as a corrected shot within the same view.
+A new box drawn outside it first re-bases the pad on the current shot, so boxes add up: each
+is relative to the view the camera has at that moment. A box smaller than 8 % of the pad
+(width or height) is ignored and changes nothing. A certain lift (Panel Touch) applies at
+once; an inferred lift applies 1.5 s later unless the drag resumes; a new touch, a new box or
+Zoom In / Out send a pending shot at once; Lock drops it. Double tap zooms out and pulses
+Reset. With a camera the frame goes out through an absolute position: pan = (cx - 0.5) x
+HFOV, tilt = (0.5 - cy) x HFOV x 9/16, zoom position = (1/fw - 1) / (Optical Zoom - 1); a
+frame is never tighter than Min Frame or than the camera's reach.
 
 ### Dial
 
-Filled in after the mode's tests pass.
+An endless jog wheel with detents. The wheel turns with the finger's angle around the pad
+centre; the inner 30 % of the wheel is a dead centre that does nothing, and the first 8
+degrees of every new touch are settling. Hint: `Turn the wheel. The centre does nothing`.
+Pages: Pad, Setup, Camera View (Demo camera), Outputs, Display, About.
+
+| Pin | Lua name | Type | Dir | What it does |
+|---|---|---|---|---|
+| Dial ~ Dial Value | `DialValue` | Knob, 0..1 | both | The level; clockwise raises it, bounded at both ends. |
+| Dial ~ Step Up / Step Down | `StepUp`, `StepDown` | Trigger | out | One pulse per detent, in each direction. |
+| Dial ~ Turns | `Turns` | Knob, 0.5..10 | in | Default 2. Full turns that cover the whole range. |
+| Dial ~ Detents | `Detents` | Knob, 0..72 | in | Default 24. Notches per turn; 0 for none. |
+| Dial ~ Dial Target | `DialTarget` | Text | in | A control driven directly, as `CodeName~control`. |
+| Camera ~ Optical Zoom | `OpticalZoom` | Knob, 1..40 | in | Camera only. Sizes the zoom factor readout. |
+
+Behaviour: the step pulses keep coming at the ends of the range (the wheel is endless, only
+the level is bounded), and a flick that clicks past more notches than one report can pulse
+pays the rest off over the next frames. A Dial Target (`CodeName~control`) is driven
+position-wise and followed when it changes elsewhere, even while a finger rests on the wheel;
+Dial Value written from outside is followed the same way. A target problem (`no component
+named ...`, `... has no control ...`) shows on Status while nothing worse is reported there.
+With a camera the level is the camera's zoom position: the wheel shows the zoom factor read
+back from the camera, Zoom In / Out changes made elsewhere are followed, and a camera whose
+position is unknown gets zoom speed bursts instead.
+
+Recipe: to turn a QSC Gain block from the wheel, set the gain block's Script Access to Script
+or All, give it the Code Name `Program_Gain` and type `Program_Gain~gain` into Dial Target.
+Two full turns sweep the gain from its minimum to its maximum; raise Turns for finer control.
+The same text works in Knob and Fader.
 
 ### Knob
 
-Filled in after the mode's tests pass.
+A bounded rotary with a 270 degree sweep (from bottom-left over the top to bottom-right), a
+value readout in display units and Min / Max labels. Hint: `Touch the ring to set, drag to
+turn`. Pages: Pad, Setup, Outputs, Display, About.
+
+| Pin | Lua name | Type | Dir | What it does |
+|---|---|---|---|---|
+| Knob ~ Knob Min / Knob Max | `KnobMin`, `KnobMax` | Knob, -1000..1000 | in | Defaults 0 and 100. The display range. |
+| Knob ~ Units | `Units` | Text | in | The unit text after the value (cut to 24 characters). |
+| Knob ~ Knob Value | `KnobValue` | Knob | both | The value in display units. |
+| Knob ~ Knob Position | `KnobPosition` | Knob, 0..1 | both | The position along the sweep. |
+| Knob ~ Dial Target | `DialTarget` | Text | in | A control driven directly, as `CodeName~control`. |
+
+Behaviour: a touch on the ring (the track outside the knob body) sets the value from the
+touch angle; dragging anywhere then turns the knob relative to the finger's angular movement
+with acceleration (a fast turn moves up to three times as far as a slow one). Nothing wraps.
+The Dial Target follows the Dial's rules. Recipe: `Program_Gain~gain` in Dial Target, Knob
+Min -100, Knob Max 20, Units `dB`, so the readout shows the gain in dB while the target is
+driven by position.
 
 ### Fader
 
-Filled in after the mode's tests pass.
+A linear touch fader. The whole pad is the fader: a touch anywhere across the slot works.
+Hint: `Touch or drag the fader`. Property: Orientation (Vertical or Horizontal). Pages: Pad,
+Setup, Outputs, Display, About.
+
+| Pin | Lua name | Type | Dir | What it does |
+|---|---|---|---|---|
+| Fader ~ Fader Min / Fader Max | `FaderMin`, `FaderMax` | Knob, -1000..1000 | in | Defaults -100 and 10. The display range. |
+| Fader ~ Units | `Units` | Text | in | Default `dB`. |
+| Fader ~ Fader Value | `FaderValue` | Knob | both | The value in display units. |
+| Fader ~ Fader Position | `FaderPosition` | Knob, 0..1 | both | The position along the travel. |
+| Fader ~ Grab Mode | `GrabMode` | Text, Jump / Relative | in | Jump sets the value where you touch; Relative moves it from where it was by the finger's travel. |
+| Fader ~ Taper | `Taper` | Text, Linear / Audio | in | Audio puts 0 dB at 75 % of the travel for a -100..10 range with a piecewise curve. |
+| Fader ~ Snap Center | `SnapCenter` | Toggle | in | Snaps a touch-driven position to the centre value within 3 % of the travel. |
+| Fader ~ Dial Target | `DialTarget` | Text | in | A control driven directly, as `CodeName~control`. |
+
+Behaviour: the pad draws the slot, the fill, the cap, scale ticks with labels and the value.
+At start the fader resumes from the persisted Fader Position (or the target's level when a
+Dial Target binds) rather than the minimum. Min equal to Max is a degenerate range: every
+value reads Min and the scale carries no labels. Recipe: `Program_Gain~gain` in Dial Target
+with Taper = Audio gives a fader whose top quarter is the useful -10..+10 dB region.
 
 ### Panner
 
-Filled in after the mode's tests pass.
+A two-dimensional panner over a speaker layout chosen by the Speakers property (Stereo, LCR,
+Quad, 5.1, 7.1). The finger places the source in the room: a touch jumps there, a drag
+follows, a double tap returns it to the centre. Hint: `Drag to pan, double tap to centre`.
+Pages: Pad, Setup, Outputs, Display, About.
+
+| Pin | Lua name | Type | Dir | What it does |
+|---|---|---|---|---|
+| Panner ~ Pan X | `PanX` | Knob, -1..1 | both | Left-right position. |
+| Panner ~ Pan Y | `PanY` | Knob, -1..1 | both | Back-front position (1 is the front). |
+| Panner ~ Pan | `Pan` | Knob, -1..1 | both | A stereo pan; it equals Pan X. |
+| Panner ~ Speaker Gain n | `SpeakerGain n` | Knob, dB -80..0 | out | One per speaker. |
+| Panner ~ Divergence | `Divergence` | Knob, 0..1 | in | Default 0.5. 0 feeds the nearest speaker only, 1 spreads the source over every speaker within about a decibel. |
+
+Behaviour: the gains come from a constant-power law on the distance between the source and
+each speaker (a gaussian kernel whose width grows with Divergence; the weights are normalised
+so their squares sum to one and clamped at 1e-4, so -80 dB is the floor). The LFE channel of
+5.1 and 7.1 has no position and stays at 0 dB. Writing Pan X, Pan Y or Pan from outside moves
+the source and recomputes the gains. The pad draws the room, every speaker with a glow that
+follows its gain, the gain readouts and the source dot with two guide lines.
+
+Recipe: to pan a microphone of the Nikita Mic Mixer, wire the pad's `Panner ~ Pan` pin to the
+Mic Mixer's `MicPan 1` pin in the schematic; both are -1..1 pan knobs, so no script is
+needed. For the full speaker set, wire each `Speaker Gain n` to a gain block's gain pin.
 
 ### Zone Select
 
-Filled in after the mode's tests pass.
+A set of named zones (a room plan, a seating map, a row of displays) drawn on the pad.
+Hint: `Tap, drag or circle zones`; in edit mode `Edit: drag to move, corner to resize`.
+Property: Zones (1..32, default 8). Pages: Pad, Setup, Names, Outputs, Display, About.
+
+| Pin | Lua name | Type | Dir | What it does |
+|---|---|---|---|---|
+| Zones ~ Zone Name n | `ZoneName n` | Text | in | The name drawn on each zone (Names page). |
+| Zones ~ Zone Selected n | `ZoneSelected n` | Toggle | both | Whether each zone is selected. |
+| Zones ~ Select All / Clear All | `SelectAll`, `ClearAll` | Trigger | in | Select or clear every zone. |
+| Zones ~ Selected List | `SelectedList` | Text | out | The selected zone numbers, comma separated. |
+| Zones ~ Edit | `Edit` | Toggle | in | Edit the layout on the pad. |
+| Zones ~ Show Background | `ShowBackground` | Toggle | in | Default on. Draws the pad background behind the zones. |
+| Zones ~ Zone Layout | `ZoneLayout` | Text | both | The zone rectangles as a JSON list of `{x,y,w,h}` in 0..1 pad units; blank means the Columns grid. |
+| Zones ~ Exclusive | `Exclusive` | Toggle | in | One zone at a time, like a radio group. |
+| Zones ~ Columns | `Columns` | Knob, 1..8 | in | Default 4. Columns of the default grid. |
+
+Gestures: tap toggles a zone; a drag that starts on a zone paints the opposite of that
+zone's state across every zone it crosses; a closed lasso drawn on empty space selects the
+zones whose centres it encloses (an open, small or short path is ignored); a long press on a
+zone solos it; a double tap on empty space clears everything. Edit mode: drag a zone to move
+it, its bottom-right corner to resize it, empty space to redraw the last touched zone; it
+switches off after 5 min untouched and prints the layout to the Debug Output, so you can
+paste it into Zone Layout. Lock drops a drag and a pending lasso.
+
+Recipe: to turn zone selection into speaker mutes, wire each `Zone Selected n` pin to a
+Logic > NOT block and the NOT's output to the matching mute pin of your mixer or gain: a
+selected zone is unmuted, an unselected one muted. With Exclusive on it becomes a one-room
+page selector.
 
 ### Drag & Drop
 
-Filled in after the mode's tests pass.
+Sources on the left, screens (destinations) on the right. Drag a source tile onto a screen
+to route it, or tap a source and then a screen. Hints: `Drag a source to a screen`, `Now tap
+a screen`, `Drop on a screen`. Properties: Sources (1..64, default 4) and Destinations
+(1..64, default 2). Pages: Pad, Setup, Names (Sources and Destinations above 16 of either),
+Outputs, Display, About.
+
+| Pin | Lua name | Type | Dir | What it does |
+|---|---|---|---|---|
+| Sources ~ Source Name n | `SourceName n` | Text | in | The name drawn on each source tile. |
+| Sources ~ Source Active n | `SourceActive n` | Toggle | in | Default on. Signal present; off dims the tile. |
+| Routing ~ Dest Name n | `DestName n` | Text | in | The name drawn on each screen tile. |
+| Routing ~ Route n | `Route n` | Knob, 0..Sources | both | The source number routed to each screen; 0 is none. |
+| Routing ~ Routed n | `Routed n` | Trigger | out | Pulses when a screen's route changes. |
+| Routing ~ Route Name n | `RouteName n` | Text | out | The name of the source routed to each screen. |
+| Routing ~ Clear Routes | `ClearRoutes` | Trigger | in | Clears every route. |
+| Routing ~ Tap Only | `TapOnly` | Toggle | in | No drags: tap a source, then a screen. |
+| Routing ~ Allow Calls | `AllowCalls` | Toggle | in | Default on. A double tap on a source skips screens whose name holds teams, zoom, webex, codec or call. |
+
+Behaviour: a double tap (two taps on the same tile) sends a source to every screen, except,
+with Allow Calls on, screens whose name carries a call word, so a running call is not
+hijacked. Lists page when their tiles would drop under 56 px (never more than 12 sources or
+16 screens on a page); dropping a source on a list's arrows turns that page and keeps the
+source picked; a picked source is put down after 8 s. Tile icons follow whole words in the
+names (laptop, pc, teams, zoom, camera, doc cam, apple tv, clickshare, mic, music, display,
+projector, room). A Route written from outside updates the drawing and pulses Routed only
+when it changed. Gesture shows the route made (`LAPTOP -> FRONT DISPLAY`) and the hints
+(`NOW TAP A SCREEN`, `ALL CLEARED`).
+
+Recipe: a Q-SYS Router counts its inputs from 1 and has no "none", while Route n is 0 for
+none. Give the router one input more than there are sources and leave it unconnected (the
+blank input), then map 0 to it in a Text Controller:
+
+```lua
+local pad, router = Component.New("Lobby_Pad"), Component.New("Video_Router")
+local SOURCES, SCREENS = 4, 2
+local BLANK = SOURCES + 1                      -- the unconnected router input
+for d = 1, SCREENS do
+  local route = pad["Route " .. d]
+  local function apply()
+    local src = math.floor(route.Value)
+    router["select." .. d].Value = (src >= 1 and src <= SOURCES) and src or BLANK
+  end
+  route.EventHandler = apply
+  apply()
+end
+```
+
+`select.d` is the Router's output selector; read the exact control names off the Router's
+Control Pins list in your design. The same script serves Matrix with Exclusive Columns on.
 
 ### Matrix
 
-Filled in after the mode's tests pass.
+A crosspoint grid: sources are the rows, destinations the columns. Hint: `Tap a crosspoint,
+drag to paint`. Properties: Sources and Destinations as Drag & Drop. Pages: Pad, Setup,
+Names (or Sources and Destinations), Outputs (paged for long arrays), Display, About.
+
+| Pin | Lua name | Type | Dir | What it does |
+|---|---|---|---|---|
+| Sources ~ Source Name n | `SourceName n` | Text | in | The name of each row. |
+| Routing ~ Dest Name n | `DestName n` | Text | in | The name of each column. |
+| Matrix ~ Cross n | `Cross n` | Toggle | both | Each crosspoint; index = (row - 1) x columns + column. |
+| Routing ~ Route n | `Route n` | Knob, 0..Sources | both | The source number routed to each column; 0 is none. |
+| Routing ~ Exclusive Columns | `ExclusiveColumns` | Toggle | in | Default on. A column carries one source at a time. |
+| Routing ~ Clear All | `ClearAll` | Trigger | in | Clears every crosspoint. |
+
+Behaviour: tap a crosspoint to toggle it; a drag that starts on a crosspoint paints its new
+state across every crosspoint it crosses; a tap on a row header sends that source to every
+column; a tap on a column header clears that column. With Exclusive Columns on, Route n is
+kept in sync both ways; with it off a column may carry several sources and Route n shows the
+source routed last (0 once the column is empty). The grid shows at most 12 rows and 12
+columns at a time; larger matrices page with arrow bars under the row headers (row pages)
+and under the cells (column pages), and a swipe that starts on a header or an arrow bar turns
+the pages too. A tap acts on the cell that was pressed, not on whatever lies under the lift.
+Pin writes of a big matrix are spread over engine turns so a row select or Clear All on a
+64 x 64 matrix stays within budget. The router recipe of Drag & Drop applies unchanged.
 
 ### Pattern Lock
 
-Filled in after the mode's tests pass.
+A dot grid (3 x 3 by default, up to 5 x 5). The finger joins dots; a lift checks the drawn
+pattern against the secret. Hints: `Draw your pattern`, `Set a pattern first`. Pages: Pad,
+Setup, Outputs, Display, About.
+
+| Pin | Lua name | Type | Dir | What it does |
+|---|---|---|---|---|
+| Pattern Lock ~ Grid Size | `GridSize` | Knob, 3..5 | in | Default 3. Dots per side. |
+| Pattern Lock ~ Pattern | `Pattern` | Text | in | The secret as digits, `1-5-9-6` or `1596`, numbered left to right, top to bottom. |
+| Pattern Lock ~ Unlocked / Failed | `Unlocked`, `Failed` | Trigger | out | The result of a check. |
+| Pattern Lock ~ Locked | `Locked` | Toggle | both | On after Max Tries failures for Lockout Seconds; off clears the lockout. |
+| Pattern Lock ~ Max Tries | `MaxTries` | Knob, 1..10 | in | Default 5. |
+| Pattern Lock ~ Lockout Seconds | `LockoutSeconds` | Knob, 10..3600 | in | Default 60. |
+| Pattern Lock ~ Last Pattern | `LastPattern` | Indicator Text | out | The pattern just drawn, for a script that records one. |
+| Pattern Lock ~ Learn | `Learn` | Toggle | in | The next drawn pattern becomes the secret. |
+| Pattern Lock ~ Masked | `Masked` | Toggle | in | Hides the trail; a row of small dots above the grid counts the joined dots. |
+| Pattern Lock ~ Auto Submit | `AutoSubmit` | Toggle | in | Checks as soon as the pattern is as long as the secret (never while learning). |
+
+Behaviour: a drag that passes within 22 % of the dot spacing of a dot adds it (no repeats,
+line segments between dots, a skipped dot that lies exactly between two added dots is
+added). The pad draws the dots, the trail and green or red feedback for 0.8 s. A pattern has
+at least two dots: a tap on one dot is dropped without a check, does not count as a try and
+is not learned, and a Pattern text with fewer than two dots is no secret. On a pad too small
+for the top line and the hint those texts are left out rather than drawn over the dots.
+
+Recipe (door strike): the same Text Controller as the Keypad's, with `pad.Unlocked` in place
+of `pad.Accepted`.
 
 ### Keypad
 
-Filled in after the mode's tests pass.
+A numeric keypad drawn by the pad (digits 0-9, clear, enter) for PIN entry on a lobby or a
+lectern. Hint: `Tap a key, swipe left to delete`. Pages: Pad, Setup, Outputs, Display, About.
+
+| Pin | Lua name | Type | Dir | What it does |
+|---|---|---|---|---|
+| Keypad ~ Pin | `Pin` | Text | in | Default `1234`. The accepted code or codes, separated by commas. |
+| Keypad ~ Entry | `Entry` | Text | out | The digits entered so far. |
+| Keypad ~ Masked | `Masked` | Toggle | in | Default on. Dots instead of digits on the pad; Gesture shows `KEY *`. |
+| Keypad ~ Auto Submit | `AutoSubmit` | Toggle | in | Default on. Submits as soon as the entry is as long as a code. |
+| Keypad ~ Learn | `Learn` | Toggle | in | The next code entered and confirmed with Enter is stored as the Pin. |
+| Keypad ~ Accepted / Rejected | `Accepted`, `Rejected` | Trigger | out | The result of a check. |
+| Keypad ~ Locked | `Locked` | Toggle | both | On after Max Tries failures for Lockout Seconds; off clears the lockout. |
+| Keypad ~ Max Tries | `MaxTries` | Knob, 1..10 | in | Default 5. |
+| Keypad ~ Lockout Seconds | `LockoutSeconds` | Knob, 10..3600 | in | Default 60. |
+
+Behaviour: a key is entered when the finger lifts from it (the touch landed on the key and
+never moved more than 12 px), however long it rested there; a drag or a swipe presses
+nothing; keys highlight for 0.15 s; a swipe left deletes a digit. Codes of different lengths
+want Auto Submit off, since it submits at the first matching length. Without Panel Touch the
+same key tapped twice in quick succession needs a 0.5 s pause (the engine treats a report
+within 6 px and 0.5 s of the last tap as the finger peeling off).
+
+Recipe (door strike): a Text Controller with one Control Pin, a button named `Door`, wired
+to the strike relay. The pulse goes true and then false, so the handler acts on the rising
+edge, and a second event within the pulse only restarts the three seconds:
+
+```lua
+local pad = Component.New("Lobby_Keypad")
+local timer = Timer.New()
+timer.EventHandler = function() timer:Stop(); Controls.Door.Boolean = false end
+pad.Accepted.EventHandler = function(ctl)
+  if not ctl.Boolean then return end
+  Controls.Door.Boolean = true
+  timer:Stop(); timer:Start(3)
+end
+```
 
 ### Sign-In
 
-Filled in after the mode's tests pass.
+A visitor sign-in pad: a signature area drawn by the pad plus the guest fields, which the
+UCI's own text boxes fill. Hint: `Sign above the line, then press Sign In`. Property: Sign-In
+Webhook (Off, JSON, Teams Card). Pages: Pad, Setup, Outputs, Display, About.
+
+| Pin | Lua name | Type | Dir | What it does |
+|---|---|---|---|---|
+| Guest ~ Guest Name / Guest Company / Visiting | `GuestName`, `GuestCompany`, `Visiting` | Text | both | The form fields. |
+| Sign-In ~ Submit | `Submit` | Trigger | in | Signs the guest in. |
+| Sign-In ~ Clear / Clear Signature | `Clear`, `ClearSignature` | Trigger | in | Clear the form, or the signature only. |
+| Sign-In ~ Submitted | `Submitted` | Trigger | out | Pulses after a successful sign-in. |
+| Sign-In ~ Last Guest / Today Count | `LastGuest`, `TodayCount` | Text | out | The last name, and today's count. |
+| Sign-In ~ Room Name | `RoomName` | Text | in | Written to the log and the webhook. |
+| Sign-In ~ Webhook Url | `WebhookUrl` | Text | in | Where each sign-in is posted. |
+| Sign-In ~ Send Status | `SendStatus` | Text | out | The result of the last post. |
+| Sign-In ~ Pen Width | `PenWidth` | Knob, 1..8 | in | Default 3. |
+
+Behaviour: Submit writes the signature as `<base>/SignIns/<time>_<name>.svg`, appends a line
+to `<base>/SignIns/log.csv` (UTF-8 with a BOM written once when the file is created; a cell
+starting with `=`, `+`, `-` or `@` gets a leading apostrophe so a spreadsheet does not run
+it), pulses Submitted, sets Last Guest and Today Count, posts the webhook and clears the form.
+`<base>` is `design` in Emulate and `media` on a Core. A failed save shows `Not saved: please
+ask at reception`, counts nothing and pulses nothing. Today Count counts today's lines of the
+log at start-up and resets at midnight; the form clears after three idle minutes; a second
+Submit right after a sign-in does nothing. The JSON webhook posts name, company, visiting,
+room, the time in ISO 8601, the signature as base64 SVG and the file name; the Teams Card is
+an Adaptive Card without the signature. Strokes are polylines simplified to at most 400
+points each, at most 60 strokes; a touch without movement draws a dot.
 
 ### Whiteboard
 
-Filled in after the mode's tests pass.
+Freehand drawing for annotation. One finger draws strokes in the pen colour and width; a
+touch without movement draws a dot. Hints: `Draw with one finger`, `Eraser: drag across a
+stroke to remove it`. Pages: Pad, Setup, Outputs, Display, About.
+
+| Pin | Lua name | Type | Dir | What it does |
+|---|---|---|---|---|
+| Whiteboard ~ Pen Width | `PenWidth` | Knob, 1..8 | in | Default 3. |
+| Whiteboard ~ Pen Color | `PenColor` | Text, Accent / White / Black / Red / Green / Blue | in | Default Accent. |
+| Whiteboard ~ Eraser | `Eraser` | Toggle | in | The finger removes every stroke it crosses. |
+| Whiteboard ~ Undo | `Undo` | Trigger | in | Removes the last stroke. |
+| Whiteboard ~ Clear Board | `ClearBoard` | Trigger | in | Empties the board. |
+| Whiteboard ~ Snapshot | `Snapshot` | Trigger | in | Writes `<base>/Whiteboard/<time>.svg`. |
+| Whiteboard ~ Strokes | `Strokes` | Indicator Text | out | The stroke count. |
+| Whiteboard ~ Last File | `LastFile` | Text | out | The file written by the last snapshot. |
+
+Behaviour: the board keeps at most 60 strokes (the oldest is dropped) and at most 2400
+points (the oldest strokes are halved), and a stroke keeps at most 400 points, so the drawing
+always fits the display. A stroke ended by an inferred lift continues when the finger comes
+back within 1.6 s close to where it left; a touch farther away is a new stroke, so letters
+written in quick succession without Panel Touch are not joined. Two-finger erase is not
+possible (the picker reports one finger), hence the Eraser toggle.
 
 ## Recipes
 
-Filled in after the mode's tests pass. Planned: a router mapping script for Drag & Drop and
-Matrix (QSC routers count inputs from 1), a Swipe Layer that changes UCI pages, a Panner
-driving a Mic Mixer's pan, and a Keypad opening a door strike.
+All recipes run in a Text Controller (Design > Scripting) with the Touch Pad block's Script
+Access set to Script or All and a Code Name given to it. `Component.New("Code_Name")`
+returns the block's controls by their Lua names (`pad.X`, `pad["Route 2"]`). A trigger pin
+pulses: it goes true and then false at once, so a handler sees two events; act on the one
+where `ctl.Boolean` is true. Where a pin can be wired straight to another pin in the
+schematic (the Panner's Pan to a pan knob, Zone Selected to a NOT), prefer the wire.
+
+**Drag & Drop or Matrix to a Q-SYS Router (0 means blank).** Q-SYS routers count inputs
+from 1 and have no "none"; Route n is 0 for none. Add one input more than there are sources
+to the Router, leave it unconnected, and map 0 to it:
+
+```lua
+local pad, router = Component.New("Lobby_Pad"), Component.New("Video_Router")
+local SOURCES, SCREENS = 4, 2                 -- the block's Sources and Destinations
+local BLANK = SOURCES + 1                     -- the unconnected router input
+for d = 1, SCREENS do
+  local route = pad["Route " .. d]
+  local function apply()
+    local src = math.floor(route.Value)
+    router["select." .. d].Value = (src >= 1 and src <= SOURCES) and src or BLANK
+  end
+  route.EventHandler = apply
+  apply()                                     -- align the router with the pad at start
+end
+```
+
+To feed the pad from the router as well (so a route made elsewhere shows on the tiles), set
+`pad["Route " .. d].Value` from the router's selector in its EventHandler; the pad pulses
+Routed only when the value changed, so there is no loop.
+
+**Dial, Knob or Fader driving a control directly.** No script: give the target block a Code
+Name and Script Access, and type `CodeName~control` into Dial Target, for example
+`Program_Gain~gain`. The pad drives the control by position and follows it when it changes
+elsewhere. For a plugin's array control use the spaced name: `Mic_Mixer~MicGain 1`. Status
+tells you when the component or the control is not found.
+
+**Panner to the Mic Mixer's pan.** Wire `Panner ~ Pan` to the Mic Mixer's `MicPan n` pin.
+Both are -1..1 pan knobs. For a surround send, wire each `Speaker Gain n` (dB) to a gain
+block's gain pin and set Divergence to taste.
+
+**Swipe Layer to UCI pages.** Put the Swipe Layer on a UCI layer that is on every page, set
+Swipe Disabled on the UCI, and:
+
+```lua
+local pad = Component.New("Swipe_Pad")
+local UCI, PAGES = "Lobby UCI", { "Welcome", "Rooms", "Help" }
+local page = 1
+local function show() Uci.SetPage(UCI, PAGES[page]) end
+pad.SwipeLeft.EventHandler = function(ctl)
+  if ctl.Boolean and page < #PAGES then page = page + 1; show() end
+end
+pad.SwipeRight.EventHandler = function(ctl)
+  if ctl.Boolean and page > 1 then page = page - 1; show() end
+end
+```
+
+Every mode pulses the swipe pins, so the same script works over an XY Pad or a Zone Select
+when a page change by swipe is wanted there.
+
+**Pattern Lock or Keypad to a door strike.** A Text Controller with one Control Pin, a
+button named `Door`, wired to the strike relay; `pad.Accepted` for the Keypad, `pad.Unlocked`
+for the Pattern Lock:
+
+```lua
+local pad = Component.New("Lobby_Keypad")
+local timer = Timer.New()
+timer.EventHandler = function() timer:Stop(); Controls.Door.Boolean = false end
+pad.Accepted.EventHandler = function(ctl)
+  if not ctl.Boolean then return end
+  Controls.Door.Boolean = true
+  timer:Stop(); timer:Start(3)                -- three seconds, restarted by a second event
+end
+```
+
+Wire `Locked` to an indicator on the UCI so the lockout is visible, and `Rejected` to a
+counter if you want to log attempts.
+
+**Zone Select to mutes.** Wire each `Zone Selected n` to a Logic > NOT block and the NOT to
+the mute pin of the zone's gain or mixer input: selected means unmuted. Add `Select All` and
+`Clear All` to two UCI buttons for an all-on, all-off pair. With Exclusive on, the same
+wiring makes a one-zone-at-a-time page selector.
 
 ## What has been tested, honestly
 
 - The plugin was **built and tested only in an offline test harness** that fakes the Q-SYS
   runtime in Python and Lua 5.3 (`tools/touchpad/harness`). At the time of writing that is
-  **108 scenario tests** (`python3 tools/touchpad/harness/run_tests.py`: the layout lint of
-  every page of every mode, the harness's own checks, the engine, and the XY Pad mode) and
-  **98 unit tests with 1741 assertions** (`python3 tools/touchpad/harness/lua_unit.py --all`:
-  the utilities, the font metrics, the SVG canvas, the shared shapes and the design-time
-  framework). The mode-level scenario tests cover XY Pad only; the other fifteen modes are
-  being written and have no tests yet.
+  **541 scenario tests** (`python3 tools/touchpad/harness/run_tests.py`: the layout lint of
+  every page of every mode for 47 property variants, the harness's own checks, the engine,
+  the camera drivers, the extremes and every one of the sixteen modes) and **101 unit tests
+  with 38964 assertions** (`python3 tools/touchpad/harness/lua_unit.py --all`: the
+  utilities, the font metrics, the SVG canvas, the shared shapes and the design-time
+  framework, including a check that every control of every mode carries a description).
+  `python3 tools/touchpad/build.py` runs the smoke test (GetProperties, GetPages,
+  GetControls and GetControlLayout for every page of every mode and property variant) and
+  the ASCII and local-slot lints on every build. Every test enforces the budgets of 120000 VM
+  instructions per handler and 60000 per frame.
+- Per mode, the scenario tests are: XY Pad 8, Swipe Layer 24, Joystick 22, PTZ Pad 21,
+  Camera Framing 25, Dial 28, Knob 24, Fader 25, Panner 18, Zone Select 32, Drag & Drop 32,
+  Matrix 25, Pattern Lock 25, Keypad 26, Sign-In 30, Whiteboard 18; plus engine 99, camera
+  drivers 25, harness 26 and extremes 8.
+- **What only the harness has exercised**, with a fake standing in for Q-SYS:
+  - the Color Picker binding (a fake `Component.New` with `saturation` and `value` controls
+    and a fake `Component.GetControls` list), and every finger path: taps, double taps, long
+    presses, drags, swipes, resumed and inferred lifts, parked fingers and stuck Panel Touch;
+  - the Display icon: the SVG is written to a fake Legend (or Style) and checked for its
+    size and ASCII content, but no panel has rendered it;
+  - timers (`Timer.New`, `Timer.CallAfter`) on a virtual clock, so every timing figure in
+    this guide (0.6 s swipes, 8 s put-down, 5 min edit timeout, midnight reset) was checked
+    against the fake clock, not a Core's;
+  - the Q-SYS Camera driver against a fake camera component with the candidate control
+    names, and the VISCA over IP driver against fake UDP and TCP sockets (`UdpSocket`,
+    `TcpSocket`) that record what was sent and inject the replies the tests choose;
+  - the Demo camera entirely (it is a simulation);
+  - Sign-In and Whiteboard file writes (`dir`, `io`) into a sandbox folder, the CSV log,
+    the BOM and the formula-safe cells; and the webhook posts (`HttpClient.Upload`) against a
+    fake that records the request and answers with the status and latency the test sets;
+  - the first-start writing of the toggle defaults and `SetupVersion`, and the Outputs page
+    layout of arrays up to 64 x 64, through the design-time functions only;
+  - `Design`, `System.IsEmulating` and the Core's file paths (`design/` in Emulate, `media/`
+    on a Core) as the fake defines them.
 - It has **never been opened in Q-SYS Designer** and **never run on a Core or a touch
   panel**. Everything about Designer and panels in this guide comes from QSC's documentation
   and from the Gesture Pad project's published notes on the same technique.
@@ -643,7 +1152,8 @@ driving a Mic Mixer's pan, and a Keypad opening a door strike.
   alternative if a firmware renders only that variant.
 - **Cameras and webhooks were exercised only against fakes**: the Q-SYS Camera control
   names, the VISCA byte tables and the HTTP posts of Sign-In have not met a real camera or
-  server.
+  server. The Router control names in the recipes (`select.n`) and the Mic Mixer's pin names
+  are from documentation and from the Mic Mixer's source, not from a design that was run.
 
 If you try it, please report the Q-SYS version, the panel model, what Status said, and
 whether drags feel smooth.
@@ -657,6 +1167,35 @@ implementation written from that project's public documentation. Q-SYS is a trad
 QSC, LLC. Touch Pad is not made or endorsed by QSC.
 
 ## Changelog
+
+### 1.0.1 (2026-10-10)
+
+- Text measurement: non-ASCII text (Cyrillic, Greek, Hebrew, CJK, emoji) is measured and
+  fitted several times faster, a fit walks only the characters that can fit, and names and
+  labels in those scripts no longer threaten the per-frame budget: Zone Select, Matrix and
+  Drag & Drop spread cold tile and header renders over frames by an estimate of each label's
+  cost, Sign-In fits one header line per frame, Knob and Fader cut the Units text to 24
+  characters.
+- Outputs pages: arrays longer than 16 are paged 512 mini cells per page (`Outputs 2`, ...),
+  built without per-cell lookups, so a 64 x 64 Matrix lays out cheaply in Designer.
+- Display button: Margin, Padding and StrokeWidth are 0 and the stroke white, so the drawing
+  maps onto the control's pixels exactly.
+- First start: the toggles declared on by default are written on once and `SetupVersion`
+  (About page) records it, in case Designer does not apply a boolean default to a button.
+- Background = Panel is an 80 % panel, as specified; the Display page says so.
+- Joystick: a Home pin held longer than half a second homes once, on its rising edge.
+- Camera: releasing one Zoom pin while the other is held keeps zooming the held way; a VISCA
+  camera that never answers position inquiries is reported even when polled faster than the
+  inquiry timeout (the Dial, a held Zoom).
+- Matrix: a Cross pin event that changes nothing no longer re-routes the column.
+- Sign-In: Clear, Submit and the idle clear write the field pins back even when they held
+  only whitespace.
+- Knob: the Min / Max labels follow the Font property.
+- Build: the main chunk's free local-variable slots are checked (margin 24 of Lua's 200);
+  every module keeps its locals in a `do ... end` block.
+- Every control of every mode carries a one-sentence Description, shown by Designer and
+  printed in the What-it-does column of `PINS.md`; a unit test keeps it that way.
+- Guide: a chapter per mode, the recipes, and the test status with the final counts.
 
 ### 1.0.0 (2026-10-10)
 

@@ -90,7 +90,7 @@ def test_pattern_controls_pins_and_idle_drawing():
     for name in ("GridSize", "Pattern", "Unlocked", "Failed", "Locked", "MaxTries", "LockoutSeconds",
                  "LastPattern", "Learn", "Masked", "AutoSubmit"):
         assert name in names, name
-    assert len(names) == 26 + 11
+    assert len(names) == 27 + 11
     assert q.pin("GridSize")["Value"] == 3 and q.pin("MaxTries")["Value"] == 5
     assert q.pin("LockoutSeconds")["Value"] == 60 and q.pin("Locked")["Boolean"] is False
     assert q.pin("Gesture")["String"] == "DRAW YOUR PATTERN"

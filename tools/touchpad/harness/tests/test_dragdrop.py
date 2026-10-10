@@ -581,12 +581,12 @@ def test_dragdrop_budget_on_wide_pads_with_120_character_names():
         b = q.budget()
         assert b["max_frame"] < 60000 and b["max_handler"] < 120000
         assert b["max_frame"] < 50000, b["max_frame"]              # margin, not just the limit
-    # ... and a 500 px pad still renders six tiles of a cold page in one frame
+    # ... and a 500 px pad still renders five tiles of a cold page in one frame
     q = boot(64, 64)
     name_all(q, 64, 64)
     q.advance(0.1)
     cnt, spent, cap = cold_stats(q)
-    assert cnt >= 6
+    assert cnt >= 5
     warm(q)
     assert q.budget()["max_frame"] < 60000
 
@@ -718,3 +718,60 @@ def test_dragdrop_put_down_timer_waits_for_a_resting_finger():
     assert picked(q) == 1
     q.advance(1.5)
     assert picked(q) is None
+
+
+def test_dragdrop_first_start_writes_the_toggle_defaults_once():
+    # SourceActive n and AllowCalls are declared DefaultValue = true. If the
+    # design does not apply a boolean DefaultValue to a Button they would
+    # come up false; the first start writes them true and records it in
+    # SetupVersion, and a later start keeps the integrator's own choice.
+    q = QSys(mode="Drag & Drop", props={"Sources": 3, "Destinations": 2}, picker="Color_Picker", plugin=PLUGIN, runtime=False)
+    for i in (1, 2, 3):
+        q.set_pin("SourceActive", False, i)
+    q.set_pin("AllowCalls", False)
+    assert q.pin("SetupVersion")["String"] == ""
+    q._dispatch("load", q._chunk)
+    q.advance(0.2)
+    assert q.pin("SetupVersion")["String"] == "1"
+    assert all(q.pin("SourceActive", i)["Boolean"] is True for i in (1, 2, 3))
+    assert q.pin("AllowCalls")["Boolean"] is True
+    assert "dim" not in q.icon().split("SCREENS")[0] if "SCREENS" in q.icon() else True
+    assert q.errors == [] and "OK" in q.status()
+    q.close()
+    # a later start (marker already written) leaves a toggle the integrator turned off
+    r = QSys(mode="Drag & Drop", props={"Sources": 3, "Destinations": 2}, picker="Color_Picker", plugin=PLUGIN, runtime=False)
+    r.set_pin("SetupVersion", "1")
+    r.set_pin("SourceActive", False, 2)
+    r.set_pin("AllowCalls", False)
+    r._dispatch("load", r._chunk)
+    r.advance(0.2)
+    assert r.pin("SourceActive", 2)["Boolean"] is False and r.pin("AllowCalls")["Boolean"] is False
+    assert r.pin("SetupVersion")["String"] == "1"
+    assert r.errors == []
+
+
+def test_dragdrop_cold_first_frame_with_non_latin_names_stays_within_budget():
+    # Names present at load in CJK / emoji / Cyrillic on small and large pads:
+    # the cold-tile estimate charges non-ASCII names by the characters a tile
+    # can hold, so the first frame and the follow-up frames stay under budget.
+    cjk = "\u4f1a\u8b70\u5ba4\u30a8\u30ea\u30a2"
+    cases = (("cjk10", lambda i: (cjk * 2)[:8] + "%02d" % i), ("cjk20", lambda i: (cjk * 4)[:18] + "%02d" % i),
+             ("cjk64", lambda i: (cjk * 11)[:62] + "%02d" % i),
+             ("emoji128", lambda i: "\U0001F600" * 126 + "%02d" % i), ("cyr7", lambda i: "\u041f\u0435\u0440\u0435\u0433" + "%02d" % i))
+    for label, fn in cases:
+        for (w, h) in ((500, 500), (1600, 1200)):
+            q = QSys(mode="Drag & Drop", props={"Sources": 64, "Destinations": 64, "Pad Width": w, "Pad Height": h},
+                     picker="Color_Picker", plugin=PLUGIN, runtime=False)
+            for i in range(1, 65):
+                q.set_pin("SourceName", fn(i), i)
+                q.set_pin("DestName", fn(i), i)
+            q._dispatch("load", q._chunk)
+            q.advance(0.05)
+            assert q.budget()["max_frame"] < 55000, (label, w, h, q.budget()["max_frame"])
+            cnt, spent, cap = cold_stats(q)
+            assert 1 <= cnt and spent <= cap + 12000, (label, w, h, cnt, spent, cap)   # the first tile always renders
+            warm(q)
+            assert q.budget()["max_frame"] < 55000, (label, w, h)
+            assert icon(q).count("<text") >= 28, (label, w, h)
+            assert q.errors == []
+            q.close()

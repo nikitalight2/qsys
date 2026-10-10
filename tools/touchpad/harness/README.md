@@ -207,7 +207,7 @@ q.clear_output()
 q.log           # [(kind, text)] from Log.Message / Log.Error
 q.errors        # [(label, traceback)] of uncaught errors inside Lua callbacks
 q.budget(strict=None)   # {"max_handler", "max_frame", "load", "handlers": {label: max}, "frames", "dispatches"}
-                        # max_handler leaves the load dispatch out; "load" reports it (it draws the first frame but is not a frame)
+                        # max_handler leaves the load dispatch out; "load" reports it (the first frame follows on the next engine turn)
 q.instructions(label)
 q.run(lua_code)         # execute Lua in the plugin's state
 q.lua, q.G, q.F         # the lupa runtime, its globals, the fake's internal table (__FAKE)
@@ -219,11 +219,16 @@ runtime section), `ctl:<key>` (a control EventHandler; component controls are
 `udp`, `tcp:connected|data|eof|error|timeout|reconnect`. A count hook
 (granularity 10) runs during the dispatch; the fake's own library code
 (control writes, JSON, Base64, sockets, files, print, timers) pauses it, as
-those are C on a Core. A handler fired by a script write runs nested: its
-count is recorded under its own label and also included in the outer one. A
-dispatch in which `Display`'s icon changed is a *frame*: it is also recorded
-as `frame:<label>` and compared with the frame budget. The `load` dispatch is
-the exception: it draws the first frame but is reported only as the load.
+those are C on a Core; a control property write stops the counter on the
+first instruction of its metamethod, so a write costs the script about five
+counted instructions rather than the fake's own bookkeeping. A handler fired
+by a script write runs nested: its count is recorded under its own label and
+also included in the outer one. A dispatch in which `Display`'s icon changed
+is a *frame*: it is also recorded as `frame:<label>` and compared with the
+frame budget. The `load` dispatch binds the picker, installs the handlers and
+creates the mode; the engine draws the first frame on the next engine turn
+(a `callafter` dispatch, counted as a frame like any other), so `q.icon()`
+is `None` until the first `advance`.
 
 ### Files
 

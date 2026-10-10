@@ -89,7 +89,7 @@ def test_dial_controls_pins_defaults_and_layout():
         assert n in names, n
     for n in CAMERA_CONTROLS:
         assert n not in names, n                        # Camera Control = None
-    assert len(names) == 26 + len(MODE_CONTROLS)
+    assert len(names) == 27 + len(MODE_CONTROLS)
     assert level(q) == 0 and q.pin("Turns")["Value"] == 2 and q.pin("Detents")["Value"] == 24
     assert q.run("return TouchPad.E.camera") is None
     assert q.pin("Gesture")["String"] == "TURN THE WHEEL. THE CENTRE DOES NOTHING"
@@ -683,3 +683,17 @@ def test_dial_binding_a_target_never_moves_the_camera():
     g2.set("gain", 20)                                   # the target changed elsewhere still drives the zoom
     assert near(level(r), 1) and near(r.run("return TouchPad.E.camera.target.zoom"), 1)
     assert r.errors == []
+
+
+def test_dial_warns_when_a_visca_camera_never_answers_position_inquiries():
+    # The dial polls the camera every 0.2 s after a turn, faster than the 1 s
+    # inquiry timeout; a camera that never answers must still raise the
+    # "no answer to position inquiries" warning on CameraStatus.
+    q = boot(props={"Camera Control": "VISCA over IP", "VISCA Brand": "Sony"})
+    q.set_pin("CameraIP", "10.0.0.9")
+    q.advance(1.0)
+    q.touch([(250, 60), (330, 90), (400, 170), (440, 250)])
+    q.advance(2.0)
+    assert q.pin("CameraStatus")["String"] == "VISCA Sony UDP 10.0.0.9:52381: no answer to position inquiries (framing and dial need them)"
+    assert q.run("return TouchPad.E.camera.posReplies") == 0
+    assert q.errors == []

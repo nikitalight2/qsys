@@ -118,15 +118,20 @@ do
     controls = function(C, props)
       local n = #LAYOUTS[speakersOf(props)]
       C.add{ Name = "PanX", ControlType = "Knob", ControlUnit = "Float", Min = -1, Max = 1,
-             DefaultValue = 0, PinStyle = "Both", Group = "Panner" }
+             DefaultValue = 0, PinStyle = "Both", Group = "Panner",
+             Description = "The source's left-right position, -1 to 1." }
       C.add{ Name = "PanY", ControlType = "Knob", ControlUnit = "Float", Min = -1, Max = 1,
-             DefaultValue = 0, PinStyle = "Both", Group = "Panner" }
+             DefaultValue = 0, PinStyle = "Both", Group = "Panner",
+             Description = "The source's back-front position, -1 to 1." }
       C.add{ Name = "Pan", ControlType = "Knob", ControlUnit = "Float", Min = -1, Max = 1,
-             DefaultValue = 0, PinStyle = "Both", Group = "Panner" }
+             DefaultValue = 0, PinStyle = "Both", Group = "Panner",
+             Description = "A stereo pan for a pan control such as the Mic Mixer's MicPan, -1 to 1." }
       C.add{ Name = "SpeakerGain", Count = n, ControlType = "Knob", ControlUnit = "dB", Min = -80, Max = 0,
-             DefaultValue = 0, PinStyle = "Output", Group = "Panner" }
+             DefaultValue = 0, PinStyle = "Output", Group = "Panner",
+             Description = "The gain of each speaker in dB from a constant-power law." }
       C.add{ Name = "Divergence", ControlType = "Knob", ControlUnit = "Float", Min = 0, Max = 1,
-             DefaultValue = 0.5, PinStyle = "Input", Group = "Panner" }
+             DefaultValue = 0.5, PinStyle = "Input", Group = "Panner",
+             Description = "How widely the source spreads over the speakers, 0 to 1." }
     end,
 
     pages = {},

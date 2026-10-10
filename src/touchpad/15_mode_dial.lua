@@ -60,18 +60,25 @@ do
 
     controls = function(C, props)
       C.add{ Name = "DialValue", ControlType = "Knob", ControlUnit = "Float", Min = 0, Max = 1,
-             DefaultValue = 0, PinStyle = "Both", Group = "Dial" }
-      C.add{ Name = "StepUp", ControlType = "Button", ButtonType = "Trigger", PinStyle = "Output", Group = "Dial" }
-      C.add{ Name = "StepDown", ControlType = "Button", ButtonType = "Trigger", PinStyle = "Output", Group = "Dial" }
+             DefaultValue = 0, PinStyle = "Both", Group = "Dial",
+             Description = "The dial's level, 0 to 1; clockwise raises it." }
+      C.add{ Name = "StepUp", ControlType = "Button", ButtonType = "Trigger", PinStyle = "Output", Group = "Dial",
+             Description = "Pulses once per detent turned clockwise." }
+      C.add{ Name = "StepDown", ControlType = "Button", ButtonType = "Trigger", PinStyle = "Output", Group = "Dial",
+             Description = "Pulses once per detent turned anticlockwise." }
       C.add{ Name = "Turns", ControlType = "Knob", ControlUnit = "Float", Min = 0.5, Max = 10,
-             DefaultValue = 2, PinStyle = "Input", Group = "Dial" }
+             DefaultValue = 2, PinStyle = "Input", Group = "Dial",
+             Description = "How many full turns cover the whole range." }
       C.add{ Name = "Detents", ControlType = "Knob", ControlUnit = "Integer", Min = 0, Max = 72,
-             DefaultValue = 24, PinStyle = "Input", Group = "Dial" }
-      C.add{ Name = "DialTarget", ControlType = "Text", PinStyle = "Input", Group = "Dial" }
+             DefaultValue = 24, PinStyle = "Input", Group = "Dial",
+             Description = "Notches per turn; 0 for none." }
+      C.add{ Name = "DialTarget", ControlType = "Text", PinStyle = "Input", Group = "Dial",
+             Description = "A control driven directly, as CodeName~control." }
       if C.camera ~= nil and C.camera ~= "None" then
         -- Sizes the zoom factor readout: 1 + zoom position x (OpticalZoom - 1).
         C.add{ Name = "OpticalZoom", ControlType = "Knob", ControlUnit = "Float", Min = 1, Max = 40,
-               DefaultValue = 12, PinStyle = "Input", Group = "Camera" }
+               DefaultValue = 12, PinStyle = "Input", Group = "Camera",
+               Description = "The camera's maximum optical zoom factor; sizes the zoom readout." }
       end
     end,
 

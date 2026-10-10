@@ -84,7 +84,7 @@ def test_keypad_controls_defaults_and_layout_lint():
     for n in ["Pin", "Entry", "Masked", "AutoSubmit", "Learn", "Accepted", "Rejected",
               "Locked", "MaxTries", "LockoutSeconds"]:
         assert n in names, n
-    assert len(names) == 36                                   # 26 common + 10 keypad
+    assert len(names) == 37                                   # 27 common + 10 keypad
     assert q.pin("Pin")["String"] == "1234"
     assert q.pin("Masked")["Boolean"] is True
     assert q.pin("AutoSubmit")["Boolean"] is True
@@ -625,3 +625,22 @@ def test_keypad_frames_and_handlers_stay_within_budget():
     assert b["max_frame"] < 60000 and b["max_handler"] < 120000
     assert len(q.icon()) < 15000
     assert q.errors == []
+
+
+def test_keypad_first_start_writes_masked_and_autosubmit_defaults_once():
+    q = QSys(mode="Keypad", picker="Color_Picker", plugin=plugin_path(), runtime=False)
+    q.set_pin("Masked", False)
+    q.set_pin("AutoSubmit", False)
+    q._dispatch("load", q._chunk)
+    q.advance(0.2)
+    assert q.pin("Masked")["Boolean"] is True and q.pin("AutoSubmit")["Boolean"] is True
+    assert q.pin("SetupVersion")["String"] == "1"
+    assert q.errors == []
+    q.close()
+    r = QSys(mode="Keypad", picker="Color_Picker", plugin=plugin_path(), runtime=False)
+    r.set_pin("SetupVersion", "1")
+    r.set_pin("Masked", False)
+    r._dispatch("load", r._chunk)
+    r.advance(0.2)
+    assert r.pin("Masked")["Boolean"] is False                 # the integrator's choice is kept
+    assert r.errors == []

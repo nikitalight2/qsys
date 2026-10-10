@@ -5,6 +5,7 @@
 -- U.ascii, so the canvas never emits a byte above 126. Elements are appended
 -- in call order. A character limit drops elements once reached (c.truncated).
 
+do
 Svg = Svg or {}
 
 local floor, abs, cos, sin, pi, min = math.floor, math.abs, math.cos, math.sin, math.pi, math.min
@@ -468,4 +469,5 @@ function Canvas:finish()
   local defs = ""
   if #self.defs > 0 then defs = "<defs>" .. concat(self.defs) .. "</defs>" end
   return self.header .. defs .. concat(self.parts) .. "</svg>"
+end
 end

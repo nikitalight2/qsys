@@ -31,6 +31,7 @@
 Modes = Modes or {}
 
 do
+  local MAX_UNITS = 24                    -- code points of the Units text kept
   local HINT = "Touch or drag the fader"
   local ECHO_TIME = 1.0             -- seconds a target echo of our own write is ignored
   local SNAP = 0.03                 -- SnapCenter window as a fraction of the travel
@@ -92,20 +93,29 @@ do
 
     controls = function(C, props)
       C.add{ Name = "FaderMin", ControlType = "Knob", ControlUnit = "Float", Min = -1000, Max = 1000,
-             DefaultValue = -100, PinStyle = "Input", Group = "Fader" }
+             DefaultValue = -100, PinStyle = "Input", Group = "Fader",
+             Description = "The value at the bottom of the fader." }
       C.add{ Name = "FaderMax", ControlType = "Knob", ControlUnit = "Float", Min = -1000, Max = 1000,
-             DefaultValue = 10, PinStyle = "Input", Group = "Fader" }
-      C.add{ Name = "Units", ControlType = "Text", DefaultValue = "dB", PinStyle = "Input", Group = "Fader" }
+             DefaultValue = 10, PinStyle = "Input", Group = "Fader",
+             Description = "The value at the top of the fader." }
+      C.add{ Name = "Units", ControlType = "Text", DefaultValue = "dB", PinStyle = "Input", Group = "Fader",
+             Description = "The unit text shown after the value." }
       C.add{ Name = "FaderValue", ControlType = "Knob", ControlUnit = "Float", Min = -1000, Max = 1000,
-             DefaultValue = -100, PinStyle = "Both", Group = "Fader" }
+             DefaultValue = -100, PinStyle = "Both", Group = "Fader",
+             Description = "The fader's value in display units." }
       C.add{ Name = "FaderPosition", ControlType = "Knob", ControlUnit = "Float", Min = 0, Max = 1,
-             DefaultValue = 0, PinStyle = "Both", Group = "Fader" }
+             DefaultValue = 0, PinStyle = "Both", Group = "Fader",
+             Description = "The fader's position, 0 to 1." }
       C.add{ Name = "GrabMode", ControlType = "Text", DefaultValue = "Jump", PinStyle = "Input", Group = "Fader",
-             Choices = { "Jump", "Relative" } }
+             Choices = { "Jump", "Relative" },
+             Description = "Jump sets the value where you touch; Relative moves it from where it was." }
       C.add{ Name = "Taper", ControlType = "Text", DefaultValue = "Linear", PinStyle = "Input", Group = "Fader",
-             Choices = { "Linear", "Audio" } }
-      C.add{ Name = "SnapCenter", ControlType = "Button", ButtonType = "Toggle", PinStyle = "Input", Group = "Fader" }
-      C.add{ Name = "DialTarget", ControlType = "Text", PinStyle = "Input", Group = "Fader" }
+             Choices = { "Linear", "Audio" },
+             Description = "Linear or Audio; Audio puts 0 dB at 75 percent of the travel for a -100..10 range." }
+      C.add{ Name = "SnapCenter", ControlType = "Button", ButtonType = "Toggle", PinStyle = "Input", Group = "Fader",
+             Description = "Snaps to the centre value within 3 percent of the travel." }
+      C.add{ Name = "DialTarget", ControlType = "Text", PinStyle = "Input", Group = "Fader",
+             Description = "A control driven directly, as CodeName~control." }
     end,
 
     pages = {},
@@ -376,7 +386,9 @@ do
         local sn = E.ctl("SnapCenter")
         if lo and type(lo.Value) == "number" then self.lo = lo.Value end
         if hi and type(hi.Value) == "number" then self.hi = hi.Value end
-        if un and type(un.String) == "string" then self.units = U.trim(un.String) end
+        -- a units string is a few characters; cutting it here keeps the
+        -- readout's per-frame fit short and cacheable whatever the pin holds
+        if un and type(un.String) == "string" then self.units = U.truncateChars(U.trim(un.String), MAX_UNITS) end
         if gm and type(gm.String) == "string" then self.relative = U.lower(U.trim(gm.String)) == "relative" end
         if tp and type(tp.String) == "string" then self.audio = U.lower(U.trim(tp.String)) == "audio" end
         if sn then self.snap = sn.Boolean and true or false end

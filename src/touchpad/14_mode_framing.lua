@@ -53,17 +53,28 @@ do
     hint = HINT,
 
     controls = function(C, props)
-      C.add{ Name = "FramePan", ControlType = "Knob", ControlUnit = "Float", Min = 0, Max = 1, DefaultValue = 0.5, PinStyle = "Output" }
-      C.add{ Name = "FrameTilt", ControlType = "Knob", ControlUnit = "Float", Min = 0, Max = 1, DefaultValue = 0.5, PinStyle = "Output" }
-      C.add{ Name = "FrameZoom", ControlType = "Knob", ControlUnit = "Float", Min = 0, Max = 1, DefaultValue = 0, PinStyle = "Output" }
-      C.add{ Name = "Apply", ControlType = "Button", ButtonType = "Trigger", PinStyle = "Both" }
-      C.add{ Name = "Reset", ControlType = "Button", ButtonType = "Trigger", PinStyle = "Both" }
-      C.add{ Name = "Home", ControlType = "Button", ButtonType = "Trigger", PinStyle = "Both" }
-      C.add{ Name = "MinFrame", ControlType = "Knob", ControlUnit = "Float", Min = 0.1, Max = 0.6, DefaultValue = 0.25, PinStyle = "Input" }
-      C.add{ Name = "InvertPan", ControlType = "Button", ButtonType = "Toggle", PinStyle = "Both" }
-      C.add{ Name = "InvertTilt", ControlType = "Button", ButtonType = "Toggle", PinStyle = "Both" }
-      C.add{ Name = "HFOV", ControlType = "Knob", ControlUnit = "Float", Min = 20, Max = 120, DefaultValue = 60, PinStyle = "Input", Group = "Camera" }
-      C.add{ Name = "OpticalZoom", ControlType = "Knob", ControlUnit = "Float", Min = 1, Max = 40, DefaultValue = 12, PinStyle = "Input", Group = "Camera" }
+      C.add{ Name = "FramePan", ControlType = "Knob", ControlUnit = "Float", Min = 0, Max = 1, DefaultValue = 0.5, PinStyle = "Output",
+             Description = "Horizontal centre of the applied frame within the home view, 0 to 1." }
+      C.add{ Name = "FrameTilt", ControlType = "Knob", ControlUnit = "Float", Min = 0, Max = 1, DefaultValue = 0.5, PinStyle = "Output",
+             Description = "Vertical centre of the applied frame within the home view, 0 to 1." }
+      C.add{ Name = "FrameZoom", ControlType = "Knob", ControlUnit = "Float", Min = 0, Max = 1, DefaultValue = 0, PinStyle = "Output",
+             Description = "Tightness of the applied frame: 0 is the whole view, 1 the tightest." }
+      C.add{ Name = "Apply", ControlType = "Button", ButtonType = "Trigger", PinStyle = "Both",
+             Description = "Pulses when a shot is sent to the camera; pulse it to apply the current box." }
+      C.add{ Name = "Reset", ControlType = "Button", ButtonType = "Trigger", PinStyle = "Both",
+             Description = "Zooms all the way out; pulses when the pad does it." }
+      C.add{ Name = "Home", ControlType = "Button", ButtonType = "Trigger", PinStyle = "Both",
+             Description = "Zooms out and sends the camera home; pulses when the pad does it." }
+      C.add{ Name = "MinFrame", ControlType = "Knob", ControlUnit = "Float", Min = 0.1, Max = 0.6, DefaultValue = 0.25, PinStyle = "Input",
+             Description = "The smallest frame as a fraction of the home view." }
+      C.add{ Name = "InvertPan", ControlType = "Button", ButtonType = "Toggle", PinStyle = "Both",
+             Description = "Mirrors the pan direction of the outputs and the camera." }
+      C.add{ Name = "InvertTilt", ControlType = "Button", ButtonType = "Toggle", PinStyle = "Both",
+             Description = "Mirrors the tilt direction of the outputs and the camera." }
+      C.add{ Name = "HFOV", ControlType = "Knob", ControlUnit = "Float", Min = 20, Max = 120, DefaultValue = 60, PinStyle = "Input", Group = "Camera",
+             Description = "The camera's horizontal field of view in degrees." }
+      C.add{ Name = "OpticalZoom", ControlType = "Knob", ControlUnit = "Float", Min = 1, Max = 40, DefaultValue = 12, PinStyle = "Input", Group = "Camera",
+             Description = "The camera's maximum optical zoom factor." }
     end,
 
     pages = {},

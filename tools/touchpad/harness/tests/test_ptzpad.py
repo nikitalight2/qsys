@@ -76,7 +76,7 @@ def test_ptz_controls_pins_and_defaults():
         assert n in names, n
     for n in CAMERA_CONTROLS:
         assert n not in names, n                       # Camera Control = None
-    assert len(names) == 26 + len(MODE_CONTROLS)
+    assert len(names) == 27 + len(MODE_CONTROLS)
     assert aim(q) == (0.5, 0.5) and speeds(q) == (0, 0) and leds(q) == (False,) * 4
     assert near(q.pin("Sensitivity")["Value"], 1) and near(q.pin("HFOV")["Value"], 60)
     assert near(q.pin("OpticalZoom")["Value"], 12)

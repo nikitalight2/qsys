@@ -43,20 +43,34 @@ do
     hint = HINT,
 
     controls = function(C, props)
-      C.add{ Name = "Pan", ControlType = "Knob", ControlUnit = "Float", Min = 0, Max = 1, DefaultValue = 0.5, PinStyle = "Output" }
-      C.add{ Name = "Tilt", ControlType = "Knob", ControlUnit = "Float", Min = 0, Max = 1, DefaultValue = 0.5, PinStyle = "Output" }
-      C.add{ Name = "PanSpeed", ControlType = "Knob", ControlUnit = "Float", Min = -1, Max = 1, DefaultValue = 0, PinStyle = "Output" }
-      C.add{ Name = "TiltSpeed", ControlType = "Knob", ControlUnit = "Float", Min = -1, Max = 1, DefaultValue = 0, PinStyle = "Output" }
-      C.add{ Name = "DirLeft", ControlType = "Indicator", IndicatorType = "Led", PinStyle = "Output" }
-      C.add{ Name = "DirRight", ControlType = "Indicator", IndicatorType = "Led", PinStyle = "Output" }
-      C.add{ Name = "DirUp", ControlType = "Indicator", IndicatorType = "Led", PinStyle = "Output" }
-      C.add{ Name = "DirDown", ControlType = "Indicator", IndicatorType = "Led", PinStyle = "Output" }
-      C.add{ Name = "Sensitivity", ControlType = "Knob", ControlUnit = "Float", Min = 0.2, Max = 3, DefaultValue = 1, PinStyle = "Input" }
-      C.add{ Name = "Home", ControlType = "Button", ButtonType = "Trigger", PinStyle = "Both" }
-      C.add{ Name = "InvertPan", ControlType = "Button", ButtonType = "Toggle", PinStyle = "Both" }
-      C.add{ Name = "InvertTilt", ControlType = "Button", ButtonType = "Toggle", PinStyle = "Both" }
-      C.add{ Name = "HFOV", ControlType = "Knob", ControlUnit = "Float", Min = 20, Max = 120, DefaultValue = 60, PinStyle = "Input", Group = "Camera" }
-      C.add{ Name = "OpticalZoom", ControlType = "Knob", ControlUnit = "Float", Min = 1, Max = 40, DefaultValue = 12, PinStyle = "Input", Group = "Camera" }
+      C.add{ Name = "Pan", ControlType = "Knob", ControlUnit = "Float", Min = 0, Max = 1, DefaultValue = 0.5, PinStyle = "Output",
+             Description = "Absolute pan aim, 0 to 1; 0.5 is home." }
+      C.add{ Name = "Tilt", ControlType = "Knob", ControlUnit = "Float", Min = 0, Max = 1, DefaultValue = 0.5, PinStyle = "Output",
+             Description = "Absolute tilt aim, 0 to 1; 0.5 is home." }
+      C.add{ Name = "PanSpeed", ControlType = "Knob", ControlUnit = "Float", Min = -1, Max = 1, DefaultValue = 0, PinStyle = "Output",
+             Description = "Pan speed while dragging, -1 to 1." }
+      C.add{ Name = "TiltSpeed", ControlType = "Knob", ControlUnit = "Float", Min = -1, Max = 1, DefaultValue = 0, PinStyle = "Output",
+             Description = "Tilt speed while dragging, -1 to 1." }
+      C.add{ Name = "DirLeft", ControlType = "Indicator", IndicatorType = "Led", PinStyle = "Output",
+             Description = "On while the aim moves left." }
+      C.add{ Name = "DirRight", ControlType = "Indicator", IndicatorType = "Led", PinStyle = "Output",
+             Description = "On while the aim moves right." }
+      C.add{ Name = "DirUp", ControlType = "Indicator", IndicatorType = "Led", PinStyle = "Output",
+             Description = "On while the aim moves up." }
+      C.add{ Name = "DirDown", ControlType = "Indicator", IndicatorType = "Led", PinStyle = "Output",
+             Description = "On while the aim moves down." }
+      C.add{ Name = "Sensitivity", ControlType = "Knob", ControlUnit = "Float", Min = 0.2, Max = 3, DefaultValue = 1, PinStyle = "Input",
+             Description = "How far the aim moves for a given drag." }
+      C.add{ Name = "Home", ControlType = "Button", ButtonType = "Trigger", PinStyle = "Both",
+             Description = "Sends the aim and the camera home; pulses when the pad does it." }
+      C.add{ Name = "InvertPan", ControlType = "Button", ButtonType = "Toggle", PinStyle = "Both",
+             Description = "Mirrors the pan direction." }
+      C.add{ Name = "InvertTilt", ControlType = "Button", ButtonType = "Toggle", PinStyle = "Both",
+             Description = "Mirrors the tilt direction." }
+      C.add{ Name = "HFOV", ControlType = "Knob", ControlUnit = "Float", Min = 20, Max = 120, DefaultValue = 60, PinStyle = "Input", Group = "Camera",
+             Description = "The camera's horizontal field of view in degrees; sizes the view box." }
+      C.add{ Name = "OpticalZoom", ControlType = "Knob", ControlUnit = "Float", Min = 1, Max = 40, DefaultValue = 12, PinStyle = "Input", Group = "Camera",
+             Description = "The camera's maximum optical zoom factor." }
     end,
 
     pages = {},

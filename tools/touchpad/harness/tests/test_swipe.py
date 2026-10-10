@@ -59,7 +59,7 @@ def only(q, pin, n=1):
 def test_swipe_controls_add_swipe_distance_only():
     q = boot()
     names = q.control_names()
-    assert len(names) == 27 and "SwipeDistance" in names
+    assert len(names) == 28 and "SwipeDistance" in names
     k = q.pin("SwipeDistance")
     assert abs(k["Value"] - 0.2) < 1e-9
     assert q.pin("Gesture")["String"] == "SWIPE IN ANY DIRECTION"
@@ -209,10 +209,11 @@ def test_swipe_distance_knob_lowers_the_threshold():
     q = boot()
     q.set_pin("SwipeDistance", 0.05)                                 # 35 px of the 707 px diagonal
     assert abs(q.run("return TouchPad.inst.fraction") - 0.05) < 1e-9
-    q.swipe(200, 250, 260, 250, seconds=0.1, steps=3)                # 60 px: the engine ignores it
+    assert abs(q.run("return TouchPad.E.swipeDistance()") - 0.05) < 1e-9   # the engine's recognizer follows the knob
+    q.swipe(200, 250, 260, 250, seconds=0.1, steps=3)                # 60 px: enough for the knob
     only(q, "SwipeRight")
     assert q.pin("Gesture")["String"] == "SWIPE RIGHT"
-    assert q.run("return TouchPad.inst.swipes") == 1                 # recognised by the mode
+    assert q.run("return TouchPad.inst.swipes") == 0                 # recognised by the engine, pulsed once
     chevrons = [p for p, _ in polylines(q.icon()) if p.count(" ") == 2]
     assert len(chevrons) == 2
     q.advance(2.0)
@@ -386,7 +387,7 @@ def test_swipe_flick_after_a_taken_back_lift_counts():
     q.lift()
     q.advance(2.0)
     only(q, "SwipeRight", 2)
-    assert q.run("return TouchPad.inst.swipes") == 2
+    assert q.run("return TouchPad.inst.swipes") == 1                 # the engine took the first, the mode the resumed flick
     assert q.pulses("Press") == 1
 
 

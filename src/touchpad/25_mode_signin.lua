@@ -95,19 +95,32 @@ do
     hint = HINT,
 
     controls = function(C, props)
-      C.add({ Name = "GuestName", ControlType = "Text", PinStyle = "Both", Group = "Guest" })
-      C.add({ Name = "GuestCompany", ControlType = "Text", PinStyle = "Both", Group = "Guest" })
-      C.add({ Name = "Visiting", ControlType = "Text", PinStyle = "Both", Group = "Guest" })
-      C.add({ Name = "Submit", ControlType = "Button", ButtonType = "Trigger", PinStyle = "Input", Legend = "SIGN IN" })
-      C.add({ Name = "Clear", ControlType = "Button", ButtonType = "Trigger", PinStyle = "Input", Legend = "CLEAR" })
-      C.add({ Name = "ClearSignature", ControlType = "Button", ButtonType = "Trigger", PinStyle = "Input", Legend = "CLEAR SIGNATURE" })
-      C.add({ Name = "Submitted", ControlType = "Button", ButtonType = "Trigger", PinStyle = "Output" })
-      C.add({ Name = "LastGuest", ControlType = "Text", PinStyle = "Output" })
-      C.add({ Name = "TodayCount", ControlType = "Text", PinStyle = "Output" })
-      C.add({ Name = "RoomName", ControlType = "Text", PinStyle = "Input" })
-      C.add({ Name = "WebhookUrl", ControlType = "Text", PinStyle = "Input" })
-      C.add({ Name = "SendStatus", ControlType = "Text", PinStyle = "Output" })
-      C.add({ Name = "PenWidth", ControlType = "Knob", ControlUnit = "Float", Min = 1, Max = 8, DefaultValue = 3, PinStyle = "Input" })
+      C.add({ Name = "GuestName", ControlType = "Text", PinStyle = "Both", Group = "Guest",
+              Description = "The guest's name." })
+      C.add({ Name = "GuestCompany", ControlType = "Text", PinStyle = "Both", Group = "Guest",
+              Description = "The guest's company." })
+      C.add({ Name = "Visiting", ControlType = "Text", PinStyle = "Both", Group = "Guest",
+              Description = "Who the guest is visiting." })
+      C.add({ Name = "Submit", ControlType = "Button", ButtonType = "Trigger", PinStyle = "Input", Legend = "SIGN IN",
+              Description = "Signs the guest in: saves the signature and the log line." })
+      C.add({ Name = "Clear", ControlType = "Button", ButtonType = "Trigger", PinStyle = "Input", Legend = "CLEAR",
+              Description = "Clears the form and the signature." })
+      C.add({ Name = "ClearSignature", ControlType = "Button", ButtonType = "Trigger", PinStyle = "Input", Legend = "CLEAR SIGNATURE",
+              Description = "Clears the signature only." })
+      C.add({ Name = "Submitted", ControlType = "Button", ButtonType = "Trigger", PinStyle = "Output",
+              Description = "Pulses after a successful sign-in." })
+      C.add({ Name = "LastGuest", ControlType = "Text", PinStyle = "Output",
+              Description = "The name of the last guest signed in." })
+      C.add({ Name = "TodayCount", ControlType = "Text", PinStyle = "Output",
+              Description = "How many guests signed in today." })
+      C.add({ Name = "RoomName", ControlType = "Text", PinStyle = "Input",
+              Description = "The room name written to the log and the webhook." })
+      C.add({ Name = "WebhookUrl", ControlType = "Text", PinStyle = "Input",
+              Description = "Where each sign-in is posted when the Sign-In Webhook property is on." })
+      C.add({ Name = "SendStatus", ControlType = "Text", PinStyle = "Output",
+              Description = "The result of the last webhook post." })
+      C.add({ Name = "PenWidth", ControlType = "Knob", ControlUnit = "Float", Min = 1, Max = 8, DefaultValue = 3, PinStyle = "Input",
+              Description = "The signature pen width in pixels." })
     end,
 
     pages = {},
@@ -379,10 +392,19 @@ do
       end
 
       -- ---------- form ----------
+      -- The header's fitted lines are kept per field (fit.name for the
+      -- guest name, fit.sub for company and visiting, fit.room): a change
+      -- drops only its own line, and drawHeader re-fits one line per frame.
+      local function dropFit(key)
+        if key == "name" then self.fit.name = nil
+        elseif key == "room" then self.fit.room = nil
+        else self.fit.sub = nil end
+      end
+
       local function setField(key, name, value)
         if self.fields[key] ~= value then
           self.fields[key] = value
-          self.fit = {}
+          dropFit(key)
           E.out(name, value)
         end
       end
@@ -403,6 +425,11 @@ do
         setField("name", "GuestName", "")
         setField("company", "GuestCompany", "")
         setField("visiting", "Visiting", "")
+        -- a pin holding only whitespace normalises to "" without a write, so
+        -- the pins are cleared explicitly (E.out writes only when they differ)
+        E.out("GuestName", "")
+        E.out("GuestCompany", "")
+        E.out("Visiting", "")
         clearInk()
         if not quiet then
           clearMessage()
@@ -605,11 +632,11 @@ do
 
       function self:onControl(name, index, ctl)
         if name == "GuestName" then
-          self.fields.name = field(ctl.String); self.fit = {}; activity()
+          self.fields.name = field(ctl.String); dropFit("name"); activity()
         elseif name == "GuestCompany" then
-          self.fields.company = field(ctl.String); self.fit = {}; activity()
+          self.fields.company = field(ctl.String); dropFit("sub"); activity()
         elseif name == "Visiting" then
-          self.fields.visiting = field(ctl.String); self.fit = {}; activity()
+          self.fields.visiting = field(ctl.String); dropFit("sub"); activity()
         elseif name == "Submit" then
           if fired(name, ctl) then submit() end
         elseif name == "Clear" then
@@ -622,7 +649,7 @@ do
             E.setGesture("SIGNATURE CLEARED")
           end
         elseif name == "RoomName" then
-          self.room = field(ctl.String); self.fit = {}
+          self.room = field(ctl.String); dropFit("room")
         elseif name == "WebhookUrl" then
           return
         end
@@ -634,6 +661,10 @@ do
         local x0, y = m, m + titleSize
         c:text(x0, y, "Visitor sign-in", { size = titleSize, fill = T.muted, weight = "bold" })
         local fit = self.fit        -- fitted lines, measured once per field or count change
+        -- At most one line is fitted per frame (a wide pad fits a hundred
+        -- characters of a long non-ASCII field, dear to fit and to escape);
+        -- a line still missing is drawn on the next frame, asked for below.
+        local fitted, missing = false, false
         -- the day count always shows; the room name fits into what is left
         local today = "Today: " .. self.count
         local todayW = Font.width(today, titleSize)
@@ -645,6 +676,7 @@ do
           if fit.room == nil or fit.roomFor ~= self.count then
             fit.room = (avail >= titleSize * 2) and Font.fit(room, titleSize, avail) or ""
             fit.roomFor = self.count
+            fitted = true
           end
           if fit.room ~= "" then
             c:text(W - m - todayW - gap, y, fit.room, { size = titleSize, fill = T.muted, anchor = "end" })
@@ -652,25 +684,36 @@ do
         end
         y = y + nameSize + 4
         local f = self.fields
-        -- the fitted name and sub-line are measured once per field change,
-        -- not per frame (a 120-character field is costly to fit)
         if fit.name == nil then
-          fit.name = (f.name ~= "") and Font.fit(f.name, nameSize, W - 2 * m, "bold") or ""
-          local sub = f.company
-          if f.visiting ~= "" then sub = (sub ~= "" and (sub .. "  -  ") or "") .. "visiting " .. f.visiting end
-          fit.sub = (sub ~= "") and Font.fit(sub, subSize, W - 2 * m) or ""
+          if fitted then
+            missing = true
+          else
+            fit.name = (f.name ~= "") and Font.fit(f.name, nameSize, W - 2 * m, "bold") or ""
+            fitted = true
+          end
+        end
+        if fit.sub == nil then
+          if fitted then
+            missing = true
+          else
+            local sub = f.company
+            if f.visiting ~= "" then sub = (sub ~= "" and (sub .. "  -  ") or "") .. "visiting " .. f.visiting end
+            fit.sub = (sub ~= "") and Font.fit(sub, subSize, W - 2 * m) or ""
+            fitted = true
+          end
         end
         if f.name ~= "" then
-          if fit.name ~= "" then c:text(x0, y, fit.name, { size = nameSize, fill = T.text, weight = "bold" }) end
+          if fit.name and fit.name ~= "" then c:text(x0, y, fit.name, { size = nameSize, fill = T.text, weight = "bold" }) end
         else
           c:text(x0, y, "Your name", { size = nameSize, fill = T.line, weight = "bold" })
         end
         y = y + subSize + 6
         if f.company ~= "" or f.visiting ~= "" then
-          if fit.sub ~= "" then c:text(x0, y, fit.sub, { size = subSize, fill = T.muted }) end
+          if fit.sub and fit.sub ~= "" then c:text(x0, y, fit.sub, { size = subSize, fill = T.muted }) end
         else
           c:text(x0, y, "Company and who you are visiting", { size = subSize, fill = T.line })
         end
+        if missing then E.invalidate() end
       end
 
       local function drawFooter(c)

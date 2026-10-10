@@ -82,7 +82,16 @@ do
       if name == "ZoomIn" or name == "ZoomOut" then
         local on = false
         pcall(function() on = ctl.Boolean and true or false end)
-        if name == "ZoomIn" then self:zoom(on and 1 or 0) else self:zoom(on and -1 or 0) end
+        local dir = (name == "ZoomIn") and 1 or -1
+        if not on then
+          -- releasing one Zoom pin while the other is still held keeps
+          -- zooming the held way instead of stopping the camera
+          local other = E.ctl((name == "ZoomIn") and "ZoomOut" or "ZoomIn")
+          local otherOn = false
+          if other ~= nil then pcall(function() otherOn = other.Boolean and true or false end) end
+          dir = otherOn and -dir or 0
+        end
+        self:zoom(dir)
         return true
       end
       if name == "CameraIP" and type(self.reconnect) == "function" then
@@ -956,6 +965,17 @@ do
       end
     end
 
+    -- One unanswered position inquiry (timed out, or replaced before any
+    -- position reply): after MISSES_FOR_WARNING in a row with no position
+    -- reply ever received, CameraStatus warns once. A reply resets the count.
+    local function miss()
+      d.misses = d.misses + 1
+      if d.posReplies == 0 and d.misses >= MISSES_FOR_WARNING and not d.warnedNoPos then
+        d.warnedNoPos = true
+        report(E, d, describe() .. ": no answer to position inquiries (framing and dial need them)", "warn")
+      end
+    end
+
     function d.getPosition(self, cb)
       if not ensure() then
         if type(cb) == "function" then cb(nil) end
@@ -968,6 +988,10 @@ do
         local old = self.pending
         self.pending = nil
         if old.timer then old.timer:cancel() end
+        -- an inquiry replaced before its position reply counts as a miss, so a
+        -- caller polling faster than INQUIRY_TIMEOUT (the dial, a held zoom)
+        -- still gets the warning after MISSES_FOR_WARNING unanswered inquiries
+        if old.pan == nil then miss() end
         if type(old.cb) == "function" then E.after(0, function() old.cb(nil) end) end
       end
       local pend = { cb = cb, pan = nil, tilt = nil, zoom = nil }
@@ -975,11 +999,7 @@ do
       pend.timer = E.after(INQUIRY_TIMEOUT, function()
         if self.pending ~= pend then return end
         self.pending = nil
-        self.misses = self.misses + 1
-        if self.posReplies == 0 and self.misses >= MISSES_FOR_WARNING and not self.warnedNoPos then
-          self.warnedNoPos = true
-          report(E, d, describe() .. ": no answer to position inquiries (framing and dial need them)", "warn")
-        end
+        miss()
         if type(cb) == "function" then cb(nil) end
       end)
       send("\129\9\6\18\255", true, "ipt")

@@ -108,7 +108,7 @@ def test_whiteboard_controls_defaults_and_layout_lint():
     names = q.control_names()
     for n in ["PenWidth", "PenColor", "Eraser", "Undo", "ClearBoard", "Snapshot", "Strokes", "LastFile"]:
         assert n in names, n
-    assert len(names) == 34                                   # 26 common + 8 whiteboard
+    assert len(names) == 35                                   # 27 common + 8 whiteboard
     assert q.pin("PenWidth")["Value"] == 3
     assert q.pin("PenColor")["String"] == "Accent"
     assert q.pin("PenColor")["Choices"] == ["Accent", "White", "Black", "Red", "Green", "Blue"]

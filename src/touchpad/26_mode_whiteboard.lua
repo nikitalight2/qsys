@@ -256,15 +256,23 @@ do
 
     controls = function(C, props)
       C.add({ Name = "PenWidth", ControlType = "Knob", ControlUnit = "Float", Min = MIN_WIDTH, Max = MAX_WIDTH,
-              DefaultValue = DEFAULT_WIDTH, PinStyle = "Input" })
+              DefaultValue = DEFAULT_WIDTH, PinStyle = "Input",
+              Description = "The pen width in pixels." })
       C.add({ Name = "PenColor", ControlType = "Text", PinStyle = "Input", DefaultValue = "Accent",
-              Choices = COLOR_NAMES })
-      C.add({ Name = "Eraser", ControlType = "Button", ButtonType = "Toggle", PinStyle = "Input" })
-      C.add({ Name = "Undo", ControlType = "Button", ButtonType = "Trigger", PinStyle = "Input" })
-      C.add({ Name = "ClearBoard", ControlType = "Button", ButtonType = "Trigger", PinStyle = "Input" })
-      C.add({ Name = "Snapshot", ControlType = "Button", ButtonType = "Trigger", PinStyle = "Input" })
-      C.add({ Name = "Strokes", ControlType = "Indicator", IndicatorType = "Text", PinStyle = "Output" })
-      C.add({ Name = "LastFile", ControlType = "Text", PinStyle = "Output" })
+              Choices = COLOR_NAMES,
+              Description = "The pen colour: Accent, White, Black, Red, Green or Blue." })
+      C.add({ Name = "Eraser", ControlType = "Button", ButtonType = "Toggle", PinStyle = "Input",
+              Description = "On: the finger removes every stroke it crosses." })
+      C.add({ Name = "Undo", ControlType = "Button", ButtonType = "Trigger", PinStyle = "Input",
+              Description = "Removes the last stroke." })
+      C.add({ Name = "ClearBoard", ControlType = "Button", ButtonType = "Trigger", PinStyle = "Input",
+              Description = "Empties the board." })
+      C.add({ Name = "Snapshot", ControlType = "Button", ButtonType = "Trigger", PinStyle = "Input",
+              Description = "Writes the board as an SVG file and names it on Last File." })
+      C.add({ Name = "Strokes", ControlType = "Indicator", IndicatorType = "Text", PinStyle = "Output",
+              Description = "How many strokes are on the board." })
+      C.add({ Name = "LastFile", ControlType = "Text", PinStyle = "Output",
+              Description = "The file written by the last snapshot." })
     end,
 
     pages = {},

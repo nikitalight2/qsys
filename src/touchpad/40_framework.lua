@@ -19,6 +19,7 @@
 -- relies on a global set by an earlier call: GetControlLayout rebuilds the
 -- control list itself through Framework.buildControls.
 
+do
 Framework = Framework or {}
 
 local BRAND_DASH = "\226\128\147"          -- the brand en dash, written as ASCII escapes
@@ -28,6 +29,8 @@ local SETUP_COL_W = 328                     -- Setup page column width
 local SIDE_W = 168                          -- Pad page right column (mode buttons)
 local OUT_ROWS, OUT_CELL_W, OUT_CELL_H = 16, 112, 48
 local MINI = 24                             -- compact cell for arrays longer than 16
+local MINI_COLS = 32                        -- mini cells per row
+local OUT_PAGE_CELLS = MINI_COLS * 16       -- mini cells per Outputs page; more go on "Outputs 2", ...
 local MIN_PAGE_W = 700
 
 local DEFAULT_MODE = "XY Pad"
@@ -123,7 +126,11 @@ local function padColourNote(props)
   local custom = (name == "Custom") and prop(props, "Background Color", "") or ""
   local hex
   if background == "Panel" then
+    -- an 80 % panel over the page art: the page shows through, so the
+    -- colour to put under the copies is the page's own
     hex = U.isHex(custom) and Svg.lighten(custom, 0.06) or T.panel
+    local r, g, b = U.hexToRgb(hex)
+    return string.format("Pad colour: none (Panel: %d,%d,%d at 80 %% over the page art)", r, g, b)
   elseif U.isHex(custom) then
     hex = custom
   end
@@ -285,12 +292,13 @@ local function extraPages(mode, props)
 end
 Framework.extraPages = extraPages
 
-function Framework.pageNames(props)
+function Framework.pageNames(props, meta, order)
   local mode = modeOf(props)
   local names = { "Pad", "Setup" }
   for _, p in ipairs(extraPages(mode, props)) do names[#names + 1] = p end
   if cameraKind(props, mode) == CAMERA_DEMO then names[#names + 1] = "Camera View" end
   names[#names + 1] = "Outputs"
+  for p = 2, Framework.outputPageCount(props, meta, order) do names[#names + 1] = "Outputs " .. p end
   names[#names + 1] = "Display"
   names[#names + 1] = "About"
   return names
@@ -326,9 +334,56 @@ local function text(name, pin, group)
   return { Name = name, ControlType = "Text", PinStyle = pin, Group = group }
 end
 
+-- One plain sentence per common and camera control (spec section 3), shown
+-- as the control's Description in Designer and in docs/touchpad/PINS.md.
+local DESCRIPTIONS = {
+  Status = "The plugin's status: OK while bound to the picker, otherwise the problem.",
+  Display = "The pad drawing; copy it from the Display page onto the UCI. Disabled at run time so touches pass through.",
+  Picker = "Code Name of the Color Picker to read; blank uses the Color Picker property.",
+  Refresh = "Re-scans the design for the picker and rebinds.",
+  PanelTouch = "Wire the touch panel's Touch Activity here for exact press and release.",
+  Calibrate = "Two-tap calibration tool: on shows two targets to tap in turn, off cancels.",
+  Calibration = "Calibration lines, P x0 y0 w h for panels and D x0 y0 w h for Designer; editable.",
+  PickerLayout = "The computed picker size and placement for the current pad size.",
+  SetupVersion = "Records that the first-start defaults of the toggles were written once.",
+  ReleaseTime = "Silence counted as a lift when Panel Touch is not wired.",
+  LongPressTime = "How long a still finger must rest for a long press.",
+  Lock = "On: touches are ignored and the pad draws dimmed with a lock icon.",
+  Touching = "On while a finger is on the pad.",
+  X = "Live finger position from left (0) to right (1).",
+  Y = "Live finger position from bottom (0) to top (1).",
+  Tap = "Pulses on a tap.",
+  DoubleTap = "Pulses on a double tap.",
+  LongPress = "Pulses when a finger rests still for Long Press Time.",
+  Press = "Pulses on touch down.",
+  Release = "Pulses on a confirmed lift.",
+  SwipeLeft = "Pulses on a swipe to the left; every mode, not only Swipe Layer.",
+  SwipeRight = "Pulses on a swipe to the right; every mode, not only Swipe Layer.",
+  SwipeUp = "Pulses on a swipe upwards; every mode, not only Swipe Layer.",
+  SwipeDown = "Pulses on a swipe downwards; every mode, not only Swipe Layer.",
+  Gesture = "The last gesture or the hint text, in upper case.",
+  DragDistance = "Normalised distance of the current or last drag; the pad diagonal is 1.",
+  DragAngle = "Degrees of the current or last drag; 0 is right, 90 is up.",
+  ZoomIn = "Hold to zoom the camera in.",
+  ZoomOut = "Hold to zoom the camera out.",
+  MaxSpeed = "The fastest pan and tilt speed sent to the camera, in percent.",
+  ZoomSpeed = "The zoom speed sent to the camera, in percent.",
+  CameraStatus = "The camera driver's status text.",
+  CameraIP = "The IP address of the VISCA over IP camera.",
+  CameraView = "The Demo camera's view; copy it onto the UCI like the pad's Display.",
+}
+
+-- Fills in Description from DESCRIPTIONS for every control of a list that has none.
+local function describe(list)
+  for _, def in ipairs(list) do
+    if def.Description == nil then def.Description = DESCRIPTIONS[def.Name] end
+  end
+  return list
+end
+
 -- The common controls of spec section 3 (every mode).
 local function commonControls()
-  return {
+  return describe{
     indicator("Status", "Status", "Output", "Setup"),
     { Name = "Display", ControlType = "Button", ButtonType = "Momentary", Group = "Setup", Display = true },
     text("Picker", "Input", "Setup"),
@@ -337,6 +392,7 @@ local function commonControls()
     button("Calibrate", "Toggle", "Input", "Setup"),
     text("Calibration", nil, "Setup"),
     indicator("PickerLayout", "Text", nil, "Setup"),
+    indicator("SetupVersion", "Text", nil, "Setup"),
     knob("ReleaseTime", "Seconds", 0.1, 1.0, 0.25, "Input", "Setup"),
     knob("LongPressTime", "Seconds", 0.3, 3, 0.6, "Input", "Setup"),
     button("Lock", "Toggle", "Input", "Setup"),
@@ -371,7 +427,7 @@ local function cameraControls(kind)
   if kind == CAMERA_DEMO then
     list[#list + 1] = { Name = "CameraView", ControlType = "Button", ButtonType = "Momentary", Group = "Camera", Display = true }
   end
-  return list
+  return describe(list)
 end
 
 -- Builds the control list for props. Returns (list, meta, order) where
@@ -592,11 +648,15 @@ local function newLayout(page, props, meta, order, prettyName, baseW)
     return L.put(key, { Style = "Meter", MeterStyle = opts.meterStyle or "Level", Position = pos, Size = size,
                         PrettyName = opts.pretty })
   end
-  -- The pad drawing: a flat white read-only button whose icon the runtime sets.
+  -- The pad drawing: a flat white read-only button whose icon the runtime
+  -- sets. Margin, Padding and StrokeWidth are 0 (Padding defaults to 1) so
+  -- the icon's viewBox maps onto the control's pixels exactly and no face
+  -- edge shows before the first frame; the stroke is white like the face.
   function L.display(key, pos, size)
     return L.put(key, { Style = "Button", ButtonStyle = "Momentary", ButtonVisualStyle = "Flat",
                         IsReadOnly = true, Legend = "", Color = WHITE, UnlinkOffColor = true,
-                        OffColor = WHITE, CornerRadius = 0, Position = pos, Size = size })
+                        OffColor = WHITE, StrokeColor = WHITE, StrokeWidth = 0, Margin = 0, Padding = 0,
+                        CornerRadius = 0, Position = pos, Size = size })
   end
 
   -- Picks the style from the control definition.
@@ -861,48 +921,112 @@ local function isOutput(m)
   return (pin == "Output" or pin == "Both") and m.def.Name ~= "Status"
 end
 
-local function pageOutputs(L, props, mt)
+-- Output arrays longer than OUT_ROWS are drawn as mini cells, OUT_PAGE_CELLS
+-- per Outputs page (a 64 x 64 Matrix has 4096 Cross pins: one page of them
+-- would carry thousands of widgets and cost Designer a million instructions
+-- to lay out). Returns per page the list of { m, first, last } chunks.
+local function outputChunks(meta, order)
+  local pages = {}
+  local p, room = 1, OUT_PAGE_CELLS
+  for _, name in ipairs(order) do
+    local m = meta[name]
+    if isOutput(m) and m.count > OUT_ROWS then
+      local i = 1
+      while i <= m.count do
+        if room == 0 then p, room = p + 1, OUT_PAGE_CELLS end
+        local j = math.min(m.count, i + room - 1)
+        pages[p] = pages[p] or {}
+        pages[p][#pages[p] + 1] = { m = m, first = i, last = j }
+        room = room - (j - i + 1)
+        i = j + 1
+      end
+    end
+  end
+  return pages
+end
+
+-- Number of Outputs pages for these properties (1 plus one per extra block
+-- of OUT_PAGE_CELLS mini cells).
+function Framework.outputPageCount(props, meta, order)
+  if not (meta and order) then
+    local built
+    built, meta, order = Framework.buildControls(props)
+  end
+  return math.max(1, #outputChunks(meta, order))
+end
+
+-- One chunk of mini cells, 32 per row, written straight into the layout
+-- (the entries are what L.button / L.knob / L.led / L.place would build,
+-- without the per-key lookups: a page of 1024 cells must stay cheap for
+-- Designer's design-time Lua). Returns the y below the block.
+local function miniCells(L, m, first, last, y)
+  local def = m.def
+  local name = def.Name
+  local cols = math.min(m.count, MINI_COLS)
+  L.caption(string.format("%s %d..%d (%d per row)", spaced(name):upper(), first, last, cols), { M, y }, { 400, 10 }, "Left")
+  y = y + 12
+  local prefix = m.pinned and (m.pretty .. " ") or nil
+  local ct = def.ControlType
+  local kind = def.ButtonType or "Momentary"
+  local color = buttonColor(kind)
+  local isLed = (ct == "Indicator" and (def.IndicatorType == "Led" or def.IndicatorType == "Status"))
+  local readOnly = (ct ~= "Text") and true or nil
+  local step = MINI + 2
+  local offBG, magenta, ok, stroke = Nikita.BG, Nikita.Magenta, Nikita.OK, Nikita.Stroke
+  local placed, layout = L.placed, L.layout
+  local keyPrefix = name .. " "
+  local col, x, cy, rows = 0, M, y, 1
+  for i = first, last do
+    local e
+    if ct == "Button" then
+      e = { Style = "Button", ButtonStyle = kind, Legend = tostring(i), Color = color, UnlinkOffColor = true,
+            OffColor = offBG, FontSize = 7, CornerRadius = 2, Position = { x, cy }, Size = { MINI, MINI } }
+    elseif ct == "Knob" then
+      e = { Style = "Knob", Color = magenta, Position = { x, cy }, Size = { MINI, MINI } }
+    elseif isLed then
+      e = { Style = "Led", Color = ok, UnlinkOffColor = true, OffColor = stroke,
+            Position = { x + 4, cy + 4 }, Size = { 16, 16 } }
+    else
+      e = { Style = "Text", HTextAlign = "Left", FontSize = 7, IsReadOnly = readOnly,
+            Position = { x, cy }, Size = { MINI, MINI } }
+    end
+    if prefix then e.PrettyName = prefix .. i end
+    local key = keyPrefix .. i
+    placed[key] = true
+    layout[key] = e
+    col = col + 1
+    if col == cols and i < last then col, x, cy, rows = 0, M, cy + step, rows + 1
+    else x = x + step end
+  end
+  L.track({ M, y }, { cols * step, rows * step })
+  return y + rows * step + GAP
+end
+
+local function pageOutputs(L, props, mt, pageNo)
+  pageNo = pageNo or 1
   local y0 = HEADER + GAP + 20
-  L.title("O U T P U T S", { M, HEADER + GAP }, { 400, 12 })
-  local n = 0
-  local big = {}
-  for _, name in ipairs(L.order) do
-    local m = L.meta[name]
-    if isOutput(m) then
-      if m.count <= OUT_ROWS then
+  L.title((pageNo == 1) and "O U T P U T S" or ("O U T P U T S   " .. pageNo), { M, HEADER + GAP }, { 400, 12 })
+  local y = y0
+  if pageNo == 1 then
+    local n = 0
+    for _, name in ipairs(L.order) do
+      local m = L.meta[name]
+      if isOutput(m) and m.count <= OUT_ROWS then
         for i = 1, m.count do
           local col, row = math.floor(n / OUT_ROWS), n % OUT_ROWS
           L.cell(layoutKey(name, i, m.count), M + col * (OUT_CELL_W + G), y0 + row * (OUT_CELL_H + G), OUT_CELL_W, OUT_CELL_H)
           n = n + 1
         end
-      else
-        big[#big + 1] = m
       end
     end
+    if n > 0 then y = y0 + math.min(n, OUT_ROWS) * (OUT_CELL_H + G) + GAP end
   end
-  local y = y0
-  if n > 0 then y = y0 + math.min(n, OUT_ROWS) * (OUT_CELL_H + G) + GAP end
-  -- Arrays longer than 16: compact blocks of mini cells, 32 per row.
-  for _, m in ipairs(big) do
-    local cols = math.min(m.count, 32)
-    L.caption(string.format("%s 1..%d (%d per row)", spaced(m.def.Name):upper(), m.count, cols), { M, y }, { 400, 10 }, "Left")
-    y = y + 12
-    for i = 1, m.count do
-      local col, row = (i - 1) % cols, math.floor((i - 1) / cols)
-      local key = layoutKey(m.def.Name, i, m.count)
-      local x, cy = M + col * (MINI + 2), y + row * (MINI + 2)
-      if m.def.ControlType == "Button" then
-        L.button(key, tostring(i), { x, cy }, { MINI, MINI }, { fontSize = 7, radius = 2 })
-      elseif m.def.ControlType == "Knob" then
-        L.knob(key, { x, cy }, { MINI, MINI })
-      elseif m.def.ControlType == "Indicator" and (m.def.IndicatorType == "Led" or m.def.IndicatorType == "Status") then
-        L.led(key, { x + 4, cy + 4 }, { 16, 16 })
-      else
-        L.place(key, { x, cy }, { MINI, MINI }, { fontSize = 7 })
-      end
-    end
-    y = y + math.ceil(m.count / cols) * (MINI + 2) + GAP
+  -- Arrays longer than 16: compact blocks of mini cells, 32 per row, paged.
+  local chunks = outputChunks(L.meta, L.order)[pageNo] or {}
+  for _, ch in ipairs(chunks) do
+    y = miniCells(L, ch.m, ch.first, ch.last, y)
   end
+  if pageNo ~= 1 then return end
   local W, H = padSize(props)
   local ctx = { page = "Outputs", W = W, H = H, x = M, y = y, w = PAD_FIT_W, M = M, GAP = GAP, G = G }
   if mt and type(mt.layout) == "function" then
@@ -932,8 +1056,12 @@ local function pageAbout(L, props, mt)
   L.label("Touch Pad for Q-SYS, version " .. tostring(PluginInfo.Version), { M, y + 132 }, { 400, 14 }, { color = Nikita.Text })
   L.label("Touch input through a native Color Picker; drawing as a script-set icon.", { M, y + 150 }, { 480, 14 })
   L.label("Mode: " .. modeOf(props) .. ". Sixteen modes, every result on a pin. Open source.", { M, y + 166 }, { 480, 14 })
+  -- The first start writes the documented defaults of the toggles once and
+  -- records it here (blank = not yet), see the runtime's first-run step.
+  L.caption("FIRST-RUN SETUP", { M, y + 186 }, { 160, 10 }, "Left")
+  L.readout("SetupVersion", { M, y + 198 }, { 80, 20 }, { fontSize = 9 })
   local W, H = padSize(props)
-  local ctx = { page = "About", W = W, H = H, x = M, y = y + 190, w = 480, M = M, GAP = GAP, G = G }
+  local ctx = { page = "About", W = W, H = H, x = M, y = y + 230, w = 480, M = M, GAP = GAP, G = G }
   if mt and type(mt.layout) == "function" then
     local ok, err = pcall(mt.layout, L, "About", props, ctx)
     if not ok then L.problems[#L.problems + 1] = "About: mode layout error: " .. tostring(err) end
@@ -974,10 +1102,10 @@ function GetControlLayout(props)
   local mode = modeOf(props)
   local mt = modeTable(mode)
   local kind = cameraKind(props, mode)
-  local names = Framework.pageNames(props)
+  local _, meta, order = Framework.buildControls(props)
+  local names = Framework.pageNames(props, meta, order)
   local index = propInt(props, "page_index", 1, 1, #names)
   local page = names[index] or "Pad"
-  local _, meta, order = Framework.buildControls(props)
 
   local baseW = MIN_PAGE_W
   if page == "Setup" then baseW = M + SETUP_COL_W + GAP + SETUP_COL_W + M end
@@ -989,7 +1117,9 @@ function GetControlLayout(props)
   elseif page == "Setup" then
     pageSetup(L, props, mt, kind)
   elseif page == "Outputs" then
-    pageOutputs(L, props, mt)
+    pageOutputs(L, props, mt, 1)
+  elseif page:match("^Outputs (%d+)$") then
+    pageOutputs(L, props, mt, tonumber(page:match("^Outputs (%d+)$")))
   elseif page == "Display" then
     pageDisplay(L, props, mt)
   elseif page == "About" then
@@ -1010,3 +1140,4 @@ end
 function GetPins(props) return {} end
 function GetComponents(props) return {} end
 function GetWiring(props) return {} end
+end

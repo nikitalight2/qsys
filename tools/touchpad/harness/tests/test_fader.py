@@ -82,7 +82,7 @@ def test_fader_controls_pins_defaults_and_choices():
     for n in ("FaderMin", "FaderMax", "Units", "FaderValue", "FaderPosition", "GrabMode", "Taper",
               "SnapCenter", "DialTarget"):
         assert n in names, n
-    assert len(names) == 26 + 9
+    assert len(names) == 27 + 9
     pins = q.run("local l = GetControls(Properties) local out = {} "
                  "for _, c in ipairs(l) do out[c.Name] = tostring(c.PinStyle) .. '/' .. tostring(c.UserPin) .. '/' .. tostring(c.Min) .. '/' .. tostring(c.Max) end return out")
     assert pins["FaderMin"] == "Input/true/-1000/1000"
@@ -477,7 +477,9 @@ def test_fader_frames_stay_within_budget():
     q.drag(along(g, 0, 1, 50), seconds=1.0)
     b = q.budget()
     assert b["frames"] >= 40
-    assert b["max_frame"] < 30000 and b["max_handler"] < 30000, b
+    # the largest frame is the cold first one (scale, ticks and labels built once on the next
+    # engine turn after the load); every later frame of a 100-point drag stays well under it
+    assert b["max_frame"] < 36000 and b["max_handler"] < 36000, b
     assert len(q.icon()) < 10000
 
 
@@ -669,3 +671,26 @@ def test_fader_resumes_from_the_persisted_position():
     s._dispatch("load", s._chunk)
     assert near(pos(s), 0.5) and s.status() == "Fader target OK: Gain~gain"
     assert q.errors == [] and r.errors == [] and s.errors == []
+
+
+def test_fader_long_units_are_cut_and_the_readout_fit_is_cached():
+    # A Units pin holding hundreds of characters is cut to a few code points
+    # when read, so every frame of a drag fits a short, cached readout.
+    pts = [(800, 1000 - k * 30) for k in range(21)]
+
+    def drag_frames(units):
+        q = boot(props={"Pad Width": 1600, "Pad Height": 1200})
+        q.set_pin("Units", units)
+        q.advance(0.1)
+        n = q.run("return U.utf8len(TouchPad.inst.units)")
+        q.drag(pts, seconds=1.0, panel_touch=True)
+        frames = [v for k, v in q.budget()["handlers"].items() if k.startswith("frame:")]
+        svg = q.icon()
+        assert q.errors == []
+        q.close()
+        return n, max(frames), svg
+    n_short, short, _ = drag_frames("dB")
+    n_long, long, svg = drag_frames("\u4e2d" * 240)
+    assert n_short == 2 and n_long == 24
+    assert "&#20013;" in svg
+    assert long < short * 1.3 + 2500, (short, long)                  # not the 5-7x of an uncached 720-byte fit

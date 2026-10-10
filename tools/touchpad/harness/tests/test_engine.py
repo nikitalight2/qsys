@@ -26,6 +26,9 @@ def near(a, b, tol=1e-6):
     return abs(a - b) <= tol
 
 
+DIAG = math.sqrt(500 ** 2 + 500 ** 2)
+
+
 # ------------------------------------------------------------------ start
 
 def test_start_state():
@@ -611,7 +614,7 @@ def test_engine_api_surface_is_exactly_the_contract():
     q = boot()
     keys = q.run("local t = {} for k in pairs(TouchPad.E) do t[#t + 1] = k end table.sort(t) return table.concat(t, ',')")
     assert keys == ("H,T,W,after,animate,cameraFactory,ctl,ctls,dbg,every,file,font,hint,http,invalidate,json,"
-                    "log,now,out,props,pulse,setGesture,status"), keys                 # E.camera is nil for now
+                    "log,now,out,props,pulse,restartStroke,setGesture,setSwipeDistance,status,swipeDistance"), keys   # E.camera is nil for now
     assert q.run("return TouchPad.E.W, TouchPad.E.H") == (500, 500)
     assert q.run("return TouchPad.E.T.accent") == "#C513E8"
     assert q.run('return TouchPad.E.props["Mode"], TouchPad.E.props["Max Frame Rate"]') == ("XY Pad", "20")
@@ -1044,6 +1047,8 @@ def test_bind_and_first_frame_errors_land_on_status():
     q2 = QSys(mode="XY Pad", picker="Color_Picker", runtime=False)
     q2.run("Controls.Display = nil")                                   # the first frame cannot be written
     q2._dispatch("load", q2._chunk)
+    assert q2.errors == [] and q2.status().startswith("OK")            # the load itself draws nothing
+    q2.advance(0.05)                                                   # the first frame runs on the next engine turn
     assert q2.errors == [] and q2.status().startswith("Recovered from an error") and "nil" in q2.status()
 
 
@@ -1424,3 +1429,61 @@ def test_panel_touch_toggled_after_start_is_exact():
     q.advance(0.5)
     q.tap(250, 125, panel_touch=True)                                 # ... and an edge-driven tap is exact
     assert q.pulses("Press") == 2 and q.pulses("Tap") == 1 and q.pulses("Release") == 2
+
+
+# ------------------------------------------------------------ swipe distance and stroke restart hooks
+
+def test_set_swipe_distance_moves_the_engine_threshold():
+    q = boot()                                                        # XY Pad: no mode touches the hook
+    assert near(q.run("return TouchPad.E.swipeDistance()"), 0.2)
+    q.swipe(200, 250, 260, 250, seconds=0.1, steps=3)                 # 60 px of the 707 px diagonal: too short
+    q.advance(2.0)
+    assert q.pulses("SwipeRight") == 0 and q.pin("Gesture")["String"] == "DRAG"
+    assert near(q.run("return TouchPad.E.setSwipeDistance(0.05)"), 0.05)
+    q.swipe(200, 250, 260, 250, seconds=0.1, steps=3)                 # 60 px >= 35 px: a swipe now
+    q.advance(2.0)
+    assert q.pulses("SwipeRight") == 1 and q.pin("Gesture")["String"] == "SWIPE RIGHT"
+    q.swipe(250, 250, 270, 250, seconds=0.1, steps=2)                 # 20 px: still short of 35
+    q.advance(2.0)
+    assert q.pulses("SwipeRight") == 1
+    assert near(q.run("return TouchPad.E.setSwipeDistance(0.8)"), 0.8)
+    q.swipe(100, 250, 400, 250, seconds=0.2)                          # 300 px = 0.42 of the diagonal: not a swipe at 0.8
+    q.advance(2.0)
+    assert q.pulses("SwipeRight") == 1 and q.pin("Gesture")["String"] == "DRAG"
+    q.swipe(20, 250, 480, 250, seconds=0.2)                           # 460 px = 0.65: still short
+    q.advance(2.0)
+    assert q.pulses("SwipeRight") == 1
+    q.tap(250, 250)                                                   # taps are untouched by the distance
+    assert q.pulses("Tap") == 1
+    q.advance(2.0)
+    assert near(q.run("return TouchPad.E.setSwipeDistance(5)"), 0.8)  # clamped to 0.05..0.8
+    assert near(q.run("return TouchPad.E.setSwipeDistance(0)"), 0.05)
+    assert near(q.run("return TouchPad.E.setSwipeDistance(nil)"), 0.2)     # nil restores the default
+    assert near(q.run("return TouchPad.E.setSwipeDistance('junk')"), 0.2)  # so does anything that is not a number
+    assert near(q.run("return TouchPad.E.setSwipeDistance(0/0)"), 0.2)
+    q.swipe(100, 250, 400, 250, seconds=0.2)
+    q.advance(2.0)
+    assert q.pulses("SwipeRight") == 2
+    q.budget()
+
+
+def test_restart_stroke_moves_the_swipe_origin():
+    q = boot()
+    assert q.run("return TouchPad.E.restartStroke(1, 2, 3)") is False      # no touch: nothing to restart
+    q.drag([(400, 250), (380, 250), (360, 250), (340, 250), (320, 250), (300, 250)], seconds=0.25, lift=False)
+    assert near(q.pin("DragDistance")["Value"], 100 / DIAG) and near(abs(q.pin("DragAngle")["Value"]), 180)
+    assert q.run("return TouchPad.E.restartStroke(300, 250, Timer.Now())") is True
+    assert near(q.pin("DragDistance")["Value"], 0)                          # the live outputs measure from the new origin
+    q.drag([(320, 250), (340, 250), (360, 250), (380, 250), (400, 250), (420, 250), (440, 250), (460, 250)],
+           seconds=0.3, lift=False)
+    assert near(q.pin("DragDistance")["Value"], 160 / DIAG) and near(q.pin("DragAngle")["Value"], 0)
+    q.lift()
+    q.advance(2.0)
+    assert q.pulses("SwipeRight") == 1 and q.pulses("SwipeLeft") == 0     # classified from the restart, not the touch start
+    assert q.pulses("Press") == 1 and q.pulses("Release") == 1 and q.pulses("Tap") == 0
+    # A restart without coordinates keeps the current spot; a restart during a tap keeps it a tap.
+    q.touch([(250, 250)], lift=False, panel_touch=True)
+    assert q.run("return TouchPad.E.restartStroke()") is True
+    q.lift()
+    assert q.pulses("Tap") == 1
+    q.budget()

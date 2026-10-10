@@ -68,7 +68,7 @@ def test_xy_show_hints_off():
 def test_xy_outputs_are_the_common_set_only():
     q = boot()
     names = q.control_names()
-    assert len(names) == 26 and "Status" in names and "DragAngle" in names
+    assert len(names) == 27 and "Status" in names and "DragAngle" in names
     pts = [(100 + 20 * i, 400 - 20 * i) for i in range(11)]  # (100,400) -> (300,200)
     q.drag(pts, seconds=1.0)
     assert near(q.pin("X")["Value"], 0.6) and near(q.pin("Y")["Value"], 0.6)

@@ -786,3 +786,69 @@ def test_qsys_zoom_round_trip_keeps_the_camera_units():
     assert cam(q3, "return cam:getPosition()") == (0.0, 0.0, 0.5)
     cam(q3, "cam:gotoPosition(1, 1, 0.75)")
     assert c3.get("ptz.preset")["String"] == "1.0000 1.0000 0.7500"
+
+
+def test_zoom_pin_release_keeps_the_other_held_zoom_pin():
+    # Releasing one Zoom pin while the other is still held keeps the camera
+    # zooming the held way (the latest press wins while both are down); the
+    # camera stops only when neither pin is held. Same through every driver.
+    # (the XY build's fallback mode forwards no pins: the pad buttons reach the
+    # driver through the onControl helper, as the camera modes do)
+    def pin(q, name, on):
+        q.set_pin(name, on)
+        cam(q, "cam:onControl('%s', 1, Controls.%s)" % (name, name))
+    q = boot("Demo (simulated)")
+    pin(q, "ZoomIn", True)
+    assert cam(q, "return cam.zoomSpeed") == 0.5
+    pin(q, "ZoomOut", True)                                   # the latest press wins
+    assert cam(q, "return cam.zoomSpeed") == -0.5
+    pin(q, "ZoomOut", False)                                  # ZoomIn is still held
+    assert q.pin("ZoomIn")["Boolean"] is True
+    assert cam(q, "return cam.zoomSpeed") == 0.5
+    pin(q, "ZoomIn", False)
+    assert cam(q, "return cam.zoomSpeed") == 0
+    pin(q, "ZoomOut", True)
+    pin(q, "ZoomIn", True)
+    pin(q, "ZoomIn", False)                                   # ZoomOut still held
+    assert cam(q, "return cam.zoomSpeed") == -0.5
+    pin(q, "ZoomOut", False)
+    assert cam(q, "return cam.zoomSpeed") == 0
+    assert q.errors == []
+    # VISCA: the release of one pin with the other held sends a zoom, not a stop
+    v = visca("PTZOptics")
+    pin(v, "ZoomIn", True)
+    pin(v, "ZoomOut", True)
+    n = len(v.tcp_sent)
+    pin(v, "ZoomOut", False)
+    sent = [b for (_i, _p, b) in v.tcp_sent[n:]]
+    assert sent and all(b[:4] == b"\x81\x01\x04\x07" for b in sent)
+    assert sent[-1][4] & 0xF0 == 0x20                         # 2p = tele (zoom in), not 00 = stop
+    pin(v, "ZoomIn", False)
+    assert v.tcp_sent[-1][2] == b"\x81\x01\x04\x07\x00\xff"      # the stop
+
+
+def test_visca_inquiries_replaced_before_a_reply_count_as_misses():
+    # A caller polling faster than the inquiry timeout (the dial polls every
+    # 0.2 s, a held zoom too) replaces each pending inquiry with the next one;
+    # an inquiry replaced before any position reply is a miss, so the "no
+    # answer" warning appears after three unanswered inquiries however fast
+    # the polling runs. A position reply resets the count.
+    q = visca("Sony")
+    for i in range(4):                                        # the fourth poll replaces the third
+        cam(q, "cam:getPosition(function() end)")
+        if i < 3:
+            assert "no answer" not in cam_status(q)
+            assert cam(q, "return cam.misses") == i
+        q.advance(0.2)
+    assert cam_status(q) == "VISCA Sony UDP 10.0.0.5:52381: no answer to position inquiries (framing and dial need them)"
+    assert cam(q, "return cam.misses") == 3
+    # an inquiry replaced after its position reply but before its zoom reply is not a miss
+    r = visca("Sony")
+    cam(r, "cam:getPosition(function() end)")
+    r.inject_udp(b"\x01\x11\x00\x0b\x00\x00\x00\x05" + b"\x90\x50" + b"\x00\x00\x00\x00" + b"\x00\x00\x00\x00" + b"\xff")
+    cam(r, "cam:getPosition(function() end)")
+    assert cam(r, "return cam.misses, cam.posReplies") == (0, 1)
+    for _ in range(5):
+        cam(r, "cam:getPosition(function() end)")
+        r.advance(0.2)
+    assert "no answer" not in cam_status(r)                   # the camera has answered once

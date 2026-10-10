@@ -180,11 +180,11 @@ end
 function test_common_controls()
   local list = GetControls(defaults())
   local expected = { "Status", "Display", "Picker", "Refresh", "PanelTouch", "Calibrate", "Calibration",
-    "PickerLayout", "ReleaseTime", "LongPressTime", "Lock", "Touching", "X", "Y", "Tap", "DoubleTap",
+    "PickerLayout", "SetupVersion", "ReleaseTime", "LongPressTime", "Lock", "Touching", "X", "Y", "Tap", "DoubleTap",
     "LongPress", "Press", "Release", "SwipeLeft", "SwipeRight", "SwipeUp", "SwipeDown", "Gesture",
     "DragDistance", "DragAngle" }
   T.deq(names(list), expected, "common controls in order")
-  T.eq(#list, 26, "26 common controls")
+  T.eq(#list, 27, "27 common controls")
   local m = byName(list)
   T.eq(m["Status"].IndicatorType, "Status", "Status indicator")
   T.eq(m["Display"].ButtonType, "Momentary", "Display momentary")
@@ -197,7 +197,21 @@ function test_common_controls()
     T.eq(c.Group, nil, "no Group key leaks for " .. c.Name)
     T.eq(c.Pretty, nil, "no Pretty key leaks for " .. c.Name)
   end
-  T.eq(#GetControls(defaults("Whiteboard")), 26, "a mode without a module gets the common set")
+  T.eq(#GetControls(defaults("No Such Mode")), 27, "a mode without a module gets the common set")
+  -- Every real mode starts with the common set in this order and adds at least one control of its own
+  -- (except XY Pad, which outputs only the common set).
+  for _, mode in ipairs(MODE_NAMES) do
+    local full = GetControls(defaults(mode))
+    T.ok(#full >= #expected, mode .. " has at least the common set")
+    for i, name in ipairs(expected) do
+      T.eq(full[i].Name, name, mode .. ": common control " .. i)
+    end
+    if mode == "XY Pad" then
+      T.eq(#full, #expected, "XY Pad adds no control")
+    else
+      T.ok(#full > #expected, mode .. " adds controls of its own")
+    end
+  end
 end
 
 function test_pin_styles()
@@ -229,7 +243,40 @@ function test_pin_styles()
 end
 
 function test_camera_controls()
-  T.eq(#GetControls(defaults("Joystick")), 26, "no camera controls while None")
+  local CAMERA_NAMES = { "ZoomIn", "ZoomOut", "MaxSpeed", "ZoomSpeed", "CameraStatus", "CameraView", "CameraIP" }
+  local function without(list, drop)
+    local out = {}
+    for _, n in ipairs(list) do
+      local keep = true
+      for _, d in ipairs(drop) do if n == d then keep = false end end
+      if keep then out[#out + 1] = n end
+    end
+    return out
+  end
+  -- For every mode: Camera Control None adds no camera control; a camera mode with the Demo
+  -- camera inserts exactly the shared camera set (plus CameraView) between the 27 common
+  -- controls and the mode's own, and a non-camera mode ignores the property altogether.
+  for _, mode in ipairs(MODE_NAMES) do
+    local none = names(GetControls(defaults(mode)))
+    T.deq(without(none, CAMERA_NAMES), none, mode .. ": no camera controls while None")
+    local demoList = names(GetControls(defaults(mode, function(p) p["Camera Control"].Value = "Demo (simulated)" end)))
+    if CAMERA_MODES[mode] then
+      -- the shared camera set sits right after the common set; the mode's own controls follow in
+      -- their None order, with any camera-only controls of the mode (Dial's zoom readout) added
+      T.ok(#demoList >= #none + 6, mode .. ": Demo adds the six camera controls")
+      for i = 1, 27 do T.eq(demoList[i], none[i], mode .. ": common control " .. i .. " first") end
+      T.deq({ demoList[28], demoList[29], demoList[30], demoList[31], demoList[32], demoList[33] },
+            { "ZoomIn", "ZoomOut", "MaxSpeed", "ZoomSpeed", "CameraStatus", "CameraView" }, mode .. ": camera set after the common set")
+      local j = 34
+      for i = 28, #none do
+        while j <= #demoList and demoList[j] ~= none[i] do j = j + 1 end
+        T.ok(j <= #demoList, mode .. ": own control " .. none[i] .. " kept in order with the camera set")
+        j = j + 1
+      end
+    else
+      T.deq(demoList, none, mode .. ": camera property ignored outside camera modes")
+    end
+  end
   local demo = byName(GetControls(defaults("Joystick", function(p) p["Camera Control"].Value = "Demo (simulated)" end)))
   for _, name in ipairs({ "ZoomIn", "ZoomOut", "MaxSpeed", "ZoomSpeed", "CameraStatus", "CameraView" }) do
     T.ok(demo[name] ~= nil, name .. " present for Demo")
@@ -245,13 +292,13 @@ function test_camera_controls()
   T.eq(visca["CameraIP"].PinStyle, "Input", "CameraIP input")
   T.eq(visca["CameraView"], nil, "no CameraView for VISCA")
   local xy = GetControls(defaults("XY Pad", function(p) p["Camera Control"].Value = "Demo (simulated)" end))
-  T.eq(#xy, 26, "camera property ignored outside camera modes")
+  T.eq(#xy, 27, "XY Pad with a camera property set still has only the common set")
 end
 
 function test_mode_controls_and_count()
   withTestMode(testModeTable(), function()
     local list = GetControls(defaults(TEST_MODE))
-    T.eq(#list, 30, "common + 4 mode controls")
+    T.eq(#list, 31, "common + 4 mode controls")
     local m = byName(list)
     T.eq(m["ZoneSelected"].Count, 8, "Count from the Zones property")
     T.eq(m["ZoneSelected"].PinStyle, "Both", "mode pin style kept")
@@ -326,6 +373,11 @@ function test_layout_every_page()
   T.eq(pad["Display"].ButtonVisualStyle, "Flat", "Display flat")
   T.eq(pad["Display"].IsReadOnly, true, "Display read only")
   T.deq(pad["Display"].Color, { 255, 255, 255 }, "Display white")
+  T.eq(pad["Display"].Margin, 0, "Display has no margin")
+  T.eq(pad["Display"].Padding, 0, "Display has no padding (the default 1 would inset the icon)")
+  T.eq(pad["Display"].StrokeWidth, 0, "Display has no stroke")
+  T.deq(pad["Display"].StrokeColor, { 255, 255, 255 }, "Display stroke colour is the face colour")
+  T.eq(pad["Display"].CornerRadius, 0, "Display has square corners")
   T.ok(pad["Gesture"] ~= nil and pad["Gesture"].IsReadOnly, "Gesture readout on Pad")
   T.ok(pad["Lock"] ~= nil, "Lock in the side column")
   local disp = layoutOf(props, "Display")
@@ -479,14 +531,16 @@ function test_display_page_and_colour_note()
        "Pad colour: 23,21,28", "blank custom falls back to Nikita")
   T.eq(Framework.padColourNote(defaults(nil, function(p) p["Background"].Value = "Transparent" end)),
        "Pad colour: none (Transparent: the page art shows through)", "transparent note")
+  -- Panel is an 80 % panel over the page art (spec 2): the note names the
+  -- panel colour and says the page shows through, like Transparent
   T.eq(Framework.padColourNote(defaults(nil, function(p) p["Background"].Value = "Panel" end)),
-       "Pad colour: 32,29,38", "Panel prints the theme's panel colour, not the Solid colour")
+       "Pad colour: none (Panel: 32,29,38 at 80 % over the page art)", "Panel names the theme's panel colour, not the Solid colour")
   T.eq(Framework.padColourNote(defaults(nil, function(p) p["Background"].Value = "Panel"; p["Theme"].Value = "Sunset" end)),
-       "Pad colour: 36,23,15", "Panel colour of another theme")
+       "Pad colour: none (Panel: 36,23,15 at 80 % over the page art)", "Panel colour of another theme")
   T.eq(Framework.padColourNote(defaults(nil, function(p) p["Background"].Value = "Panel"; p["Theme"].Value = "Custom"; p["Background Color"].Value = "#1C232D" end)),
-       "Pad colour: 42,48,58", "Custom Panel is the background lightened as the runtime does")
+       "Pad colour: none (Panel: 42,48,58 at 80 % over the page art)", "Custom Panel is the background lightened as the runtime does")
   T.eq(Framework.padColourNote(defaults(nil, function(p) p["Background"].Value = "Panel"; p["Theme"].Value = "Custom"; p["Background Color"].Value = "" end)),
-       "Pad colour: 32,29,38", "blank Custom Panel falls back to the Nikita panel colour")
+       "Pad colour: none (Panel: 32,29,38 at 80 % over the page art)", "blank Custom Panel falls back to the Nikita panel colour")
   local three = false
   for _, e in ipairs(g) do if e.Text and e.Text:find("three times", 1, true) then three = true end end
   T.ok(three, "three copies instruction")
@@ -534,7 +588,7 @@ function test_xy_mode_table()
   T.eq(type(xy.layout), "function", "layout function")
   T.eq(type(xy.create), "function", "create is the runtime half")
   T.eq(xy.padColour(THEMES["Nikita"]), "#17151C", "pad colour is the theme background")
-  T.eq(#GetControls(defaults("XY Pad")), 26, "no extra controls")
+  T.eq(#GetControls(defaults("XY Pad")), 27, "no extra controls")
   local _, g = layoutOf(defaults("XY Pad"), "Pad")
   local hint = false
   for _, e in ipairs(g) do if e.Text == "Drag anywhere" then hint = true end end
@@ -571,4 +625,87 @@ function test_page_index_fallbacks()
   for _, c in ipairs(GetControls(props)) do
     T.ok(every[c.Name], c.Name .. " is on some page")
   end
+end
+
+
+-- ---------- regressions: Outputs pages for long arrays ----------
+
+function test_outputs_pages_for_long_arrays()
+  -- A 64 x 64 Matrix has 4096 Cross pins plus 64 Route: the mini cells are
+  -- paged 512 per Outputs page ("Outputs 2", ...), every element is placed
+  -- exactly once, no page carries more than ~600 entries and building one
+  -- page costs Designer far under 100,000 VM instructions.
+  local big = defaults("Matrix", function(p) p["Sources"].Value = 64; p["Destinations"].Value = 64 end)
+  local _, meta = Framework.buildControls(big)
+  local crossPretty, routePretty = meta["Cross"].pretty, meta["Route"].pretty
+  local pages = pageNames(big)
+  T.deq(pages, { "Pad", "Setup", "Sources", "Destinations", "Outputs", "Outputs 2", "Outputs 3", "Outputs 4",
+                 "Outputs 5", "Outputs 6", "Outputs 7", "Outputs 8", "Outputs 9", "Display", "About" }, "nine Outputs pages for 64 x 64")
+  local seen = {}
+  for i, page in ipairs(pages) do
+    if page:find("^Outputs") then
+      big["page_index"] = { Value = i }
+      local n = T.instructions(function() GetControlLayout(big) end)
+      T.ok(n < 100000, page .. " costs under 100k instructions (" .. n .. ")")
+      local layout = GetControlLayout(big)
+      local count = 0
+      for key, e in pairs(layout) do
+        count = count + 1
+        if key:find("^Cross ") or key:find("^Route ") then
+          T.ok(seen[key] == nil, key .. " placed once (" .. page .. ")")
+          seen[key] = page
+        end
+        if key:find("^Cross ") then
+          T.eq(e.Style, "Button", key .. " is a button")
+          T.eq(e.ButtonStyle, "Toggle", key .. " is a toggle")
+          T.eq(e.PrettyName, crossPretty .. " " .. key:match("%d+"), key .. " keeps its pin name")
+          T.eq(e.Legend, key:match("%d+"), key .. " legend is its number")
+        elseif key:find("^Route ") then
+          T.eq(e.Style, "Knob", key .. " is a knob")
+          T.eq(e.PrettyName, routePretty .. " " .. key:match("%d+"), key .. " keeps its pin name")
+        end
+      end
+      T.ok(count <= 600, page .. " carries at most 600 entries (" .. count .. ")")
+      T.eq(#LAYOUT_PROBLEMS, 0, "no layout problems on " .. page)
+    end
+  end
+  for i = 1, 4096 do T.ok(seen["Cross " .. i] ~= nil, "Cross " .. i .. " is placed") end
+  for i = 1, 64 do T.ok(seen["Route " .. i] ~= nil, "Route " .. i .. " is placed") end
+  T.eq(seen["Cross 1"], "Outputs", "the first block is on the first Outputs page")
+  T.eq(seen["Cross 513"], "Outputs 2", "the second block is on Outputs 2")
+  T.eq(seen["Route 1"], "Outputs 9", "Route follows Cross on the last page")
+  -- 32 x 32: 1024 Cross and 32 Route on three Outputs pages; defaults: one page
+  local mid = defaults("Matrix", function(p) p["Sources"].Value = 32; p["Destinations"].Value = 32 end)
+  T.deq(pageNames(mid), { "Pad", "Setup", "Sources", "Destinations", "Outputs", "Outputs 2", "Outputs 3", "Display", "About" }, "three Outputs pages for 32 x 32")
+  T.deq(pageNames(defaults("Matrix")), { "Pad", "Setup", "Names", "Outputs", "Display", "About" }, "one Outputs page by default")
+  local dd = defaults("Drag & Drop", function(p) p["Sources"].Value = 64; p["Destinations"].Value = 64 end)
+  T.deq(pageNames(dd), { "Pad", "Setup", "Sources", "Destinations", "Outputs", "Display", "About" }, "192 mini cells fit one Outputs page")
+  for _, p in ipairs(GetPages(big)) do T.eq(type(p.name), "string", "page entries carry a name") end
+end
+
+-- Every control of every mode, with every camera kind, carries one plain ASCII
+-- sentence as its Description (Designer shows it; gen_pins.py prints it).
+function test_every_control_has_a_description()
+  local kinds = { "None", "Demo (simulated)", "Q-SYS Camera", "VISCA over IP" }
+  local checked = 0
+  for _, mode in ipairs(MODE_NAMES) do
+    for _, kind in ipairs(kinds) do
+      local list = GetControls(defaults(mode, function(p)
+        if p["Camera Control"] then p["Camera Control"].Value = kind end
+      end))
+      for _, c in ipairs(list) do
+        local d = c.Description
+        local where = mode .. " / " .. kind .. ": " .. c.Name
+        T.eq(type(d), "string", where .. " has a Description")
+        if type(d) == "string" then
+          T.ok(#d >= 12 and #d <= 160, where .. " description is one sentence long (" .. #d .. ")")
+          T.ok(d:sub(-1) == ".", where .. " description ends with a full stop")
+          T.ok(isAscii(d) and not d:find(EN_DASH, 1, true), where .. " description is ASCII")
+          T.ok(d:sub(1, 1):match("%u") ~= nil, where .. " description starts with a capital")
+        end
+        checked = checked + 1
+      end
+    end
+  end
+  T.ok(checked > 1000, "checked " .. checked .. " control definitions")
 end

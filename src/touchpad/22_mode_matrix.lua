@@ -42,7 +42,8 @@ do
   local SCAN_FIRST, SCAN_CHUNK = 64, 512  -- Cross pins read in the load, then per turn
   local ENFORCE_COLS = 4                 -- columns checked per turn when Exclusive turns on
   local CHUNK_DELAY = 0.02
-  local COLD_PER_FRAME = 8               -- headers rendered from scratch in one frame
+  local COLD_BUDGET = 8000               -- estimated VM instructions spent on cold headers per frame
+  local HEADER_BASE = 700                -- a cold header apart from its label (box, text element)
   local WARM_DELAY = 0.03
 
   local function countOf(props, name, default)
@@ -76,15 +77,21 @@ do
     controls = function(C, props)
       local nS = countOf(props, "Sources", 4)
       local nD = countOf(props, "Destinations", 2)
-      C.add{ Name = "SourceName", ControlType = "Text", Count = nS, PinStyle = "Input", Group = "Sources" }
-      C.add{ Name = "DestName", ControlType = "Text", Count = nD, PinStyle = "Input", Group = "Routing" }
+      C.add{ Name = "SourceName", ControlType = "Text", Count = nS, PinStyle = "Input", Group = "Sources",
+             Description = "The name of each row." }
+      C.add{ Name = "DestName", ControlType = "Text", Count = nD, PinStyle = "Input", Group = "Routing",
+             Description = "The name of each column." }
       C.add{ Name = "Cross", ControlType = "Button", ButtonType = "Toggle", Count = nS * nD,
-             PinStyle = "Both", Group = "Matrix" }
+             PinStyle = "Both", Group = "Matrix",
+             Description = "Each crosspoint; the index is (row - 1) * columns + column." }
       C.add{ Name = "Route", ControlType = "Knob", ControlUnit = "Integer", Min = 0, Max = nS, DefaultValue = 0,
-             Count = nD, PinStyle = "Both", Group = "Routing" }
+             Count = nD, PinStyle = "Both", Group = "Routing",
+             Description = "The source number routed to each column; 0 is none." }
       C.add{ Name = "ExclusiveColumns", ControlType = "Button", ButtonType = "Toggle", PinStyle = "Input",
-             Group = "Routing", DefaultValue = true }
-      C.add{ Name = "ClearAll", ControlType = "Button", ButtonType = "Trigger", PinStyle = "Input", Group = "Routing" }
+             Group = "Routing", DefaultValue = true,
+             Description = "On: a column carries one source at a time." }
+      C.add{ Name = "ClearAll", ControlType = "Button", ButtonType = "Trigger", PinStyle = "Input", Group = "Routing",
+             Description = "Clears every crosspoint." }
     end,
 
     -- Names (or Sources / Destinations above 16) hold the name boxes; the Pad
@@ -697,9 +704,15 @@ do
         elseif name == "DestName" then
           setName("D", index, ctl.String)
         elseif name == "Cross" then
+          -- a write that does not change the crosspoint (a same-value write
+          -- that fires, ctl:Trigger()) changes nothing: only a pad tap routes
+          -- an already-on source "last"
           if index >= 1 and index <= nCross then
-            local r, c = rowOf(index), colOf(index)
-            if ctl.Boolean then turnOn(r, c) else turnOff(r, c) end
+            local on = ctl.Boolean and true or false
+            if on ~= (cross[index] == true) then
+              local r, c = rowOf(index), colOf(index)
+              if on then turnOn(r, c) else turnOff(r, c) end
+            end
           end
         elseif name == "Route" then
           local v = clampRoute(ctl.Value)
@@ -791,8 +804,11 @@ do
       end
 
       -- A header is rendered once per (position, name, state) into a scratch
-      -- canvas; at most COLD_PER_FRAME from scratch per frame, the rest are
-      -- plain boxes until a follow-up frame WARM_DELAY later.
+      -- canvas. A cold render costs HEADER_BASE plus the label's fitting
+      -- (Font.fitCost: the characters the header can hold, non-ASCII names
+      -- being dearer); a frame spends at most COLD_BUDGET on them (the first
+      -- always renders) and the rest are plain boxes until a follow-up frame
+      -- WARM_DELAY later.
       local function headerRaw(c, kind, i, x, y, w, h, pressed)
         local key = floor(x) .. ":" .. floor(y) .. ":" .. floor(w) .. ":" .. floor(h) .. ":" ..
                     (pressed and "p" or "-") .. ":" .. (nameRev[kind][i] or 0)
@@ -802,21 +818,22 @@ do
         local radius = min(8, h / 4, w / 4)
         s:rect(x + 0.5, y + 0.5, w - 1, h - 1,
           { fill = T.panel, stroke = pressed and T.accent or T.line, sw = pressed and 2 or 1, rx = radius })
-        if coldLeft <= 0 then
+        local g = geom()
+        local rotated = (kind == "D" and g.rotated)
+        local size = sizeFor(rotated and w or h)
+        local cost = HEADER_BASE + Font.fitCost(rawName(kind, i), size, (rotated and h or w) - 10)
+        if cost > coldLeft and coldLeft < COLD_BUDGET then
           needWarm = true
           return table.concat(s.parts)
         end
-        coldLeft = coldLeft - 1
-        local g = geom()
-        if kind == "D" and g.rotated then
-          local size = sizeFor(w)
+        coldLeft = coldLeft - cost
+        if rotated then
           local label = fittedLabel(kind, i, h - 10, size)
           s:group({ transform = "translate(" .. Svg.num(x + w / 2 + size * 0.35) .. " " .. Svg.num(y + h - 5) .. ") rotate(-90)" },
             function(gg)
               gg:text(0, 0, label, { size = size, fill = T.text })
             end)
         else
-          local size = sizeFor(h)
           local label = fittedLabel(kind, i, w - 10, size)
           s:text(x + w / 2, y + h / 2 + size * 0.35, label, { size = size, fill = T.text, anchor = "middle" })
         end
@@ -827,7 +844,7 @@ do
 
       function self:draw(c)
         local g = geom()
-        coldLeft, needWarm = COLD_PER_FRAME, false
+        coldLeft, needWarm = COLD_BUDGET, false
         local r0, c0 = rowFirst[rowPage], colFirst[colPage]
         -- column headers
         for ci = 1, g.colsN do

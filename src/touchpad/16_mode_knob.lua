@@ -20,6 +20,7 @@
 Modes = Modes or {}
 
 do
+  local MAX_UNITS = 24                    -- code points of the Units text kept
   local HINT = "Touch the ring to set, drag to turn"
   local SWEEP = 270                 -- degrees of travel
   local START_ANGLE = 225           -- position 0 (bottom-left, canvas angles: 0 = right, 90 = up)
@@ -82,15 +83,21 @@ do
 
     controls = function(C, props)
       C.add{ Name = "KnobMin", ControlType = "Knob", ControlUnit = "Float", Min = -1000, Max = 1000,
-             DefaultValue = 0, PinStyle = "Input", Group = "Knob" }
+             DefaultValue = 0, PinStyle = "Input", Group = "Knob",
+             Description = "The value shown at the bottom of the sweep." }
       C.add{ Name = "KnobMax", ControlType = "Knob", ControlUnit = "Float", Min = -1000, Max = 1000,
-             DefaultValue = 100, PinStyle = "Input", Group = "Knob" }
-      C.add{ Name = "Units", ControlType = "Text", PinStyle = "Input", Group = "Knob" }
+             DefaultValue = 100, PinStyle = "Input", Group = "Knob",
+             Description = "The value shown at the top of the sweep." }
+      C.add{ Name = "Units", ControlType = "Text", PinStyle = "Input", Group = "Knob",
+             Description = "The unit text shown after the value." }
       C.add{ Name = "KnobValue", ControlType = "Knob", ControlUnit = "Float", Min = -1000, Max = 1000,
-             DefaultValue = 0, PinStyle = "Both", Group = "Knob" }
+             DefaultValue = 0, PinStyle = "Both", Group = "Knob",
+             Description = "The knob's value in display units." }
       C.add{ Name = "KnobPosition", ControlType = "Knob", ControlUnit = "Float", Min = 0, Max = 1,
-             DefaultValue = 0, PinStyle = "Both", Group = "Knob" }
-      C.add{ Name = "DialTarget", ControlType = "Text", PinStyle = "Input", Group = "Knob" }
+             DefaultValue = 0, PinStyle = "Both", Group = "Knob",
+             Description = "The knob's position, 0 to 1." }
+      C.add{ Name = "DialTarget", ControlType = "Text", PinStyle = "Input", Group = "Knob",
+             Description = "A control driven directly, as CodeName~control." }
     end,
 
     pages = {},
@@ -271,7 +278,9 @@ do
         local un = E.ctl("Units")
         if lo and type(lo.Value) == "number" then self.lo = lo.Value end
         if hi and type(hi.Value) == "number" then self.hi = hi.Value end
-        if un then self.units = U.trim(un.String) end
+        -- a units string is a few characters; cutting it here keeps the
+        -- readout's per-frame fit short and cacheable whatever the pin holds
+        if un then self.units = U.truncateChars(U.trim(un.String), MAX_UNITS) end
       end
 
       -- ---------- geometry ----------
@@ -386,10 +395,12 @@ do
       -- ---------- drawing ----------
       -- Track, ticks and the Min / Max labels only change with the range:
       -- drawn once into a scratch canvas and replayed as one raw element.
-      local function staticRaw()
+      local function staticRaw(c)
         local key = tostring(self.lo) .. "|" .. tostring(self.hi) .. "|" .. self.units
         if self.static and self.staticKey == key then return self.static end
-        local s = Svg.new(W, H, { limit = 20000 })
+        -- the scratch canvas takes the engine canvas's font family, so the
+        -- Min / Max labels follow the Font property like every other text
+        local s = Svg.new(W, H, { limit = 20000, family = c.family })
         s:arc(cx, cy, Rm, START_ANGLE, START_ANGLE - SWEEP, { stroke = T.well, sw = band, cap = "round" })
         s:arc(cx, cy, Rm, START_ANGLE, START_ANGLE - SWEEP, { stroke = T.line, sw = 1, opacity = 0.6 })
         local n = MAJOR_TICKS * (MINOR_PER + 1)
@@ -423,7 +434,7 @@ do
       end
 
       function self:draw(c)
-        c:raw(staticRaw())
+        c:raw(staticRaw(c))
         local a = angleOfPos(self.p)
         -- value fill along the track
         if self.p > 0.0005 then

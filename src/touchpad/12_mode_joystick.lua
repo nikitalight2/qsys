@@ -38,23 +38,36 @@ do
 
     controls = function(C, props)
       C.add({ Name = "JoyX", ControlType = "Knob", ControlUnit = "Float", Min = -1, Max = 1,
-              DefaultValue = 0, PinStyle = "Output" })
+              DefaultValue = 0, PinStyle = "Output",
+              Description = "The stick's horizontal position, -1 left to 1 right." })
       C.add({ Name = "JoyY", ControlType = "Knob", ControlUnit = "Float", Min = -1, Max = 1,
-              DefaultValue = 0, PinStyle = "Output" })
+              DefaultValue = 0, PinStyle = "Output",
+              Description = "The stick's vertical position, -1 down to 1 up." })
       C.add({ Name = "Magnitude", ControlType = "Knob", ControlUnit = "Float", Min = 0, Max = 1,
-              DefaultValue = 0, PinStyle = "Output" })
-      C.add({ Name = "DirLeft", ControlType = "Indicator", IndicatorType = "Led", PinStyle = "Output" })
-      C.add({ Name = "DirRight", ControlType = "Indicator", IndicatorType = "Led", PinStyle = "Output" })
-      C.add({ Name = "DirUp", ControlType = "Indicator", IndicatorType = "Led", PinStyle = "Output" })
-      C.add({ Name = "DirDown", ControlType = "Indicator", IndicatorType = "Led", PinStyle = "Output" })
+              DefaultValue = 0, PinStyle = "Output",
+              Description = "How far the stick is from the centre, 0 to 1." })
+      C.add({ Name = "DirLeft", ControlType = "Indicator", IndicatorType = "Led", PinStyle = "Output",
+              Description = "On while the stick points left." })
+      C.add({ Name = "DirRight", ControlType = "Indicator", IndicatorType = "Led", PinStyle = "Output",
+              Description = "On while the stick points right." })
+      C.add({ Name = "DirUp", ControlType = "Indicator", IndicatorType = "Led", PinStyle = "Output",
+              Description = "On while the stick points up." })
+      C.add({ Name = "DirDown", ControlType = "Indicator", IndicatorType = "Led", PinStyle = "Output",
+              Description = "On while the stick points down." })
       C.add({ Name = "Deadzone", ControlType = "Knob", ControlUnit = "Float", Min = 0, Max = 0.5,
-              DefaultValue = 0.08, PinStyle = "Input" })
+              DefaultValue = 0.08, PinStyle = "Input",
+              Description = "Radius around the centre that outputs zero." })
       C.add({ Name = "Curve", ControlType = "Text", DefaultValue = "Linear", PinStyle = "Input",
-              Choices = { "Linear", "Squared", "Cubed" } })
-      C.add({ Name = "Sticky", ControlType = "Button", ButtonType = "Toggle", PinStyle = "Input" })
-      C.add({ Name = "Home", ControlType = "Button", ButtonType = "Trigger", PinStyle = "Both" })
-      C.add({ Name = "InvertPan", ControlType = "Button", ButtonType = "Toggle", PinStyle = "Both" })
-      C.add({ Name = "InvertTilt", ControlType = "Button", ButtonType = "Toggle", PinStyle = "Both" })
+              Choices = { "Linear", "Squared", "Cubed" },
+              Description = "Response curve of the stick: Linear, Squared or Cubed." })
+      C.add({ Name = "Sticky", ControlType = "Button", ButtonType = "Toggle", PinStyle = "Input",
+              Description = "On: the stick stays where it is left; off: it springs back on release." })
+      C.add({ Name = "Home", ControlType = "Button", ButtonType = "Trigger", PinStyle = "Both",
+              Description = "Re-centres the stick and sends the camera home; pulses when the pad does it." })
+      C.add({ Name = "InvertPan", ControlType = "Button", ButtonType = "Toggle", PinStyle = "Both",
+              Description = "Mirrors the horizontal axis." })
+      C.add({ Name = "InvertTilt", ControlType = "Button", ButtonType = "Toggle", PinStyle = "Both",
+              Description = "Mirrors the vertical axis." })
     end,
 
     pages = {},
@@ -101,6 +114,7 @@ do
         down = false,
         lastMoveAt = 0,
         homeAt = -1e9,               -- when the stick was last homed (the Home pulse guard)
+        homeEdge = false,            -- a Home press (Boolean true) was handled; its release is not a second home
         spring = nil,                -- { x0, y0, t } while springing back
         jx = 0, jy = 0, mag = 0,     -- the published outputs
         leds = { false, false, false, false },   -- left, right, up, down
@@ -271,9 +285,18 @@ do
       -- ---------- pins ----------
       function self:onControl(name, index, ctl)
         if name == "Home" then
-          -- A Trigger's handler may run with Boolean already false; the
-          -- trailing edge of a pulse just handled does not home twice.
-          if ctl.Boolean or E.now() - self.homeAt >= HOME_GUARD then home(false) end
+          -- The rising edge homes once and sets homeEdge, so the trailing
+          -- edge (however long the pin is held) does nothing; a Trigger()
+          -- call arrives with Boolean false and no edge, and homes unless a
+          -- pulse was handled moments ago (HOME_GUARD).
+          if ctl.Boolean then
+            self.homeEdge = true
+            home(false)
+          elseif self.homeEdge then
+            self.homeEdge = false
+          elseif E.now() - self.homeAt >= HOME_GUARD then
+            home(false)
+          end
         elseif name == "Sticky" then
           if not ctl.Boolean and not self.down then release() end
         elseif name == "InvertPan" or name == "InvertTilt" or name == "Deadzone" or name == "Curve" then

@@ -132,7 +132,7 @@ def test_framing_controls_pins_and_defaults():
         assert n in names, n
     for n in CAMERA_CONTROLS:
         assert n not in names, n                        # Camera Control = None
-    assert len(names) == 26 + len(MODE_CONTROLS)
+    assert len(names) == 27 + len(MODE_CONTROLS)
     assert outputs(q) == (0.5, 0.5, 0)
     assert near(q.pin("MinFrame")["Value"], 0.25) and near(q.pin("HFOV")["Value"], 60)
     assert near(q.pin("OpticalZoom")["Value"], 12)

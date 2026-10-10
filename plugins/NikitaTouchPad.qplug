@@ -9,8 +9,8 @@
 
 PluginInfo = {
   Name = "Nikita Visual Arts~Touch Pad",
-  Version = "1.0.0",
-  BuildVersion = "1.0.0.0",
+  Version = "1.0.1",
+  BuildVersion = "1.0.1.0",
   Id = "98fc51fe-ce4d-4fa9-95f5-bd40ddc340b0",
   Author = "Nikita Visual Arts – nikitavisual.art",
   Description = "Touch gestures, camera control, zone select, drag and drop, dials, faders, panners, pattern lock, keypad, sign-in and whiteboard on any Q-SYS UCI through a hidden Color Picker. Nikita Visual Arts – nikitavisual.art",
@@ -85,6 +85,7 @@ NikitaAssets = {
 -- No Q-SYS dependency. Every loop is bounded by the size of its input so a
 -- call never approaches the Core's per-callback instruction limit.
 
+do
 U = U or {}
 
 local floor, abs, sqrt, atan, pi = math.floor, math.abs, math.sqrt, math.atan, math.pi
@@ -265,24 +266,68 @@ local function escapeAscii(run)
   return (run:gsub('[%c&<>"]', ESC))
 end
 
--- Results for short strings are memoised (colours, ids and names repeat
--- on every frame); the cache is bounded and simply reset when full.
-local ASCII_CACHE, asciiCount, ASCII_CACHE_MAX, ASCII_CACHE_KEY = {}, 0, 1024, 64
+-- Results are memoised (colours, ids, names and fitted labels repeat on
+-- every frame); the cache is bounded and simply reset when full.
+local ASCII_CACHE, asciiCount, ASCII_CACHE_MAX, ASCII_CACHE_KEY = {}, 0, 1024, 512
+local ASCII_SLICE = 512          -- bytes decoded per byte array
 
+-- Decodes the UTF-8 sequence at bytes[k] exactly as utf8next does (invalid
+-- or truncated -> 63 and one byte). Returns cp, bytesConsumed.
+local function cpAt(bytes, k)
+  local b = bytes[k]
+  if b < 0x80 then return b, 1 end
+  local need, cp, lo2, hi2 = 0, 0, 0x80, 0xBF
+  if b >= 0xC2 and b <= 0xDF then need, cp = 1, b - 0xC0
+  elseif b >= 0xE0 and b <= 0xEF then
+    need, cp = 2, b - 0xE0
+    if b == 0xE0 then lo2 = 0xA0 elseif b == 0xED then hi2 = 0x9F end
+  elseif b >= 0xF0 and b <= 0xF4 then
+    need, cp = 3, b - 0xF0
+    if b == 0xF0 then lo2 = 0x90 elseif b == 0xF4 then hi2 = 0x8F end
+  else
+    return 63, 1
+  end
+  local b2 = bytes[k + 1]
+  if not b2 or b2 < lo2 or b2 > hi2 then return 63, 1 end
+  cp = cp * 64 + (b2 - 0x80)
+  for j = 2, need do
+    local bj = bytes[k + j]
+    if not bj or bj < 0x80 or bj > 0xBF then return 63, 1 end
+    cp = cp * 64 + (bj - 0x80)
+  end
+  return cp, need + 1
+end
+
+-- The string is walked as byte arrays of ASCII_SLICE bytes (a sequence cut
+-- by a slice end is re-read from the next slice): ASCII runs inside a slice
+-- are escaped in one go, every other sequence becomes a character reference.
 local function asciiSlow(s)
-  local parts, i, n = {}, 1, #s
+  local parts, np, i, n = {}, 0, 1, #s
   while i <= n do
-    local a = sfind(s, "[\128-\255]", i)
-    if not a then
-      parts[#parts + 1] = escapeAscii(ssub(s, i))
-      break
+    local stop = i + ASCII_SLICE - 1
+    if stop > n then stop = n end
+    local bytes = { sbyte(s, i, stop) }
+    local m = #bytes
+    if stop < n then m = m - 3 end          -- keep a whole sequence inside the slice
+    local k = 1
+    while k <= m do
+      local b = bytes[k]
+      if b < 0x80 then
+        local j = k + 1
+        while j <= m and bytes[j] < 0x80 do j = j + 1 end
+        np = np + 1
+        parts[np] = escapeAscii(ssub(s, i + k - 1, i + j - 2))
+        k = j
+      else
+        local cp, len = cpAt(bytes, k)
+        np = np + 1
+        -- U+FFFE and U+FFFF are valid UTF-8 but not XML characters
+        if cp == 63 or cp == 0xFFFE or cp == 0xFFFF then parts[np] = "?"
+        else parts[np] = "&#" .. cp .. ";" end
+        k = k + len
+      end
     end
-    if a > i then parts[#parts + 1] = escapeAscii(ssub(s, i, a - 1)) end
-    local cp, nx = utf8next(s, a)
-    -- U+FFFE and U+FFFF are valid UTF-8 but not XML characters
-    if cp == 63 or cp == 0xFFFE or cp == 0xFFFF then parts[#parts + 1] = "?"
-    else parts[#parts + 1] = "&#" .. cp .. ";" end
-    i = nx
+    i = i + k - 1
   end
   return concat(parts)
 end
@@ -655,6 +700,7 @@ function U.isoTime(t)
   local y, m, d = civil(days)
   return sformat("%04d-%02d-%02dT%02d:%02d:%02dZ", y, m, d, secs // 3600, (secs // 60) % 60, secs % 60)
 end
+end
 -- ===== 06_font.lua =====
 -- Nikita Visual Arts – nikitavisual.art
 -- Touch Pad for Q-SYS: font (text width estimation, Roboto-like per-character widths, cached)
@@ -663,6 +709,7 @@ end
 -- Code points 128..0x2FFF count 0.55 em, everything else (CJK, emoji) 1 em.
 -- ASCII runs take a byte-array fast path; widths and fits are memoised.
 
+do
 Font = Font or {}
 
 local sbyte, ssub, sfind = string.byte, string.sub, string.find
@@ -712,28 +759,85 @@ local function cpWidth(cp)
 end
 Font.cpWidth = cpWidth
 
--- Walks the first MAX_CHARS code points of str adding advance widths. ASCII
--- runs go through a byte array; U.utf8next decodes only non-ASCII bytes.
--- Returns units, charCount, lastByteIncluded.
-local function walk(str)
-  local utf8next = U.utf8next
-  local i, n, units, count = 1, #str, 0, 0
-  while i <= n and count < MAX_CHARS do
-    local a = sfind(str, "[\128-\255]", i)
-    if a == i then
-      local cp, nx = utf8next(str, i)
-      units, count, i = units + cpWidth(cp), count + 1, nx
-    else
-      local stop = (a or (n + 1)) - 1
-      local room = MAX_CHARS - count
-      if stop - i + 1 > room then stop = i + room - 1 end
-      local bytes = { sbyte(str, i, stop) }
-      for k = 1, #bytes do units = units + W[bytes[k]] end
-      count = count + #bytes
-      i = stop + 1
-    end
+-- Width units of the UTF-8 sequence starting at bytes[k] (a byte array),
+-- classified exactly as U.utf8next decodes it: an invalid or truncated
+-- sequence is "?" and one byte long. Lead bytes alone place the code point:
+-- C2..DF -> U+0080..07FF and E0..E2 -> U+0800..2FFF count 0.55 em,
+-- E3..EF and F0..F4 count 1 em. Returns units, bytesConsumed.
+local QMARK_W = W[63]
+local function seqWidth(bytes, k)
+  local b = bytes[k]
+  local need, lo2, hi2, units = 0, 0x80, 0xBF, WIDE_W
+  if b >= 0xC2 and b <= 0xDF then need = 1
+  elseif b >= 0xE0 and b <= 0xEF then
+    need = 2
+    if b == 0xE0 then lo2 = 0xA0 elseif b == 0xED then hi2 = 0x9F end
+    if b > 0xE2 then units = EM_W end
+  elseif b >= 0xF0 and b <= 0xF4 then
+    need, units = 3, EM_W
+    if b == 0xF0 then lo2 = 0x90 elseif b == 0xF4 then hi2 = 0x8F end
+  else
+    return QMARK_W, 1
   end
-  return units, count, i - 1
+  local b2 = bytes[k + 1]
+  if not b2 or b2 < lo2 or b2 > hi2 then return QMARK_W, 1 end
+  for j = 2, need do
+    local bj = bytes[k + j]
+    if not bj or bj < 0x80 or bj > 0xBF then return QMARK_W, 1 end
+  end
+  return units, need + 1
+end
+
+-- A string's first MAX_CHARS code points fit in 4 * MAX_CHARS bytes, so one
+-- byte array of that size covers everything walk() and fit measure per
+-- character; a cut at its end can only fall after the MAX_CHARS-th point.
+local SLICE = 4 * MAX_CHARS
+
+-- Walks the first MAX_CHARS code points of str adding advance widths: one
+-- byte array, ASCII bytes straight through the table, anything else through
+-- seqWidth. Returns units, charCount, lastByteIncluded.
+local function walk(str)
+  local n = #str
+  if not sfind(str, "[\128-\255]") then
+    local stop = (n > MAX_CHARS) and MAX_CHARS or n
+    local bytes = { sbyte(str, 1, stop) }
+    local units = 0
+    for k = 1, stop do units = units + W[bytes[k]] end
+    return units, stop, stop
+  end
+  local stop = (n > SLICE) and SLICE or n
+  local bytes = { sbyte(str, 1, stop) }
+  local k, units, count = 1, 0, 0
+  while k <= stop and count < MAX_CHARS do
+    local b = bytes[k]
+    if b < 0x80 then
+      units, k = units + W[b], k + 1
+    else
+      -- well-formed sequences inline, chosen by the lead byte (two bytes:
+      -- Latin-1, Cyrillic, Greek, Hebrew, Arabic; three: Indic, Thai, CJK;
+      -- four: emoji), with the narrower second-byte ranges of the E0, ED,
+      -- F0 and F4 leads; anything malformed goes through seqWidth
+      local b2 = bytes[k + 1]
+      if b <= 0xDF then
+        if b >= 0xC2 and b2 and b2 >= 0x80 and b2 <= 0xBF then units, k = units + WIDE_W, k + 2
+        else local u, len = seqWidth(bytes, k); units, k = units + u, k + len end
+      elseif b <= 0xEF then
+        local b3 = bytes[k + 2]
+        if b2 and b2 >= ((b == 0xE0) and 0xA0 or 0x80) and b2 <= ((b == 0xED) and 0x9F or 0xBF)
+           and b3 and b3 >= 0x80 and b3 <= 0xBF then
+          units, k = units + ((b <= 0xE2) and WIDE_W or EM_W), k + 3
+        else local u, len = seqWidth(bytes, k); units, k = units + u, k + len end
+      else
+        local b3, b4 = bytes[k + 2], bytes[k + 3]
+        if b <= 0xF4 and b2 and b2 >= ((b == 0xF0) and 0x90 or 0x80) and b2 <= ((b == 0xF4) and 0x8F or 0xBF)
+           and b3 and b3 >= 0x80 and b3 <= 0xBF and b4 and b4 >= 0x80 and b4 <= 0xBF then
+          units, k = units + EM_W, k + 4
+        else local u, len = seqWidth(bytes, k); units, k = units + u, k + len end
+      end
+    end
+    count = count + 1
+  end
+  return units, count, k - 1
 end
 
 -- units of the first MAX_CHARS code points plus 0.55 em per extra; returns units, charCount
@@ -767,6 +871,7 @@ local function scale(units, size, weight)
 end
 
 -- Width in px of str drawn at size px. weight "bold" is 6 % wider.
+-- Results are cached for strings up to 4 * MAX_CHARS bytes.
 function Font.width(str, size, weight)
   if str == nil or str == "" then return 0 end
   if type(str) ~= "string" then str = tostring(str) end
@@ -774,9 +879,9 @@ function Font.width(str, size, weight)
   local c = cacheFor(size, weight)
   local hit = c.map[str]
   if hit then return hit end
-  local units, n = unitsOf(str)
+  local units = unitsOf(str)
   local px = scale(units, size, weight)
-  if n <= MAX_CHARS then
+  if #str <= SLICE then
     if c.count >= CACHE_MAX then c.map = {}; c.count = 0 end
     c.map[str] = px
     c.count = c.count + 1
@@ -803,60 +908,119 @@ local function ellipsisUnits(count)
   return u
 end
 
--- true when a prefix of count code points measuring units still fits maxW
--- with "..." appended; the same arithmetic as scale() so Font.width agrees.
-local function prefixFits(units, count, size, weight, maxW)
-  local px = (units + ellipsisUnits(count)) * size / 1000
-  if weight == "bold" then px = px * BOLD_SCALE end
-  return px <= maxW
-end
-
--- ASCII run of walkFit: bytes[] from byte index i. Returns units, count and
--- the last byte that fits, or -1 while everything fitted. The fit test is
--- prefixFits inlined (same arithmetic as scale), as it runs per character.
-local function fitAscii(bytes, i, units, count, size, weight, maxW)
-  local bold = (weight == "bold")
-  for k = 1, #bytes do
-    local u = units + ((count < MAX_CHARS) and W[bytes[k]] or WIDE_W)
-    local e = (count + 4 <= MAX_CHARS) and ELLIPSIS_UNITS or ellipsisUnits(count + 1)
-    local px = (u + e) * size / 1000
-    if bold then px = px * BOLD_SCALE end
-    if px > maxW then return units, count, i + k - 2 end
-    units, count = u, count + 1
+-- One pass over str that stops as soon as the measured prefix alone is wider
+-- than maxW: the characters walked are bounded by what fits, however long
+-- the string is, and a string that fits whole is returned unchanged. The
+-- arithmetic is scale()'s, so Font.width agrees with the result. Past
+-- MAX_CHARS code points every character counts 0.55 em, as Font.width does.
+-- The longest prefix of an ASCII run that fits maxW with "..." appended,
+-- backing up from byte k (the first that overflowed, or one past the run)
+-- with units the width before it; valid while count + 3 <= MAX_CHARS, where
+-- the ellipsis measures ELLIPSIS_UNITS. Returns the prefix's last byte (0
+-- when only "..." fits, -1 when not even that).
+local function backFit(bytes, k, units, size, bold, maxW)
+  local j = k - 1
+  while true do
+    local e = (units + ELLIPSIS_UNITS) * size / 1000
+    if bold then e = e * BOLD_SCALE end
+    if e <= maxW then return j end
+    if j == 0 then return -1 end
+    units = units - W[bytes[j]]
+    j = j - 1
   end
-  return units, count, -1
-end
-
--- Longest prefix whose width plus "..." fits maxW, charging 0.55 em per
--- code point past MAX_CHARS like Font.width. Never stops inside a UTF-8
--- sequence. Returns lastByteIncluded (0 when only "..." fits).
-local function walkFit(str, size, weight, maxW)
-  local utf8next = U.utf8next
-  local i, n, units, count = 1, #str, 0, 0
-  while i <= n do
-    local a = sfind(str, "[\128-\255]", i)
-    if a == i then
-      local cp, nx = utf8next(str, i)
-      local u = units + ((count < MAX_CHARS) and cpWidth(cp) or WIDE_W)
-      if not prefixFits(u, count + 1, size, weight, maxW) then return i - 1 end
-      units, count, i = u, count + 1, nx
-    else
-      local stop = (a or (n + 1)) - 1
-      if stop - i + 1 > MAX_CHARS then stop = i + MAX_CHARS - 1 end
-      local last
-      units, count, last = fitAscii({ sbyte(str, i, stop) }, i, units, count, size, weight, maxW)
-      if last >= 0 then return last end
-      i = stop + 1
-    end
-  end
-  return i - 1
 end
 
 local function fitUncached(str, size, maxW, weight)
-  if Font.width(str, size, weight) <= maxW then return str end
-  if not prefixFits(0, 0, size, weight, maxW) then return "" end
-  local last = walkFit(str, size, weight, maxW)
-  return ssub(str, 1, last) .. "..."
+  if maxW ~= maxW or maxW < 0 then return "" end
+  local bold = (weight == "bold")
+  local utf8next = U.utf8next
+  local n = #str
+  local stop = (n > SLICE) and SLICE or n
+  local bytes = { sbyte(str, 1, stop) }
+  local k, units, count, fitEnd = 1, 0, 0, 0
+  if not sfind(str, "[\128-\255]") then
+    -- pure ASCII (one byte per character): the plain width alone is tested
+    -- per character and the ellipsis point found once by backing up, while
+    -- the ellipsis measures the same for every prefix (count + 3 <= MAX_CHARS)
+    local lim = MAX_CHARS - 3
+    if lim > stop then lim = stop end
+    while k <= lim do
+      local u = units + W[bytes[k]]
+      local px = u * size / 1000
+      if bold then px = px * BOLD_SCALE end
+      if px > maxW then
+        local last = backFit(bytes, k, units, size, bold, maxW)
+        if last < 0 then return "" end
+        return ssub(str, 1, last) .. "..."
+      end
+      units, count, k = u, count + 1, k + 1
+    end
+    if k > n then return str end
+    fitEnd = backFit(bytes, k, units, size, bold, maxW)
+    if fitEnd < 0 then fitEnd = 0 end
+  end
+  while k <= n do
+    local w, len
+    if k <= stop then
+      local b = bytes[k]
+      if b < 0x80 then w, len = W[b], 1
+      else
+        -- the same inline classification as walk()
+        local b2 = bytes[k + 1]
+        if b <= 0xDF then
+          if b >= 0xC2 and b2 and b2 >= 0x80 and b2 <= 0xBF then w, len = WIDE_W, 2
+          else w, len = seqWidth(bytes, k) end
+        elseif b <= 0xEF then
+          local b3 = bytes[k + 2]
+          if b2 and b2 >= ((b == 0xE0) and 0xA0 or 0x80) and b2 <= ((b == 0xED) and 0x9F or 0xBF)
+             and b3 and b3 >= 0x80 and b3 <= 0xBF then
+            w, len = ((b <= 0xE2) and WIDE_W or EM_W), 3
+          else w, len = seqWidth(bytes, k) end
+        else
+          local b3, b4 = bytes[k + 2], bytes[k + 3]
+          if b <= 0xF4 and b2 and b2 >= ((b == 0xF0) and 0x90 or 0x80) and b2 <= ((b == 0xF4) and 0x8F or 0xBF)
+             and b3 and b3 >= 0x80 and b3 <= 0xBF and b4 and b4 >= 0x80 and b4 <= 0xBF then
+            w, len = EM_W, 4
+          else w, len = seqWidth(bytes, k) end
+        end
+      end
+    else
+      local _, nx = utf8next(str, k)
+      w, len = WIDE_W, nx - k
+    end
+    if count >= MAX_CHARS then w = WIDE_W end
+    local u = units + w
+    local px = u * size / 1000
+    if bold then px = px * BOLD_SCALE end
+    if px > maxW then
+      -- the whole string does not fit: the prefix recorded so far plus "..."
+      if not (((ellipsisUnits(0) * size / 1000) * (bold and BOLD_SCALE or 1)) <= maxW) then return "" end
+      return ssub(str, 1, fitEnd) .. "..."
+    end
+    units, count, k = u, count + 1, k + len
+    local e = (u + ((count + 3 <= MAX_CHARS) and ELLIPSIS_UNITS or ellipsisUnits(count))) * size / 1000
+    if bold then e = e * BOLD_SCALE end
+    if e <= maxW then fitEnd = k - 1 end
+  end
+  return str
+end
+
+-- Estimated VM instructions that fitting str to maxW px and drawing the
+-- result costs when nothing is cached: the code points the width can take
+-- (never more than the string holds) times a per-character cost, non-ASCII
+-- text being several times dearer to fit and to escape. Modes charge cold
+-- tile and header renders against a per-frame budget with it. Two C calls
+-- and a little arithmetic, whatever the string's length.
+local ASCII_CHAR_COST, WIDE_CHAR_COST = 40, 200
+function Font.fitCost(str, size, maxW)
+  if str == nil or str == "" then return 0 end
+  if type(str) ~= "string" then str = tostring(str) end
+  size = tonumber(size) or 14
+  local holds = math.floor((tonumber(maxW) or 0) / (size * 0.5)) + 1
+  local _, chars = string.gsub(str, "[^\128-\191]", "")
+  if holds > chars then holds = chars end
+  if sfind(str, "[\128-\255]") then return holds * WIDE_CHAR_COST end
+  return holds * ASCII_CHAR_COST
 end
 
 -- Longest prefix of str that fits maxW, with "..." when truncated.
@@ -926,6 +1090,7 @@ function Font.lines(str, size, maxW, maxLines)
   end
   return out
 end
+end
 -- ===== 07_svg.lua =====
 -- Nikita Visual Arts – nikitavisual.art
 -- Touch Pad for Q-SYS: svg (Canvas: SVG string builder, pure ASCII output)
@@ -934,6 +1099,7 @@ end
 -- U.ascii, so the canvas never emits a byte above 126. Elements are appended
 -- in call order. A character limit drops elements once reached (c.truncated).
 
+do
 Svg = Svg or {}
 
 local floor, abs, cos, sin, pi, min = math.floor, math.abs, math.cos, math.sin, math.pi, math.min
@@ -1398,6 +1564,7 @@ function Canvas:finish()
   if #self.defs > 0 then defs = "<defs>" .. concat(self.defs) .. "</defs>" end
   return self.header .. defs .. concat(self.parts) .. "</svg>"
 end
+end
 -- ===== 08_shapes.lua =====
 -- Nikita Visual Arts – nikitavisual.art
 -- Touch Pad for Q-SYS: shapes (pad frame, hints, tiles, arrow bars, lock overlay, targets, icons)
@@ -1407,6 +1574,7 @@ end
 -- are stroke paths on a 24 x 24 grid placed with a translate/scale group, so
 -- one icon costs one raw element and well under 400 characters.
 
+do
 Shapes = Shapes or {}
 
 local floor, min, max = math.floor, math.min, math.max
@@ -1416,12 +1584,13 @@ local num, frac = Svg.num, Svg.frac
 -- ---------- pad frame, hint, title ----------
 
 -- background "Solid" | "Transparent" | "Panel"; unknown values draw Solid.
--- Transparent draws nothing so the UCI shows through.
+-- Transparent draws nothing so the UCI shows through; Panel is the theme's
+-- panel colour at 80 % so the page art shows through slightly (spec 2).
 function Shapes.padFrame(c, T, W, H, radius, background)
   if background == "Transparent" then return c end
   radius = radius or 0
-  local fill = (background == "Panel") and T.panel or T.bg
-  c:rect(0, 0, W, H, { fill = fill, rx = radius })
+  local panel = (background == "Panel")
+  c:rect(0, 0, W, H, { fill = panel and T.panel or T.bg, rx = radius, opacity = panel and 0.8 or nil })
   c:rect(0.5, 0.5, W - 1, H - 1, { fill = "none", stroke = T.line, sw = 1, rx = radius })
   return c
 end
@@ -1705,6 +1874,7 @@ function Shapes.iconFor(name, kind)
   if isDestination(kind) then return "display" end
   return "laptop"
 end
+end
 -- ===== 10_mode_xy.lua =====
 -- Nikita Visual Arts – nikitavisual.art
 -- Touch Pad for Q-SYS: XY Pad mode
@@ -1715,6 +1885,7 @@ end
 --
 -- Design time (controls, pages, layout) and the runtime `create(E)` live here.
 
+do
 Modes = Modes or {}
 
 local HINT = "Drag anywhere"
@@ -1812,6 +1983,7 @@ Modes["XY Pad"] = {
     return self
   end,
 }
+end
 -- ===== 11_mode_swipe.lua =====
 -- Nikita Visual Arts – nikitavisual.art
 -- Touch Pad for Q-SYS: Swipe Layer mode
@@ -1823,15 +1995,17 @@ Modes["XY Pad"] = {
 -- diagonal a swipe must cover, 0.05..0.8, default 0.2). A swipe needs
 -- distance and speed: 0.6 s at most from the start of its stroke to the lift.
 --
--- The engine classifies a whole touch from its first point with a fixed 0.2
--- threshold. The mode works in strokes instead and keeps the engine's view of
--- the touch in step with the current stroke through the engine's live touch
--- record (TouchPad.state.touch, the white-box handle the engine publishes for
--- later modules): the record's origin follows the stroke, and a stroke the
--- knob calls too short is hidden from the engine's threshold. So the knob
--- owns the swipe distance in both directions, the mode pulses the swipes the
--- engine does not see, and the two never pulse the same swipe twice. Without
--- the handle the mode still pulses what the engine misses.
+-- The engine classifies a whole touch at its lift, from the touch's origin,
+-- against its own swipe distance. The mode owns that distance through the
+-- engine hook E.setSwipeDistance(fraction) (the knob's value, applied to
+-- the engine's recognizer for every touch) and works in strokes: when the
+-- finger lands again inside one engine touch the mode classifies the stroke
+-- that just ended itself and tells the engine through E.restartStroke(x, y,
+-- t) that the live touch starts again there, so the engine classifies the
+-- last stroke from the right origin. The two never pulse the same swipe
+-- twice: the engine pulses what it classifies, the mode pulses the strokes
+-- the engine never sees (strokes ended by a landing, and a touch resumed
+-- after a taken-back lift, which the engine does not classify).
 --
 -- Quick swipes in a row each count. With Panel Touch wired every lift is
 -- certain, so the engine already separates them. Without Panel Touch a
@@ -1855,7 +2029,6 @@ do
   local TRAIL_MAX = 40                        -- points kept (older ones are dropped)
   local TRAIL_STEPS = 8                       -- opacity buckets (polylines per frame at most)
   local CHEVRON_LIFE = 0.55                   -- s the chevron stays visible
-  local ENGINE_FRACTION = 0.2                 -- the engine's own fixed swipe distance (fraction of the diagonal)
   local JUMP_FRACTION = 0.3                   -- a single report moving this much of the diagonal is a new stroke
   local LAND_GAP = 0.11                       -- s without a report before a move: more than three missed 30 Hz reports
   local LAND_WAIT = 0.12                      -- s after such a report in which the finger shows whether it landed
@@ -1874,7 +2047,8 @@ do
     controls = function(C, props)
       C.add({ Name = "SwipeDistance", ControlType = "Knob", ControlUnit = "Float",
               Min = DIST_MIN, Max = DIST_MAX, DefaultValue = DIST_DEFAULT,
-              PinStyle = "Input", Group = "Setup" })
+              PinStyle = "Input", Group = "Setup",
+              Description = "Fraction of the pad diagonal a swipe must cover." })
     end,
 
     pages = {},
@@ -1909,7 +2083,7 @@ do
         down = false,
         x = 0, y = 0,
         trail = {}, first = 1,                           -- points { x, y, t[, break] }; first = index of the oldest
-        stroke = nil,                                    -- { x0, y0, t0, x, y, t, own, gap }; own: the engine's view follows it
+        stroke = nil,                                    -- { x0, y0, t0, x, y, t, gap }
         chevron = nil,                                   -- { dir, t }
         animating = false,
         locked = false,
@@ -1924,6 +2098,7 @@ do
         if v < DIST_MIN then v = DIST_MIN end
         if v > DIST_MAX then v = DIST_MAX end
         self.fraction = v
+        E.setSwipeDistance(v)                          -- the engine's recognizer follows the knob
         return v
       end
 
@@ -1989,40 +2164,9 @@ do
         return true
       end
 
-      local function newStroke(x, y, t, own)
-        self.stroke = { x0 = x, y0 = y, t0 = t, x = x, y = y, t = t, own = own }
+      local function newStroke(x, y, t)
+        self.stroke = { x0 = x, y0 = y, t0 = t, x = x, y = y, t = t }
         return self.stroke
-      end
-
-      -- The engine's live touch record, when it is published (see the header).
-      local function engineTouch()
-        local tp = TouchPad
-        local st = type(tp) == "table" and tp.state or nil
-        local touch = type(st) == "table" and st.touch or nil
-        if type(touch) == "table" and type(touch.t0) == "number" and type(touch.x0) == "number" then
-          return touch
-        end
-        return nil
-      end
-
-      -- Keeps the engine's view of the touch equal to the stroke: its origin
-      -- is the stroke's, and while the knob asks for more than the engine's
-      -- fixed threshold a stroke that is long enough for the engine but not
-      -- for the knob is made too slow for the engine. Only for strokes the
-      -- engine would classify (the first one and those started at a split):
-      -- a resumed touch is never classified by the engine.
-      local function syncEngine(s)
-        if not s.own then return end
-        local touch = engineTouch()
-        if not touch then return end
-        touch.x0, touch.y0 = s.x0, s.y0
-        local dx, dy = s.x - s.x0, s.y - s.y0
-        local d = sqrt(dx * dx + dy * dy)
-        if self.fraction > ENGINE_FRACTION and d >= ENGINE_FRACTION * DIAG and d < self.fraction * DIAG then
-          touch.t0 = s.t0 - SWIPE_TIME - 1
-        else
-          touch.t0 = s.t0
-        end
       end
 
       -- ---------- touch events ----------
@@ -2033,14 +2177,14 @@ do
       function self:onTouchStart(x, y, t)
         self.down, self.x, self.y = true, x, y
         addPoint(x, y, t)
-        newStroke(x, y, t, true)
+        newStroke(x, y, t)
         animate(true)
         E.invalidate()
       end
 
       function self:onTouchMove(x, y, t, dx, dy)
         local s = self.stroke
-        if not s then s = newStroke(x, y, t, false) end
+        if not s then s = newStroke(x, y, t) end
         local jump = sqrt(dx * dx + dy * dy)
         local landing = t - s.t >= LAND_GAP
         local gap = s.gap
@@ -2067,11 +2211,11 @@ do
           local dir = classify(s.x0, s.y0, s.t0, ex, ey, et)
           if dir then ownSwipe(dir) end
           if jump >= JUMP then self.trail, self.first = {}, 1 end
-          s = newStroke(ox, oy, ot, true)
+          s = newStroke(ox, oy, ot)
+          E.restartStroke(ox, oy, ot)                    -- the engine classifies the new stroke from here
         end
         s.x, s.y, s.t = x, y, t
         addPoint(x, y, t, landing or jump >= JUMP)      -- a new trail line starts after a gap or a jump
-        syncEngine(s)
         self.x, self.y = x, y
         E.invalidate()
       end
@@ -2104,7 +2248,7 @@ do
         -- The drag goes on; the engine classified its swipe at the inferred
         -- lift and never classifies a resumed touch, so the continued stroke
         -- is the mode's to classify at the lift.
-        newStroke(x, y, t, false)
+        newStroke(x, y, t)
         addPoint(x, y, t)
         animate(true)
         E.invalidate()
@@ -2113,7 +2257,6 @@ do
       function self:onControl(name, index, ctl)
         if name == "SwipeDistance" then
           readFraction()
-          if self.stroke then syncEngine(self.stroke) end
           return
         end
         if self.locked then return end                   -- a locked pad reacts to nothing (spec 5.6)
@@ -2261,23 +2404,36 @@ do
 
     controls = function(C, props)
       C.add({ Name = "JoyX", ControlType = "Knob", ControlUnit = "Float", Min = -1, Max = 1,
-              DefaultValue = 0, PinStyle = "Output" })
+              DefaultValue = 0, PinStyle = "Output",
+              Description = "The stick's horizontal position, -1 left to 1 right." })
       C.add({ Name = "JoyY", ControlType = "Knob", ControlUnit = "Float", Min = -1, Max = 1,
-              DefaultValue = 0, PinStyle = "Output" })
+              DefaultValue = 0, PinStyle = "Output",
+              Description = "The stick's vertical position, -1 down to 1 up." })
       C.add({ Name = "Magnitude", ControlType = "Knob", ControlUnit = "Float", Min = 0, Max = 1,
-              DefaultValue = 0, PinStyle = "Output" })
-      C.add({ Name = "DirLeft", ControlType = "Indicator", IndicatorType = "Led", PinStyle = "Output" })
-      C.add({ Name = "DirRight", ControlType = "Indicator", IndicatorType = "Led", PinStyle = "Output" })
-      C.add({ Name = "DirUp", ControlType = "Indicator", IndicatorType = "Led", PinStyle = "Output" })
-      C.add({ Name = "DirDown", ControlType = "Indicator", IndicatorType = "Led", PinStyle = "Output" })
+              DefaultValue = 0, PinStyle = "Output",
+              Description = "How far the stick is from the centre, 0 to 1." })
+      C.add({ Name = "DirLeft", ControlType = "Indicator", IndicatorType = "Led", PinStyle = "Output",
+              Description = "On while the stick points left." })
+      C.add({ Name = "DirRight", ControlType = "Indicator", IndicatorType = "Led", PinStyle = "Output",
+              Description = "On while the stick points right." })
+      C.add({ Name = "DirUp", ControlType = "Indicator", IndicatorType = "Led", PinStyle = "Output",
+              Description = "On while the stick points up." })
+      C.add({ Name = "DirDown", ControlType = "Indicator", IndicatorType = "Led", PinStyle = "Output",
+              Description = "On while the stick points down." })
       C.add({ Name = "Deadzone", ControlType = "Knob", ControlUnit = "Float", Min = 0, Max = 0.5,
-              DefaultValue = 0.08, PinStyle = "Input" })
+              DefaultValue = 0.08, PinStyle = "Input",
+              Description = "Radius around the centre that outputs zero." })
       C.add({ Name = "Curve", ControlType = "Text", DefaultValue = "Linear", PinStyle = "Input",
-              Choices = { "Linear", "Squared", "Cubed" } })
-      C.add({ Name = "Sticky", ControlType = "Button", ButtonType = "Toggle", PinStyle = "Input" })
-      C.add({ Name = "Home", ControlType = "Button", ButtonType = "Trigger", PinStyle = "Both" })
-      C.add({ Name = "InvertPan", ControlType = "Button", ButtonType = "Toggle", PinStyle = "Both" })
-      C.add({ Name = "InvertTilt", ControlType = "Button", ButtonType = "Toggle", PinStyle = "Both" })
+              Choices = { "Linear", "Squared", "Cubed" },
+              Description = "Response curve of the stick: Linear, Squared or Cubed." })
+      C.add({ Name = "Sticky", ControlType = "Button", ButtonType = "Toggle", PinStyle = "Input",
+              Description = "On: the stick stays where it is left; off: it springs back on release." })
+      C.add({ Name = "Home", ControlType = "Button", ButtonType = "Trigger", PinStyle = "Both",
+              Description = "Re-centres the stick and sends the camera home; pulses when the pad does it." })
+      C.add({ Name = "InvertPan", ControlType = "Button", ButtonType = "Toggle", PinStyle = "Both",
+              Description = "Mirrors the horizontal axis." })
+      C.add({ Name = "InvertTilt", ControlType = "Button", ButtonType = "Toggle", PinStyle = "Both",
+              Description = "Mirrors the vertical axis." })
     end,
 
     pages = {},
@@ -2324,6 +2480,7 @@ do
         down = false,
         lastMoveAt = 0,
         homeAt = -1e9,               -- when the stick was last homed (the Home pulse guard)
+        homeEdge = false,            -- a Home press (Boolean true) was handled; its release is not a second home
         spring = nil,                -- { x0, y0, t } while springing back
         jx = 0, jy = 0, mag = 0,     -- the published outputs
         leds = { false, false, false, false },   -- left, right, up, down
@@ -2494,9 +2651,18 @@ do
       -- ---------- pins ----------
       function self:onControl(name, index, ctl)
         if name == "Home" then
-          -- A Trigger's handler may run with Boolean already false; the
-          -- trailing edge of a pulse just handled does not home twice.
-          if ctl.Boolean or E.now() - self.homeAt >= HOME_GUARD then home(false) end
+          -- The rising edge homes once and sets homeEdge, so the trailing
+          -- edge (however long the pin is held) does nothing; a Trigger()
+          -- call arrives with Boolean false and no edge, and homes unless a
+          -- pulse was handled moments ago (HOME_GUARD).
+          if ctl.Boolean then
+            self.homeEdge = true
+            home(false)
+          elseif self.homeEdge then
+            self.homeEdge = false
+          elseif E.now() - self.homeAt >= HOME_GUARD then
+            home(false)
+          end
         elseif name == "Sticky" then
           if not ctl.Boolean and not self.down then release() end
         elseif name == "InvertPan" or name == "InvertTilt" or name == "Deadzone" or name == "Curve" then
@@ -2654,20 +2820,34 @@ do
     hint = HINT,
 
     controls = function(C, props)
-      C.add{ Name = "Pan", ControlType = "Knob", ControlUnit = "Float", Min = 0, Max = 1, DefaultValue = 0.5, PinStyle = "Output" }
-      C.add{ Name = "Tilt", ControlType = "Knob", ControlUnit = "Float", Min = 0, Max = 1, DefaultValue = 0.5, PinStyle = "Output" }
-      C.add{ Name = "PanSpeed", ControlType = "Knob", ControlUnit = "Float", Min = -1, Max = 1, DefaultValue = 0, PinStyle = "Output" }
-      C.add{ Name = "TiltSpeed", ControlType = "Knob", ControlUnit = "Float", Min = -1, Max = 1, DefaultValue = 0, PinStyle = "Output" }
-      C.add{ Name = "DirLeft", ControlType = "Indicator", IndicatorType = "Led", PinStyle = "Output" }
-      C.add{ Name = "DirRight", ControlType = "Indicator", IndicatorType = "Led", PinStyle = "Output" }
-      C.add{ Name = "DirUp", ControlType = "Indicator", IndicatorType = "Led", PinStyle = "Output" }
-      C.add{ Name = "DirDown", ControlType = "Indicator", IndicatorType = "Led", PinStyle = "Output" }
-      C.add{ Name = "Sensitivity", ControlType = "Knob", ControlUnit = "Float", Min = 0.2, Max = 3, DefaultValue = 1, PinStyle = "Input" }
-      C.add{ Name = "Home", ControlType = "Button", ButtonType = "Trigger", PinStyle = "Both" }
-      C.add{ Name = "InvertPan", ControlType = "Button", ButtonType = "Toggle", PinStyle = "Both" }
-      C.add{ Name = "InvertTilt", ControlType = "Button", ButtonType = "Toggle", PinStyle = "Both" }
-      C.add{ Name = "HFOV", ControlType = "Knob", ControlUnit = "Float", Min = 20, Max = 120, DefaultValue = 60, PinStyle = "Input", Group = "Camera" }
-      C.add{ Name = "OpticalZoom", ControlType = "Knob", ControlUnit = "Float", Min = 1, Max = 40, DefaultValue = 12, PinStyle = "Input", Group = "Camera" }
+      C.add{ Name = "Pan", ControlType = "Knob", ControlUnit = "Float", Min = 0, Max = 1, DefaultValue = 0.5, PinStyle = "Output",
+             Description = "Absolute pan aim, 0 to 1; 0.5 is home." }
+      C.add{ Name = "Tilt", ControlType = "Knob", ControlUnit = "Float", Min = 0, Max = 1, DefaultValue = 0.5, PinStyle = "Output",
+             Description = "Absolute tilt aim, 0 to 1; 0.5 is home." }
+      C.add{ Name = "PanSpeed", ControlType = "Knob", ControlUnit = "Float", Min = -1, Max = 1, DefaultValue = 0, PinStyle = "Output",
+             Description = "Pan speed while dragging, -1 to 1." }
+      C.add{ Name = "TiltSpeed", ControlType = "Knob", ControlUnit = "Float", Min = -1, Max = 1, DefaultValue = 0, PinStyle = "Output",
+             Description = "Tilt speed while dragging, -1 to 1." }
+      C.add{ Name = "DirLeft", ControlType = "Indicator", IndicatorType = "Led", PinStyle = "Output",
+             Description = "On while the aim moves left." }
+      C.add{ Name = "DirRight", ControlType = "Indicator", IndicatorType = "Led", PinStyle = "Output",
+             Description = "On while the aim moves right." }
+      C.add{ Name = "DirUp", ControlType = "Indicator", IndicatorType = "Led", PinStyle = "Output",
+             Description = "On while the aim moves up." }
+      C.add{ Name = "DirDown", ControlType = "Indicator", IndicatorType = "Led", PinStyle = "Output",
+             Description = "On while the aim moves down." }
+      C.add{ Name = "Sensitivity", ControlType = "Knob", ControlUnit = "Float", Min = 0.2, Max = 3, DefaultValue = 1, PinStyle = "Input",
+             Description = "How far the aim moves for a given drag." }
+      C.add{ Name = "Home", ControlType = "Button", ButtonType = "Trigger", PinStyle = "Both",
+             Description = "Sends the aim and the camera home; pulses when the pad does it." }
+      C.add{ Name = "InvertPan", ControlType = "Button", ButtonType = "Toggle", PinStyle = "Both",
+             Description = "Mirrors the pan direction." }
+      C.add{ Name = "InvertTilt", ControlType = "Button", ButtonType = "Toggle", PinStyle = "Both",
+             Description = "Mirrors the tilt direction." }
+      C.add{ Name = "HFOV", ControlType = "Knob", ControlUnit = "Float", Min = 20, Max = 120, DefaultValue = 60, PinStyle = "Input", Group = "Camera",
+             Description = "The camera's horizontal field of view in degrees; sizes the view box." }
+      C.add{ Name = "OpticalZoom", ControlType = "Knob", ControlUnit = "Float", Min = 1, Max = 40, DefaultValue = 12, PinStyle = "Input", Group = "Camera",
+             Description = "The camera's maximum optical zoom factor." }
     end,
 
     pages = {},
@@ -3125,17 +3305,28 @@ do
     hint = HINT,
 
     controls = function(C, props)
-      C.add{ Name = "FramePan", ControlType = "Knob", ControlUnit = "Float", Min = 0, Max = 1, DefaultValue = 0.5, PinStyle = "Output" }
-      C.add{ Name = "FrameTilt", ControlType = "Knob", ControlUnit = "Float", Min = 0, Max = 1, DefaultValue = 0.5, PinStyle = "Output" }
-      C.add{ Name = "FrameZoom", ControlType = "Knob", ControlUnit = "Float", Min = 0, Max = 1, DefaultValue = 0, PinStyle = "Output" }
-      C.add{ Name = "Apply", ControlType = "Button", ButtonType = "Trigger", PinStyle = "Both" }
-      C.add{ Name = "Reset", ControlType = "Button", ButtonType = "Trigger", PinStyle = "Both" }
-      C.add{ Name = "Home", ControlType = "Button", ButtonType = "Trigger", PinStyle = "Both" }
-      C.add{ Name = "MinFrame", ControlType = "Knob", ControlUnit = "Float", Min = 0.1, Max = 0.6, DefaultValue = 0.25, PinStyle = "Input" }
-      C.add{ Name = "InvertPan", ControlType = "Button", ButtonType = "Toggle", PinStyle = "Both" }
-      C.add{ Name = "InvertTilt", ControlType = "Button", ButtonType = "Toggle", PinStyle = "Both" }
-      C.add{ Name = "HFOV", ControlType = "Knob", ControlUnit = "Float", Min = 20, Max = 120, DefaultValue = 60, PinStyle = "Input", Group = "Camera" }
-      C.add{ Name = "OpticalZoom", ControlType = "Knob", ControlUnit = "Float", Min = 1, Max = 40, DefaultValue = 12, PinStyle = "Input", Group = "Camera" }
+      C.add{ Name = "FramePan", ControlType = "Knob", ControlUnit = "Float", Min = 0, Max = 1, DefaultValue = 0.5, PinStyle = "Output",
+             Description = "Horizontal centre of the applied frame within the home view, 0 to 1." }
+      C.add{ Name = "FrameTilt", ControlType = "Knob", ControlUnit = "Float", Min = 0, Max = 1, DefaultValue = 0.5, PinStyle = "Output",
+             Description = "Vertical centre of the applied frame within the home view, 0 to 1." }
+      C.add{ Name = "FrameZoom", ControlType = "Knob", ControlUnit = "Float", Min = 0, Max = 1, DefaultValue = 0, PinStyle = "Output",
+             Description = "Tightness of the applied frame: 0 is the whole view, 1 the tightest." }
+      C.add{ Name = "Apply", ControlType = "Button", ButtonType = "Trigger", PinStyle = "Both",
+             Description = "Pulses when a shot is sent to the camera; pulse it to apply the current box." }
+      C.add{ Name = "Reset", ControlType = "Button", ButtonType = "Trigger", PinStyle = "Both",
+             Description = "Zooms all the way out; pulses when the pad does it." }
+      C.add{ Name = "Home", ControlType = "Button", ButtonType = "Trigger", PinStyle = "Both",
+             Description = "Zooms out and sends the camera home; pulses when the pad does it." }
+      C.add{ Name = "MinFrame", ControlType = "Knob", ControlUnit = "Float", Min = 0.1, Max = 0.6, DefaultValue = 0.25, PinStyle = "Input",
+             Description = "The smallest frame as a fraction of the home view." }
+      C.add{ Name = "InvertPan", ControlType = "Button", ButtonType = "Toggle", PinStyle = "Both",
+             Description = "Mirrors the pan direction of the outputs and the camera." }
+      C.add{ Name = "InvertTilt", ControlType = "Button", ButtonType = "Toggle", PinStyle = "Both",
+             Description = "Mirrors the tilt direction of the outputs and the camera." }
+      C.add{ Name = "HFOV", ControlType = "Knob", ControlUnit = "Float", Min = 20, Max = 120, DefaultValue = 60, PinStyle = "Input", Group = "Camera",
+             Description = "The camera's horizontal field of view in degrees." }
+      C.add{ Name = "OpticalZoom", ControlType = "Knob", ControlUnit = "Float", Min = 1, Max = 40, DefaultValue = 12, PinStyle = "Input", Group = "Camera",
+             Description = "The camera's maximum optical zoom factor." }
     end,
 
     pages = {},
@@ -3829,18 +4020,25 @@ do
 
     controls = function(C, props)
       C.add{ Name = "DialValue", ControlType = "Knob", ControlUnit = "Float", Min = 0, Max = 1,
-             DefaultValue = 0, PinStyle = "Both", Group = "Dial" }
-      C.add{ Name = "StepUp", ControlType = "Button", ButtonType = "Trigger", PinStyle = "Output", Group = "Dial" }
-      C.add{ Name = "StepDown", ControlType = "Button", ButtonType = "Trigger", PinStyle = "Output", Group = "Dial" }
+             DefaultValue = 0, PinStyle = "Both", Group = "Dial",
+             Description = "The dial's level, 0 to 1; clockwise raises it." }
+      C.add{ Name = "StepUp", ControlType = "Button", ButtonType = "Trigger", PinStyle = "Output", Group = "Dial",
+             Description = "Pulses once per detent turned clockwise." }
+      C.add{ Name = "StepDown", ControlType = "Button", ButtonType = "Trigger", PinStyle = "Output", Group = "Dial",
+             Description = "Pulses once per detent turned anticlockwise." }
       C.add{ Name = "Turns", ControlType = "Knob", ControlUnit = "Float", Min = 0.5, Max = 10,
-             DefaultValue = 2, PinStyle = "Input", Group = "Dial" }
+             DefaultValue = 2, PinStyle = "Input", Group = "Dial",
+             Description = "How many full turns cover the whole range." }
       C.add{ Name = "Detents", ControlType = "Knob", ControlUnit = "Integer", Min = 0, Max = 72,
-             DefaultValue = 24, PinStyle = "Input", Group = "Dial" }
-      C.add{ Name = "DialTarget", ControlType = "Text", PinStyle = "Input", Group = "Dial" }
+             DefaultValue = 24, PinStyle = "Input", Group = "Dial",
+             Description = "Notches per turn; 0 for none." }
+      C.add{ Name = "DialTarget", ControlType = "Text", PinStyle = "Input", Group = "Dial",
+             Description = "A control driven directly, as CodeName~control." }
       if C.camera ~= nil and C.camera ~= "None" then
         -- Sizes the zoom factor readout: 1 + zoom position x (OpticalZoom - 1).
         C.add{ Name = "OpticalZoom", ControlType = "Knob", ControlUnit = "Float", Min = 1, Max = 40,
-               DefaultValue = 12, PinStyle = "Input", Group = "Camera" }
+               DefaultValue = 12, PinStyle = "Input", Group = "Camera",
+               Description = "The camera's maximum optical zoom factor; sizes the zoom readout." }
       end
     end,
 
@@ -4454,6 +4652,7 @@ end
 Modes = Modes or {}
 
 do
+  local MAX_UNITS = 24                    -- code points of the Units text kept
   local HINT = "Touch the ring to set, drag to turn"
   local SWEEP = 270                 -- degrees of travel
   local START_ANGLE = 225           -- position 0 (bottom-left, canvas angles: 0 = right, 90 = up)
@@ -4516,15 +4715,21 @@ do
 
     controls = function(C, props)
       C.add{ Name = "KnobMin", ControlType = "Knob", ControlUnit = "Float", Min = -1000, Max = 1000,
-             DefaultValue = 0, PinStyle = "Input", Group = "Knob" }
+             DefaultValue = 0, PinStyle = "Input", Group = "Knob",
+             Description = "The value shown at the bottom of the sweep." }
       C.add{ Name = "KnobMax", ControlType = "Knob", ControlUnit = "Float", Min = -1000, Max = 1000,
-             DefaultValue = 100, PinStyle = "Input", Group = "Knob" }
-      C.add{ Name = "Units", ControlType = "Text", PinStyle = "Input", Group = "Knob" }
+             DefaultValue = 100, PinStyle = "Input", Group = "Knob",
+             Description = "The value shown at the top of the sweep." }
+      C.add{ Name = "Units", ControlType = "Text", PinStyle = "Input", Group = "Knob",
+             Description = "The unit text shown after the value." }
       C.add{ Name = "KnobValue", ControlType = "Knob", ControlUnit = "Float", Min = -1000, Max = 1000,
-             DefaultValue = 0, PinStyle = "Both", Group = "Knob" }
+             DefaultValue = 0, PinStyle = "Both", Group = "Knob",
+             Description = "The knob's value in display units." }
       C.add{ Name = "KnobPosition", ControlType = "Knob", ControlUnit = "Float", Min = 0, Max = 1,
-             DefaultValue = 0, PinStyle = "Both", Group = "Knob" }
-      C.add{ Name = "DialTarget", ControlType = "Text", PinStyle = "Input", Group = "Knob" }
+             DefaultValue = 0, PinStyle = "Both", Group = "Knob",
+             Description = "The knob's position, 0 to 1." }
+      C.add{ Name = "DialTarget", ControlType = "Text", PinStyle = "Input", Group = "Knob",
+             Description = "A control driven directly, as CodeName~control." }
     end,
 
     pages = {},
@@ -4705,7 +4910,9 @@ do
         local un = E.ctl("Units")
         if lo and type(lo.Value) == "number" then self.lo = lo.Value end
         if hi and type(hi.Value) == "number" then self.hi = hi.Value end
-        if un then self.units = U.trim(un.String) end
+        -- a units string is a few characters; cutting it here keeps the
+        -- readout's per-frame fit short and cacheable whatever the pin holds
+        if un then self.units = U.truncateChars(U.trim(un.String), MAX_UNITS) end
       end
 
       -- ---------- geometry ----------
@@ -4820,10 +5027,12 @@ do
       -- ---------- drawing ----------
       -- Track, ticks and the Min / Max labels only change with the range:
       -- drawn once into a scratch canvas and replayed as one raw element.
-      local function staticRaw()
+      local function staticRaw(c)
         local key = tostring(self.lo) .. "|" .. tostring(self.hi) .. "|" .. self.units
         if self.static and self.staticKey == key then return self.static end
-        local s = Svg.new(W, H, { limit = 20000 })
+        -- the scratch canvas takes the engine canvas's font family, so the
+        -- Min / Max labels follow the Font property like every other text
+        local s = Svg.new(W, H, { limit = 20000, family = c.family })
         s:arc(cx, cy, Rm, START_ANGLE, START_ANGLE - SWEEP, { stroke = T.well, sw = band, cap = "round" })
         s:arc(cx, cy, Rm, START_ANGLE, START_ANGLE - SWEEP, { stroke = T.line, sw = 1, opacity = 0.6 })
         local n = MAJOR_TICKS * (MINOR_PER + 1)
@@ -4857,7 +5066,7 @@ do
       end
 
       function self:draw(c)
-        c:raw(staticRaw())
+        c:raw(staticRaw(c))
         local a = angleOfPos(self.p)
         -- value fill along the track
         if self.p > 0.0005 then
@@ -4940,6 +5149,7 @@ end
 Modes = Modes or {}
 
 do
+  local MAX_UNITS = 24                    -- code points of the Units text kept
   local HINT = "Touch or drag the fader"
   local ECHO_TIME = 1.0             -- seconds a target echo of our own write is ignored
   local SNAP = 0.03                 -- SnapCenter window as a fraction of the travel
@@ -5001,20 +5211,29 @@ do
 
     controls = function(C, props)
       C.add{ Name = "FaderMin", ControlType = "Knob", ControlUnit = "Float", Min = -1000, Max = 1000,
-             DefaultValue = -100, PinStyle = "Input", Group = "Fader" }
+             DefaultValue = -100, PinStyle = "Input", Group = "Fader",
+             Description = "The value at the bottom of the fader." }
       C.add{ Name = "FaderMax", ControlType = "Knob", ControlUnit = "Float", Min = -1000, Max = 1000,
-             DefaultValue = 10, PinStyle = "Input", Group = "Fader" }
-      C.add{ Name = "Units", ControlType = "Text", DefaultValue = "dB", PinStyle = "Input", Group = "Fader" }
+             DefaultValue = 10, PinStyle = "Input", Group = "Fader",
+             Description = "The value at the top of the fader." }
+      C.add{ Name = "Units", ControlType = "Text", DefaultValue = "dB", PinStyle = "Input", Group = "Fader",
+             Description = "The unit text shown after the value." }
       C.add{ Name = "FaderValue", ControlType = "Knob", ControlUnit = "Float", Min = -1000, Max = 1000,
-             DefaultValue = -100, PinStyle = "Both", Group = "Fader" }
+             DefaultValue = -100, PinStyle = "Both", Group = "Fader",
+             Description = "The fader's value in display units." }
       C.add{ Name = "FaderPosition", ControlType = "Knob", ControlUnit = "Float", Min = 0, Max = 1,
-             DefaultValue = 0, PinStyle = "Both", Group = "Fader" }
+             DefaultValue = 0, PinStyle = "Both", Group = "Fader",
+             Description = "The fader's position, 0 to 1." }
       C.add{ Name = "GrabMode", ControlType = "Text", DefaultValue = "Jump", PinStyle = "Input", Group = "Fader",
-             Choices = { "Jump", "Relative" } }
+             Choices = { "Jump", "Relative" },
+             Description = "Jump sets the value where you touch; Relative moves it from where it was." }
       C.add{ Name = "Taper", ControlType = "Text", DefaultValue = "Linear", PinStyle = "Input", Group = "Fader",
-             Choices = { "Linear", "Audio" } }
-      C.add{ Name = "SnapCenter", ControlType = "Button", ButtonType = "Toggle", PinStyle = "Input", Group = "Fader" }
-      C.add{ Name = "DialTarget", ControlType = "Text", PinStyle = "Input", Group = "Fader" }
+             Choices = { "Linear", "Audio" },
+             Description = "Linear or Audio; Audio puts 0 dB at 75 percent of the travel for a -100..10 range." }
+      C.add{ Name = "SnapCenter", ControlType = "Button", ButtonType = "Toggle", PinStyle = "Input", Group = "Fader",
+             Description = "Snaps to the centre value within 3 percent of the travel." }
+      C.add{ Name = "DialTarget", ControlType = "Text", PinStyle = "Input", Group = "Fader",
+             Description = "A control driven directly, as CodeName~control." }
     end,
 
     pages = {},
@@ -5285,7 +5504,9 @@ do
         local sn = E.ctl("SnapCenter")
         if lo and type(lo.Value) == "number" then self.lo = lo.Value end
         if hi and type(hi.Value) == "number" then self.hi = hi.Value end
-        if un and type(un.String) == "string" then self.units = U.trim(un.String) end
+        -- a units string is a few characters; cutting it here keeps the
+        -- readout's per-frame fit short and cacheable whatever the pin holds
+        if un and type(un.String) == "string" then self.units = U.truncateChars(U.trim(un.String), MAX_UNITS) end
         if gm and type(gm.String) == "string" then self.relative = U.lower(U.trim(gm.String)) == "relative" end
         if tp and type(tp.String) == "string" then self.audio = U.lower(U.trim(tp.String)) == "audio" end
         if sn then self.snap = sn.Boolean and true or false end
@@ -5612,15 +5833,20 @@ do
     controls = function(C, props)
       local n = #LAYOUTS[speakersOf(props)]
       C.add{ Name = "PanX", ControlType = "Knob", ControlUnit = "Float", Min = -1, Max = 1,
-             DefaultValue = 0, PinStyle = "Both", Group = "Panner" }
+             DefaultValue = 0, PinStyle = "Both", Group = "Panner",
+             Description = "The source's left-right position, -1 to 1." }
       C.add{ Name = "PanY", ControlType = "Knob", ControlUnit = "Float", Min = -1, Max = 1,
-             DefaultValue = 0, PinStyle = "Both", Group = "Panner" }
+             DefaultValue = 0, PinStyle = "Both", Group = "Panner",
+             Description = "The source's back-front position, -1 to 1." }
       C.add{ Name = "Pan", ControlType = "Knob", ControlUnit = "Float", Min = -1, Max = 1,
-             DefaultValue = 0, PinStyle = "Both", Group = "Panner" }
+             DefaultValue = 0, PinStyle = "Both", Group = "Panner",
+             Description = "A stereo pan for a pan control such as the Mic Mixer's MicPan, -1 to 1." }
       C.add{ Name = "SpeakerGain", Count = n, ControlType = "Knob", ControlUnit = "dB", Min = -80, Max = 0,
-             DefaultValue = 0, PinStyle = "Output", Group = "Panner" }
+             DefaultValue = 0, PinStyle = "Output", Group = "Panner",
+             Description = "The gain of each speaker in dB from a constant-power law." }
       C.add{ Name = "Divergence", ControlType = "Knob", ControlUnit = "Float", Min = 0, Max = 1,
-             DefaultValue = 0.5, PinStyle = "Input", Group = "Panner" }
+             DefaultValue = 0.5, PinStyle = "Input", Group = "Panner",
+             Description = "How widely the source spreads over the speakers, 0 to 1." }
     end,
 
     pages = {},
@@ -5935,18 +6161,28 @@ Modes["Zone Select"] = {
 
   controls = function(C, props)
     local n = zoneCount(props)
-    C.add{ Name = "ZoneName", Count = n, ControlType = "Text", PinStyle = "Input", Group = "Zones" }
-    C.add{ Name = "ZoneSelected", Count = n, ControlType = "Button", ButtonType = "Toggle", PinStyle = "Both", Group = "Zones" }
-    C.add{ Name = "SelectAll", ControlType = "Button", ButtonType = "Trigger", PinStyle = "Input", Group = "Zones", Legend = "ALL" }
-    C.add{ Name = "ClearAll", ControlType = "Button", ButtonType = "Trigger", PinStyle = "Input", Group = "Zones", Legend = "NONE" }
-    C.add{ Name = "SelectedList", ControlType = "Text", PinStyle = "Output", Group = "Zones" }
-    C.add{ Name = "Edit", ControlType = "Button", ButtonType = "Toggle", PinStyle = "Input", Group = "Zones", Legend = "EDIT" }
+    C.add{ Name = "ZoneName", Count = n, ControlType = "Text", PinStyle = "Input", Group = "Zones",
+           Description = "The name drawn on each zone." }
+    C.add{ Name = "ZoneSelected", Count = n, ControlType = "Button", ButtonType = "Toggle", PinStyle = "Both", Group = "Zones",
+           Description = "Whether each zone is selected." }
+    C.add{ Name = "SelectAll", ControlType = "Button", ButtonType = "Trigger", PinStyle = "Input", Group = "Zones", Legend = "ALL",
+           Description = "Selects every zone." }
+    C.add{ Name = "ClearAll", ControlType = "Button", ButtonType = "Trigger", PinStyle = "Input", Group = "Zones", Legend = "NONE",
+           Description = "Clears every zone." }
+    C.add{ Name = "SelectedList", ControlType = "Text", PinStyle = "Output", Group = "Zones",
+           Description = "The selected zone numbers, comma separated." }
+    C.add{ Name = "Edit", ControlType = "Button", ButtonType = "Toggle", PinStyle = "Input", Group = "Zones", Legend = "EDIT",
+           Description = "On: drag zones to move or resize them and redraw the last touched one." }
     C.add{ Name = "ShowBackground", ControlType = "Button", ButtonType = "Toggle", PinStyle = "Input", Group = "Zones",
-           DefaultValue = true, Legend = "BACKGROUND" }
-    C.add{ Name = "ZoneLayout", ControlType = "Text", PinStyle = "Both", Group = "Zones" }
-    C.add{ Name = "Exclusive", ControlType = "Button", ButtonType = "Toggle", PinStyle = "Input", Group = "Zones", Legend = "EXCLUSIVE" }
+           DefaultValue = true, Legend = "BACKGROUND",
+           Description = "Draws the pad background behind the zones." }
+    C.add{ Name = "ZoneLayout", ControlType = "Text", PinStyle = "Both", Group = "Zones",
+           Description = "The zone rectangles as a JSON list of {x,y,w,h} in 0..1 pad units." }
+    C.add{ Name = "Exclusive", ControlType = "Button", ButtonType = "Toggle", PinStyle = "Input", Group = "Zones", Legend = "EXCLUSIVE",
+           Description = "On: one zone at a time, like a radio group." }
     C.add{ Name = "Columns", ControlType = "Knob", ControlUnit = "Integer", Min = 1, Max = 8, DefaultValue = 4,
-           PinStyle = "Input", Group = "Zones" }
+           PinStyle = "Input", Group = "Zones",
+           Description = "Columns of the default grid when Zone Layout is blank." }
   end,
 
   -- pages: nil, so the framework adds the Names page (spec section 4).
@@ -6648,31 +6884,46 @@ Modes["Zone Select"] = {
     end
 
     -- A zone tile is rendered once per (state, geometry, name) and replayed.
-    -- At most TILE_RENDERS tiles are re-rendered per frame: a stale tile keeps
-    -- its old fragment for one frame and the mode asks for another frame.
-    local TILE_RENDERS = 6
-    local renders, stale, scratch = 0, false, nil
+    -- Rendering from scratch costs a fixed part plus the label's fitting
+    -- (Font.fitCost: the characters the tile can hold, non-ASCII names being
+    -- dearer), and a frame spends at most RENDER_BUDGET of those estimated
+    -- instructions on renders. A tile beyond the budget keeps its old
+    -- fragment (stale) or shows a plain box (cold, the first frame or a new
+    -- layout) and the mode asks for another frame, so 32 zones with long
+    -- non-Latin names fill over a few frames instead of breaking one.
+    local RENDER_BUDGET = 20000
+    local TILE_BASE = 2000
+    local renderLeft, stale, scratch = RENDER_BUDGET, false, nil
 
     local function tileFrag(i)
       local z = self.zones[i]
       local on = self.sel[i] and true or false
       local mode = self.edit and ((self.last == i) and "e" or "E") or "-"
-      local key = (on and "1" or "0") .. mode .. z.x .. "," .. z.y .. "," .. z.w .. "," .. z.h .. "|" .. labelOf(i)
+      local label = labelOf(i)
+      local key = (on and "1" or "0") .. mode .. z.x .. "," .. z.y .. "," .. z.w .. "," .. z.h .. "|" .. label
       local e = self.cache[i]
       if e and e.key == key then return e.svg end
-      if e and renders >= TILE_RENDERS then
-        stale = true
-        return e.svg
-      end
-      renders = renders + 1
       local x, y, w, h = z.x * W, z.y * H, z.w * W, z.h * H
+      local size = U.clamp(math.floor(math.min(h * 0.38, w * 0.18)), 9, 16)
+      -- the first render of a frame always goes ahead, so a frame always progresses
+      local cost = TILE_BASE + Font.fitCost(label, size, w - 16)
+      local over = cost > renderLeft and renderLeft < RENDER_BUDGET
+      if over then
+        stale = true
+        if e then return e.svg end
+      end
       -- One scratch canvas per frame; each tile is the slice of parts it added.
       if not scratch then scratch = Svg.new(W, H, { limit = 50000, family = FAMILY }) end
       local s = scratch
       local p0 = #s.parts
-      local size = U.clamp(math.floor(math.min(h * 0.38, w * 0.18)), 9, 16)
+      if over then
+        s:rect(x + 1, y + 1, w - 2, h - 2, { fill = on and T.accent or T.well, opacity = on and 0.9 or 1,
+                                             rx = math.min(10, h / 4) })
+        return table.concat(s.parts, "", p0 + 1, #s.parts)
+      end
+      renderLeft = renderLeft - cost
       local picked = self.edit and self.last == i
-      Shapes.tile(s, T, x, y, w, h, labelOf(i),
+      Shapes.tile(s, T, x, y, w, h, label,
         { on = on, radius = math.min(10, h / 4), size = size, picked = picked,
           accent = picked and T.accent2 or nil })
       if self.edit then
@@ -6688,7 +6939,7 @@ Modes["Zone Select"] = {
     end
 
     function self:draw(c)
-      renders, stale, scratch = 0, false, nil
+      renderLeft, stale, scratch = RENDER_BUDGET, false, nil
       if self.background then
         c:rect(inset, inset, W - 2 * inset, H - 2 * inset,
           { fill = T.panel, stroke = T.line, sw = 1, rx = math.max(4, math.floor(inset * 1.2)) })
@@ -6780,8 +7031,8 @@ do
   local DOUBLE_TIME = 0.4                -- second tap on the same tile within this = double
   local FLASH = 0.8                      -- seconds a freshly routed screen glows
   local NAME_IN_TEXT = 40                -- characters of a name used in the Gesture text
-  local COLD_CHARS = 560                 -- cold-tile cost units spent per frame (about 45 VM instructions each)
-  local COLD_TILE_COST = 60              -- a cold tile's fixed cost in those units (box, icon, truncation)
+  local COLD_BUDGET = 28000              -- estimated VM instructions spent on cold tiles per frame
+  local COLD_TILE_COST = 4000            -- a cold tile's fixed cost in those (canvas, box, icon, cache)
   local WARM_DELAY = 0.03                -- seconds until the follow-up frame
   local DRAG_START = 12                  -- px a press moves before it carries (the engine's drag threshold)
   local HOLD_POLL = 0.5                  -- the put-down timer waits this long while a finger rests on a tile
@@ -6824,19 +7075,28 @@ do
     controls = function(C, props)
       local nS = countOf(props, "Sources", 4)
       local nD = countOf(props, "Destinations", 2)
-      C.add{ Name = "SourceName", ControlType = "Text", Count = nS, PinStyle = "Input", Group = "Sources" }
+      C.add{ Name = "SourceName", ControlType = "Text", Count = nS, PinStyle = "Input", Group = "Sources",
+             Description = "The name drawn on each source tile." }
       C.add{ Name = "SourceActive", ControlType = "Button", ButtonType = "Toggle", Count = nS,
-             PinStyle = "Input", Group = "Sources", DefaultValue = true }
-      C.add{ Name = "DestName", ControlType = "Text", Count = nD, PinStyle = "Input", Group = "Routing" }
+             PinStyle = "Input", Group = "Sources", DefaultValue = true,
+             Description = "Signal present on each source; off dims the tile." }
+      C.add{ Name = "DestName", ControlType = "Text", Count = nD, PinStyle = "Input", Group = "Routing",
+             Description = "The name drawn on each destination tile." }
       C.add{ Name = "Route", ControlType = "Knob", ControlUnit = "Integer", Min = 0, Max = nS, DefaultValue = 0,
-             Count = nD, PinStyle = "Both", Group = "Routing" }
+             Count = nD, PinStyle = "Both", Group = "Routing",
+             Description = "The source number routed to each destination; 0 is none." }
       C.add{ Name = "Routed", ControlType = "Button", ButtonType = "Trigger", Count = nD, PinStyle = "Output",
-             Group = "Routing" }
-      C.add{ Name = "RouteName", ControlType = "Text", Count = nD, PinStyle = "Output", Group = "Routing" }
-      C.add{ Name = "ClearRoutes", ControlType = "Button", ButtonType = "Trigger", PinStyle = "Input", Group = "Routing" }
-      C.add{ Name = "TapOnly", ControlType = "Button", ButtonType = "Toggle", PinStyle = "Input", Group = "Routing" }
+             Group = "Routing",
+             Description = "Pulses when each destination's route changes." }
+      C.add{ Name = "RouteName", ControlType = "Text", Count = nD, PinStyle = "Output", Group = "Routing",
+             Description = "The name of the source routed to each destination." }
+      C.add{ Name = "ClearRoutes", ControlType = "Button", ButtonType = "Trigger", PinStyle = "Input", Group = "Routing",
+             Description = "Clears every route." }
+      C.add{ Name = "TapOnly", ControlType = "Button", ButtonType = "Toggle", PinStyle = "Input", Group = "Routing",
+             Description = "On: no drags; tap a source and then a screen." }
       C.add{ Name = "AllowCalls", ControlType = "Button", ButtonType = "Toggle", PinStyle = "Input", Group = "Routing",
-             DefaultValue = true }
+             DefaultValue = true,
+             Description = "On: a double tap on a source skips screens whose name holds a call word." }
     end,
 
     -- Names (or Sources / Destinations above 16) hold the name boxes; the Pad
@@ -7439,27 +7699,32 @@ do
       -- A tile is rendered once per visual state (picked, routed, dimmed,
       -- pressed, hovered, flashing, the routed source's name) into a scratch
       -- canvas and the string is replayed on later frames. Rendering from
-      -- scratch costs a fixed part plus the characters the label fitting
-      -- walks (the name's length capped by what the tile width can hold), so
-      -- a frame spends at most COLD_CHARS of those units on cold tiles: six
-      -- tiles of 23 characters on a 500 px pad, three of 117 on a 1600 px one.
-      -- The rest show their box only and a follow-up frame WARM_DELAY later
-      -- fills them, so 64 x 64 names of 120 characters never near the budget.
+      -- scratch costs a fixed part plus the label's fitting (Font.fitCost:
+      -- the characters the tile width can hold, non-ASCII names being
+      -- several times dearer), so a frame spends at most COLD_BUDGET of
+      -- those estimated instructions on cold tiles: five tiles of 33 ASCII
+      -- characters on a 500 px pad, three of 112 on a 1600 px one, fewer
+      -- with CJK or emoji names. The rest show their box only and a
+      -- follow-up frame WARM_DELAY later fills them, so 64 x 64 names of
+      -- 120 characters in any script never near the frame budget.
       local coldLeft, needWarm, warmTimer = 0, false, nil
       local coldCount, coldSpent = 0, 0               -- the last frame's cold tiles and their cost
 
       local function fitCost(kind, i, maxW, size)
-        local n = #rawName(kind, i)
-        if n == 0 then n = 10 end                        -- "Source 64"
-        local holds = floor(maxW / (size * 0.5)) + 1     -- characters the width can take
-        return min(n, holds)
+        local name = rawName(kind, i)
+        if name == "" then name = "Source 64" end
+        return Font.fitCost(name, size, maxW)
       end
 
+      -- Placeholder boxes share one scratch canvas per frame (each is the
+      -- slice of parts it added) and are kept on the tile.
+      local phScratch = nil
       local function placeholder(tl, radius)
         if tl.ph then return tl.ph end
-        local s = Svg.new(W, H, { limit = 2000 })
-        s:rect(tl.x + 0.5, tl.y + 0.5, tl.w - 1, tl.h - 1, { fill = T.panel, stroke = T.line, sw = 1, rx = radius })
-        tl.ph = table.concat(s.parts)
+        if not phScratch then phScratch = Svg.new(W, H, { limit = 20000 }) end
+        local p0 = #phScratch.parts
+        phScratch:rect(tl.x + 0.5, tl.y + 0.5, tl.w - 1, tl.h - 1, { fill = T.panel, stroke = T.line, sw = 1, rx = radius })
+        tl.ph = table.concat(phScratch.parts, "", p0 + 1, #phScratch.parts)
         return tl.ph
       end
 
@@ -7470,7 +7735,7 @@ do
         local cost = COLD_TILE_COST + fitCost(kind, i, maxW, size)
         if withSub then cost = cost + fitCost("S", r, maxW, 11) end
         -- the first cold tile of a frame always renders, so a page keeps filling
-        if cost > coldLeft and coldLeft < COLD_CHARS then
+        if cost > coldLeft and coldLeft < COLD_BUDGET then
           needWarm = true
           return placeholder(tl, o.radius)
         end
@@ -7525,7 +7790,7 @@ do
 
       function self:draw(c)
         local now = E.now()
-        coldLeft, needWarm = COLD_CHARS, false
+        coldLeft, needWarm, phScratch = COLD_BUDGET, false, nil
         coldCount, coldSpent = 0, 0
         if capH > 0 then
           c:text(areaS.x + 2, areaS.y - 5, "SOURCES", { size = 10, fill = T.muted, weight = "bold", spacing = 1 })
@@ -7577,7 +7842,7 @@ do
         return plan.page, #plan.pages, table.concat(plan.pages, ",")
       end
       function self:pickedSource() return picked end
-      function self:coldStats() return coldCount, coldSpent, COLD_CHARS end
+      function self:coldStats() return coldCount, coldSpent, COLD_BUDGET end
       function self:isCarrying() return carry ~= nil and carry.dragging end
 
       return self
@@ -7629,7 +7894,8 @@ do
   local SCAN_FIRST, SCAN_CHUNK = 64, 512  -- Cross pins read in the load, then per turn
   local ENFORCE_COLS = 4                 -- columns checked per turn when Exclusive turns on
   local CHUNK_DELAY = 0.02
-  local COLD_PER_FRAME = 8               -- headers rendered from scratch in one frame
+  local COLD_BUDGET = 8000               -- estimated VM instructions spent on cold headers per frame
+  local HEADER_BASE = 700                -- a cold header apart from its label (box, text element)
   local WARM_DELAY = 0.03
 
   local function countOf(props, name, default)
@@ -7663,15 +7929,21 @@ do
     controls = function(C, props)
       local nS = countOf(props, "Sources", 4)
       local nD = countOf(props, "Destinations", 2)
-      C.add{ Name = "SourceName", ControlType = "Text", Count = nS, PinStyle = "Input", Group = "Sources" }
-      C.add{ Name = "DestName", ControlType = "Text", Count = nD, PinStyle = "Input", Group = "Routing" }
+      C.add{ Name = "SourceName", ControlType = "Text", Count = nS, PinStyle = "Input", Group = "Sources",
+             Description = "The name of each row." }
+      C.add{ Name = "DestName", ControlType = "Text", Count = nD, PinStyle = "Input", Group = "Routing",
+             Description = "The name of each column." }
       C.add{ Name = "Cross", ControlType = "Button", ButtonType = "Toggle", Count = nS * nD,
-             PinStyle = "Both", Group = "Matrix" }
+             PinStyle = "Both", Group = "Matrix",
+             Description = "Each crosspoint; the index is (row - 1) * columns + column." }
       C.add{ Name = "Route", ControlType = "Knob", ControlUnit = "Integer", Min = 0, Max = nS, DefaultValue = 0,
-             Count = nD, PinStyle = "Both", Group = "Routing" }
+             Count = nD, PinStyle = "Both", Group = "Routing",
+             Description = "The source number routed to each column; 0 is none." }
       C.add{ Name = "ExclusiveColumns", ControlType = "Button", ButtonType = "Toggle", PinStyle = "Input",
-             Group = "Routing", DefaultValue = true }
-      C.add{ Name = "ClearAll", ControlType = "Button", ButtonType = "Trigger", PinStyle = "Input", Group = "Routing" }
+             Group = "Routing", DefaultValue = true,
+             Description = "On: a column carries one source at a time." }
+      C.add{ Name = "ClearAll", ControlType = "Button", ButtonType = "Trigger", PinStyle = "Input", Group = "Routing",
+             Description = "Clears every crosspoint." }
     end,
 
     -- Names (or Sources / Destinations above 16) hold the name boxes; the Pad
@@ -8284,9 +8556,15 @@ do
         elseif name == "DestName" then
           setName("D", index, ctl.String)
         elseif name == "Cross" then
+          -- a write that does not change the crosspoint (a same-value write
+          -- that fires, ctl:Trigger()) changes nothing: only a pad tap routes
+          -- an already-on source "last"
           if index >= 1 and index <= nCross then
-            local r, c = rowOf(index), colOf(index)
-            if ctl.Boolean then turnOn(r, c) else turnOff(r, c) end
+            local on = ctl.Boolean and true or false
+            if on ~= (cross[index] == true) then
+              local r, c = rowOf(index), colOf(index)
+              if on then turnOn(r, c) else turnOff(r, c) end
+            end
           end
         elseif name == "Route" then
           local v = clampRoute(ctl.Value)
@@ -8378,8 +8656,11 @@ do
       end
 
       -- A header is rendered once per (position, name, state) into a scratch
-      -- canvas; at most COLD_PER_FRAME from scratch per frame, the rest are
-      -- plain boxes until a follow-up frame WARM_DELAY later.
+      -- canvas. A cold render costs HEADER_BASE plus the label's fitting
+      -- (Font.fitCost: the characters the header can hold, non-ASCII names
+      -- being dearer); a frame spends at most COLD_BUDGET on them (the first
+      -- always renders) and the rest are plain boxes until a follow-up frame
+      -- WARM_DELAY later.
       local function headerRaw(c, kind, i, x, y, w, h, pressed)
         local key = floor(x) .. ":" .. floor(y) .. ":" .. floor(w) .. ":" .. floor(h) .. ":" ..
                     (pressed and "p" or "-") .. ":" .. (nameRev[kind][i] or 0)
@@ -8389,21 +8670,22 @@ do
         local radius = min(8, h / 4, w / 4)
         s:rect(x + 0.5, y + 0.5, w - 1, h - 1,
           { fill = T.panel, stroke = pressed and T.accent or T.line, sw = pressed and 2 or 1, rx = radius })
-        if coldLeft <= 0 then
+        local g = geom()
+        local rotated = (kind == "D" and g.rotated)
+        local size = sizeFor(rotated and w or h)
+        local cost = HEADER_BASE + Font.fitCost(rawName(kind, i), size, (rotated and h or w) - 10)
+        if cost > coldLeft and coldLeft < COLD_BUDGET then
           needWarm = true
           return table.concat(s.parts)
         end
-        coldLeft = coldLeft - 1
-        local g = geom()
-        if kind == "D" and g.rotated then
-          local size = sizeFor(w)
+        coldLeft = coldLeft - cost
+        if rotated then
           local label = fittedLabel(kind, i, h - 10, size)
           s:group({ transform = "translate(" .. Svg.num(x + w / 2 + size * 0.35) .. " " .. Svg.num(y + h - 5) .. ") rotate(-90)" },
             function(gg)
               gg:text(0, 0, label, { size = size, fill = T.text })
             end)
         else
-          local size = sizeFor(h)
           local label = fittedLabel(kind, i, w - 10, size)
           s:text(x + w / 2, y + h / 2 + size * 0.35, label, { size = size, fill = T.text, anchor = "middle" })
         end
@@ -8414,7 +8696,7 @@ do
 
       function self:draw(c)
         local g = geom()
-        coldLeft, needWarm = COLD_PER_FRAME, false
+        coldLeft, needWarm = COLD_BUDGET, false
         local r0, c0 = rowFirst[rowPage], colFirst[colPage]
         -- column headers
         for ci = 1, g.colsN do
@@ -8617,19 +8899,30 @@ do
 
     controls = function(C, props)
       C.add{ Name = "GridSize", ControlType = "Knob", ControlUnit = "Integer", Min = GRID_MIN, Max = GRID_MAX,
-             DefaultValue = GRID_DEFAULT, PinStyle = "Input" }
-      C.add{ Name = "Pattern", ControlType = "Text", PinStyle = "Input" }
-      C.add{ Name = "Unlocked", ControlType = "Button", ButtonType = "Trigger", PinStyle = "Output" }
-      C.add{ Name = "Failed", ControlType = "Button", ButtonType = "Trigger", PinStyle = "Output" }
-      C.add{ Name = "Locked", ControlType = "Button", ButtonType = "Toggle", PinStyle = "Both" }
+             DefaultValue = GRID_DEFAULT, PinStyle = "Input",
+             Description = "Dots per side of the grid, 3 to 5." }
+      C.add{ Name = "Pattern", ControlType = "Text", PinStyle = "Input",
+             Description = "The secret as digits, 1-5-9-6 or 1596, numbered left to right, top to bottom." }
+      C.add{ Name = "Unlocked", ControlType = "Button", ButtonType = "Trigger", PinStyle = "Output",
+             Description = "Pulses when the drawn pattern matches." }
+      C.add{ Name = "Failed", ControlType = "Button", ButtonType = "Trigger", PinStyle = "Output",
+             Description = "Pulses when the drawn pattern does not match." }
+      C.add{ Name = "Locked", ControlType = "Button", ButtonType = "Toggle", PinStyle = "Both",
+             Description = "On after Max Tries failures for Lockout Seconds; off clears the lockout." }
       C.add{ Name = "MaxTries", ControlType = "Knob", ControlUnit = "Integer", Min = TRIES_MIN, Max = TRIES_MAX,
-             DefaultValue = TRIES_DEFAULT, PinStyle = "Input" }
+             DefaultValue = TRIES_DEFAULT, PinStyle = "Input",
+             Description = "Failures allowed before the lockout." }
       C.add{ Name = "LockoutSeconds", ControlType = "Knob", ControlUnit = "Integer", Min = LOCK_MIN, Max = LOCK_MAX,
-             DefaultValue = LOCK_DEFAULT, PinStyle = "Input" }
-      C.add{ Name = "LastPattern", ControlType = "Indicator", IndicatorType = "Text", PinStyle = "Output" }
-      C.add{ Name = "Learn", ControlType = "Button", ButtonType = "Toggle", PinStyle = "Input" }
-      C.add{ Name = "Masked", ControlType = "Button", ButtonType = "Toggle", PinStyle = "Input" }
-      C.add{ Name = "AutoSubmit", ControlType = "Button", ButtonType = "Toggle", PinStyle = "Input" }
+             DefaultValue = LOCK_DEFAULT, PinStyle = "Input",
+             Description = "How long the lockout lasts." }
+      C.add{ Name = "LastPattern", ControlType = "Indicator", IndicatorType = "Text", PinStyle = "Output",
+             Description = "The pattern just drawn." }
+      C.add{ Name = "Learn", ControlType = "Button", ButtonType = "Toggle", PinStyle = "Input",
+             Description = "On: the next drawn pattern is stored as the secret." }
+      C.add{ Name = "Masked", ControlType = "Button", ButtonType = "Toggle", PinStyle = "Input",
+             Description = "Hides the trail; a row of small dots counts the joined dots instead." }
+      C.add{ Name = "AutoSubmit", ControlType = "Button", ButtonType = "Toggle", PinStyle = "Input",
+             Description = "Checks as soon as the drawn pattern is as long as the secret." }
     end,
 
     pages = {},
@@ -9179,18 +9472,28 @@ do
     hint = HINT,
 
     controls = function(C, props)
-      C.add({ Name = "Pin", ControlType = "Text", PinStyle = "Input", DefaultValue = "1234" })
-      C.add({ Name = "Entry", ControlType = "Text", PinStyle = "Output" })
-      C.add({ Name = "Masked", ControlType = "Button", ButtonType = "Toggle", PinStyle = "Input", DefaultValue = true })
-      C.add({ Name = "AutoSubmit", ControlType = "Button", ButtonType = "Toggle", PinStyle = "Input", DefaultValue = true })
-      C.add({ Name = "Learn", ControlType = "Button", ButtonType = "Toggle", PinStyle = "Input" })
-      C.add({ Name = "Accepted", ControlType = "Button", ButtonType = "Trigger", PinStyle = "Output" })
-      C.add({ Name = "Rejected", ControlType = "Button", ButtonType = "Trigger", PinStyle = "Output" })
-      C.add({ Name = "Locked", ControlType = "Button", ButtonType = "Toggle", PinStyle = "Both" })
+      C.add({ Name = "Pin", ControlType = "Text", PinStyle = "Input", DefaultValue = "1234",
+              Description = "The accepted code or codes, separated by commas." })
+      C.add({ Name = "Entry", ControlType = "Text", PinStyle = "Output",
+              Description = "The digits entered so far." })
+      C.add({ Name = "Masked", ControlType = "Button", ButtonType = "Toggle", PinStyle = "Input", DefaultValue = true,
+              Description = "Shows dots instead of digits on the pad." })
+      C.add({ Name = "AutoSubmit", ControlType = "Button", ButtonType = "Toggle", PinStyle = "Input", DefaultValue = true,
+              Description = "Submits as soon as the entry is as long as a code." })
+      C.add({ Name = "Learn", ControlType = "Button", ButtonType = "Toggle", PinStyle = "Input",
+              Description = "On: the next code entered and confirmed with Enter is stored as the Pin." })
+      C.add({ Name = "Accepted", ControlType = "Button", ButtonType = "Trigger", PinStyle = "Output",
+              Description = "Pulses when an entered code is accepted." })
+      C.add({ Name = "Rejected", ControlType = "Button", ButtonType = "Trigger", PinStyle = "Output",
+              Description = "Pulses when an entered code is rejected." })
+      C.add({ Name = "Locked", ControlType = "Button", ButtonType = "Toggle", PinStyle = "Both",
+              Description = "On after Max Tries failures for Lockout Seconds; off clears the lockout." })
       C.add({ Name = "MaxTries", ControlType = "Knob", ControlUnit = "Integer", Min = MIN_TRIES, Max = MAX_TRIES,
-              DefaultValue = 5, PinStyle = "Input" })
+              DefaultValue = 5, PinStyle = "Input",
+              Description = "Failures allowed before the lockout." })
       C.add({ Name = "LockoutSeconds", ControlType = "Knob", ControlUnit = "Integer", Min = MIN_LOCKOUT,
-              Max = MAX_LOCKOUT, DefaultValue = 60, PinStyle = "Input" })
+              Max = MAX_LOCKOUT, DefaultValue = 60, PinStyle = "Input",
+              Description = "How long the lockout lasts." })
     end,
 
     pages = {},
@@ -9730,19 +10033,32 @@ do
     hint = HINT,
 
     controls = function(C, props)
-      C.add({ Name = "GuestName", ControlType = "Text", PinStyle = "Both", Group = "Guest" })
-      C.add({ Name = "GuestCompany", ControlType = "Text", PinStyle = "Both", Group = "Guest" })
-      C.add({ Name = "Visiting", ControlType = "Text", PinStyle = "Both", Group = "Guest" })
-      C.add({ Name = "Submit", ControlType = "Button", ButtonType = "Trigger", PinStyle = "Input", Legend = "SIGN IN" })
-      C.add({ Name = "Clear", ControlType = "Button", ButtonType = "Trigger", PinStyle = "Input", Legend = "CLEAR" })
-      C.add({ Name = "ClearSignature", ControlType = "Button", ButtonType = "Trigger", PinStyle = "Input", Legend = "CLEAR SIGNATURE" })
-      C.add({ Name = "Submitted", ControlType = "Button", ButtonType = "Trigger", PinStyle = "Output" })
-      C.add({ Name = "LastGuest", ControlType = "Text", PinStyle = "Output" })
-      C.add({ Name = "TodayCount", ControlType = "Text", PinStyle = "Output" })
-      C.add({ Name = "RoomName", ControlType = "Text", PinStyle = "Input" })
-      C.add({ Name = "WebhookUrl", ControlType = "Text", PinStyle = "Input" })
-      C.add({ Name = "SendStatus", ControlType = "Text", PinStyle = "Output" })
-      C.add({ Name = "PenWidth", ControlType = "Knob", ControlUnit = "Float", Min = 1, Max = 8, DefaultValue = 3, PinStyle = "Input" })
+      C.add({ Name = "GuestName", ControlType = "Text", PinStyle = "Both", Group = "Guest",
+              Description = "The guest's name." })
+      C.add({ Name = "GuestCompany", ControlType = "Text", PinStyle = "Both", Group = "Guest",
+              Description = "The guest's company." })
+      C.add({ Name = "Visiting", ControlType = "Text", PinStyle = "Both", Group = "Guest",
+              Description = "Who the guest is visiting." })
+      C.add({ Name = "Submit", ControlType = "Button", ButtonType = "Trigger", PinStyle = "Input", Legend = "SIGN IN",
+              Description = "Signs the guest in: saves the signature and the log line." })
+      C.add({ Name = "Clear", ControlType = "Button", ButtonType = "Trigger", PinStyle = "Input", Legend = "CLEAR",
+              Description = "Clears the form and the signature." })
+      C.add({ Name = "ClearSignature", ControlType = "Button", ButtonType = "Trigger", PinStyle = "Input", Legend = "CLEAR SIGNATURE",
+              Description = "Clears the signature only." })
+      C.add({ Name = "Submitted", ControlType = "Button", ButtonType = "Trigger", PinStyle = "Output",
+              Description = "Pulses after a successful sign-in." })
+      C.add({ Name = "LastGuest", ControlType = "Text", PinStyle = "Output",
+              Description = "The name of the last guest signed in." })
+      C.add({ Name = "TodayCount", ControlType = "Text", PinStyle = "Output",
+              Description = "How many guests signed in today." })
+      C.add({ Name = "RoomName", ControlType = "Text", PinStyle = "Input",
+              Description = "The room name written to the log and the webhook." })
+      C.add({ Name = "WebhookUrl", ControlType = "Text", PinStyle = "Input",
+              Description = "Where each sign-in is posted when the Sign-In Webhook property is on." })
+      C.add({ Name = "SendStatus", ControlType = "Text", PinStyle = "Output",
+              Description = "The result of the last webhook post." })
+      C.add({ Name = "PenWidth", ControlType = "Knob", ControlUnit = "Float", Min = 1, Max = 8, DefaultValue = 3, PinStyle = "Input",
+              Description = "The signature pen width in pixels." })
     end,
 
     pages = {},
@@ -10014,10 +10330,19 @@ do
       end
 
       -- ---------- form ----------
+      -- The header's fitted lines are kept per field (fit.name for the
+      -- guest name, fit.sub for company and visiting, fit.room): a change
+      -- drops only its own line, and drawHeader re-fits one line per frame.
+      local function dropFit(key)
+        if key == "name" then self.fit.name = nil
+        elseif key == "room" then self.fit.room = nil
+        else self.fit.sub = nil end
+      end
+
       local function setField(key, name, value)
         if self.fields[key] ~= value then
           self.fields[key] = value
-          self.fit = {}
+          dropFit(key)
           E.out(name, value)
         end
       end
@@ -10038,6 +10363,11 @@ do
         setField("name", "GuestName", "")
         setField("company", "GuestCompany", "")
         setField("visiting", "Visiting", "")
+        -- a pin holding only whitespace normalises to "" without a write, so
+        -- the pins are cleared explicitly (E.out writes only when they differ)
+        E.out("GuestName", "")
+        E.out("GuestCompany", "")
+        E.out("Visiting", "")
         clearInk()
         if not quiet then
           clearMessage()
@@ -10240,11 +10570,11 @@ do
 
       function self:onControl(name, index, ctl)
         if name == "GuestName" then
-          self.fields.name = field(ctl.String); self.fit = {}; activity()
+          self.fields.name = field(ctl.String); dropFit("name"); activity()
         elseif name == "GuestCompany" then
-          self.fields.company = field(ctl.String); self.fit = {}; activity()
+          self.fields.company = field(ctl.String); dropFit("sub"); activity()
         elseif name == "Visiting" then
-          self.fields.visiting = field(ctl.String); self.fit = {}; activity()
+          self.fields.visiting = field(ctl.String); dropFit("sub"); activity()
         elseif name == "Submit" then
           if fired(name, ctl) then submit() end
         elseif name == "Clear" then
@@ -10257,7 +10587,7 @@ do
             E.setGesture("SIGNATURE CLEARED")
           end
         elseif name == "RoomName" then
-          self.room = field(ctl.String); self.fit = {}
+          self.room = field(ctl.String); dropFit("room")
         elseif name == "WebhookUrl" then
           return
         end
@@ -10269,6 +10599,10 @@ do
         local x0, y = m, m + titleSize
         c:text(x0, y, "Visitor sign-in", { size = titleSize, fill = T.muted, weight = "bold" })
         local fit = self.fit        -- fitted lines, measured once per field or count change
+        -- At most one line is fitted per frame (a wide pad fits a hundred
+        -- characters of a long non-ASCII field, dear to fit and to escape);
+        -- a line still missing is drawn on the next frame, asked for below.
+        local fitted, missing = false, false
         -- the day count always shows; the room name fits into what is left
         local today = "Today: " .. self.count
         local todayW = Font.width(today, titleSize)
@@ -10280,6 +10614,7 @@ do
           if fit.room == nil or fit.roomFor ~= self.count then
             fit.room = (avail >= titleSize * 2) and Font.fit(room, titleSize, avail) or ""
             fit.roomFor = self.count
+            fitted = true
           end
           if fit.room ~= "" then
             c:text(W - m - todayW - gap, y, fit.room, { size = titleSize, fill = T.muted, anchor = "end" })
@@ -10287,25 +10622,36 @@ do
         end
         y = y + nameSize + 4
         local f = self.fields
-        -- the fitted name and sub-line are measured once per field change,
-        -- not per frame (a 120-character field is costly to fit)
         if fit.name == nil then
-          fit.name = (f.name ~= "") and Font.fit(f.name, nameSize, W - 2 * m, "bold") or ""
-          local sub = f.company
-          if f.visiting ~= "" then sub = (sub ~= "" and (sub .. "  -  ") or "") .. "visiting " .. f.visiting end
-          fit.sub = (sub ~= "") and Font.fit(sub, subSize, W - 2 * m) or ""
+          if fitted then
+            missing = true
+          else
+            fit.name = (f.name ~= "") and Font.fit(f.name, nameSize, W - 2 * m, "bold") or ""
+            fitted = true
+          end
+        end
+        if fit.sub == nil then
+          if fitted then
+            missing = true
+          else
+            local sub = f.company
+            if f.visiting ~= "" then sub = (sub ~= "" and (sub .. "  -  ") or "") .. "visiting " .. f.visiting end
+            fit.sub = (sub ~= "") and Font.fit(sub, subSize, W - 2 * m) or ""
+            fitted = true
+          end
         end
         if f.name ~= "" then
-          if fit.name ~= "" then c:text(x0, y, fit.name, { size = nameSize, fill = T.text, weight = "bold" }) end
+          if fit.name and fit.name ~= "" then c:text(x0, y, fit.name, { size = nameSize, fill = T.text, weight = "bold" }) end
         else
           c:text(x0, y, "Your name", { size = nameSize, fill = T.line, weight = "bold" })
         end
         y = y + subSize + 6
         if f.company ~= "" or f.visiting ~= "" then
-          if fit.sub ~= "" then c:text(x0, y, fit.sub, { size = subSize, fill = T.muted }) end
+          if fit.sub and fit.sub ~= "" then c:text(x0, y, fit.sub, { size = subSize, fill = T.muted }) end
         else
           c:text(x0, y, "Company and who you are visiting", { size = subSize, fill = T.line })
         end
+        if missing then E.invalidate() end
       end
 
       local function drawFooter(c)
@@ -10612,15 +10958,23 @@ do
 
     controls = function(C, props)
       C.add({ Name = "PenWidth", ControlType = "Knob", ControlUnit = "Float", Min = MIN_WIDTH, Max = MAX_WIDTH,
-              DefaultValue = DEFAULT_WIDTH, PinStyle = "Input" })
+              DefaultValue = DEFAULT_WIDTH, PinStyle = "Input",
+              Description = "The pen width in pixels." })
       C.add({ Name = "PenColor", ControlType = "Text", PinStyle = "Input", DefaultValue = "Accent",
-              Choices = COLOR_NAMES })
-      C.add({ Name = "Eraser", ControlType = "Button", ButtonType = "Toggle", PinStyle = "Input" })
-      C.add({ Name = "Undo", ControlType = "Button", ButtonType = "Trigger", PinStyle = "Input" })
-      C.add({ Name = "ClearBoard", ControlType = "Button", ButtonType = "Trigger", PinStyle = "Input" })
-      C.add({ Name = "Snapshot", ControlType = "Button", ButtonType = "Trigger", PinStyle = "Input" })
-      C.add({ Name = "Strokes", ControlType = "Indicator", IndicatorType = "Text", PinStyle = "Output" })
-      C.add({ Name = "LastFile", ControlType = "Text", PinStyle = "Output" })
+              Choices = COLOR_NAMES,
+              Description = "The pen colour: Accent, White, Black, Red, Green or Blue." })
+      C.add({ Name = "Eraser", ControlType = "Button", ButtonType = "Toggle", PinStyle = "Input",
+              Description = "On: the finger removes every stroke it crosses." })
+      C.add({ Name = "Undo", ControlType = "Button", ButtonType = "Trigger", PinStyle = "Input",
+              Description = "Removes the last stroke." })
+      C.add({ Name = "ClearBoard", ControlType = "Button", ButtonType = "Trigger", PinStyle = "Input",
+              Description = "Empties the board." })
+      C.add({ Name = "Snapshot", ControlType = "Button", ButtonType = "Trigger", PinStyle = "Input",
+              Description = "Writes the board as an SVG file and names it on Last File." })
+      C.add({ Name = "Strokes", ControlType = "Indicator", IndicatorType = "Text", PinStyle = "Output",
+              Description = "How many strokes are on the board." })
+      C.add({ Name = "LastFile", ControlType = "Text", PinStyle = "Output",
+              Description = "The file written by the last snapshot." })
     end,
 
     pages = {},
@@ -11188,7 +11542,16 @@ do
       if name == "ZoomIn" or name == "ZoomOut" then
         local on = false
         pcall(function() on = ctl.Boolean and true or false end)
-        if name == "ZoomIn" then self:zoom(on and 1 or 0) else self:zoom(on and -1 or 0) end
+        local dir = (name == "ZoomIn") and 1 or -1
+        if not on then
+          -- releasing one Zoom pin while the other is still held keeps
+          -- zooming the held way instead of stopping the camera
+          local other = E.ctl((name == "ZoomIn") and "ZoomOut" or "ZoomIn")
+          local otherOn = false
+          if other ~= nil then pcall(function() otherOn = other.Boolean and true or false end) end
+          dir = otherOn and -dir or 0
+        end
+        self:zoom(dir)
         return true
       end
       if name == "CameraIP" and type(self.reconnect) == "function" then
@@ -12062,6 +12425,17 @@ do
       end
     end
 
+    -- One unanswered position inquiry (timed out, or replaced before any
+    -- position reply): after MISSES_FOR_WARNING in a row with no position
+    -- reply ever received, CameraStatus warns once. A reply resets the count.
+    local function miss()
+      d.misses = d.misses + 1
+      if d.posReplies == 0 and d.misses >= MISSES_FOR_WARNING and not d.warnedNoPos then
+        d.warnedNoPos = true
+        report(E, d, describe() .. ": no answer to position inquiries (framing and dial need them)", "warn")
+      end
+    end
+
     function d.getPosition(self, cb)
       if not ensure() then
         if type(cb) == "function" then cb(nil) end
@@ -12074,6 +12448,10 @@ do
         local old = self.pending
         self.pending = nil
         if old.timer then old.timer:cancel() end
+        -- an inquiry replaced before its position reply counts as a miss, so a
+        -- caller polling faster than INQUIRY_TIMEOUT (the dial, a held zoom)
+        -- still gets the warning after MISSES_FOR_WARNING unanswered inquiries
+        if old.pan == nil then miss() end
         if type(old.cb) == "function" then E.after(0, function() old.cb(nil) end) end
       end
       local pend = { cb = cb, pan = nil, tilt = nil, zoom = nil }
@@ -12081,11 +12459,7 @@ do
       pend.timer = E.after(INQUIRY_TIMEOUT, function()
         if self.pending ~= pend then return end
         self.pending = nil
-        self.misses = self.misses + 1
-        if self.posReplies == 0 and self.misses >= MISSES_FOR_WARNING and not self.warnedNoPos then
-          self.warnedNoPos = true
-          report(E, d, describe() .. ": no answer to position inquiries (framing and dial need them)", "warn")
-        end
+        miss()
         if type(cb) == "function" then cb(nil) end
       end)
       send("\129\9\6\18\255", true, "ipt")
@@ -12158,6 +12532,7 @@ end
 -- relies on a global set by an earlier call: GetControlLayout rebuilds the
 -- control list itself through Framework.buildControls.
 
+do
 Framework = Framework or {}
 
 local BRAND_DASH = "\226\128\147"          -- the brand en dash, written as ASCII escapes
@@ -12167,6 +12542,8 @@ local SETUP_COL_W = 328                     -- Setup page column width
 local SIDE_W = 168                          -- Pad page right column (mode buttons)
 local OUT_ROWS, OUT_CELL_W, OUT_CELL_H = 16, 112, 48
 local MINI = 24                             -- compact cell for arrays longer than 16
+local MINI_COLS = 32                        -- mini cells per row
+local OUT_PAGE_CELLS = MINI_COLS * 16       -- mini cells per Outputs page; more go on "Outputs 2", ...
 local MIN_PAGE_W = 700
 
 local DEFAULT_MODE = "XY Pad"
@@ -12262,7 +12639,11 @@ local function padColourNote(props)
   local custom = (name == "Custom") and prop(props, "Background Color", "") or ""
   local hex
   if background == "Panel" then
+    -- an 80 % panel over the page art: the page shows through, so the
+    -- colour to put under the copies is the page's own
     hex = U.isHex(custom) and Svg.lighten(custom, 0.06) or T.panel
+    local r, g, b = U.hexToRgb(hex)
+    return string.format("Pad colour: none (Panel: %d,%d,%d at 80 %% over the page art)", r, g, b)
   elseif U.isHex(custom) then
     hex = custom
   end
@@ -12424,12 +12805,13 @@ local function extraPages(mode, props)
 end
 Framework.extraPages = extraPages
 
-function Framework.pageNames(props)
+function Framework.pageNames(props, meta, order)
   local mode = modeOf(props)
   local names = { "Pad", "Setup" }
   for _, p in ipairs(extraPages(mode, props)) do names[#names + 1] = p end
   if cameraKind(props, mode) == CAMERA_DEMO then names[#names + 1] = "Camera View" end
   names[#names + 1] = "Outputs"
+  for p = 2, Framework.outputPageCount(props, meta, order) do names[#names + 1] = "Outputs " .. p end
   names[#names + 1] = "Display"
   names[#names + 1] = "About"
   return names
@@ -12465,9 +12847,56 @@ local function text(name, pin, group)
   return { Name = name, ControlType = "Text", PinStyle = pin, Group = group }
 end
 
+-- One plain sentence per common and camera control (spec section 3), shown
+-- as the control's Description in Designer and in docs/touchpad/PINS.md.
+local DESCRIPTIONS = {
+  Status = "The plugin's status: OK while bound to the picker, otherwise the problem.",
+  Display = "The pad drawing; copy it from the Display page onto the UCI. Disabled at run time so touches pass through.",
+  Picker = "Code Name of the Color Picker to read; blank uses the Color Picker property.",
+  Refresh = "Re-scans the design for the picker and rebinds.",
+  PanelTouch = "Wire the touch panel's Touch Activity here for exact press and release.",
+  Calibrate = "Two-tap calibration tool: on shows two targets to tap in turn, off cancels.",
+  Calibration = "Calibration lines, P x0 y0 w h for panels and D x0 y0 w h for Designer; editable.",
+  PickerLayout = "The computed picker size and placement for the current pad size.",
+  SetupVersion = "Records that the first-start defaults of the toggles were written once.",
+  ReleaseTime = "Silence counted as a lift when Panel Touch is not wired.",
+  LongPressTime = "How long a still finger must rest for a long press.",
+  Lock = "On: touches are ignored and the pad draws dimmed with a lock icon.",
+  Touching = "On while a finger is on the pad.",
+  X = "Live finger position from left (0) to right (1).",
+  Y = "Live finger position from bottom (0) to top (1).",
+  Tap = "Pulses on a tap.",
+  DoubleTap = "Pulses on a double tap.",
+  LongPress = "Pulses when a finger rests still for Long Press Time.",
+  Press = "Pulses on touch down.",
+  Release = "Pulses on a confirmed lift.",
+  SwipeLeft = "Pulses on a swipe to the left; every mode, not only Swipe Layer.",
+  SwipeRight = "Pulses on a swipe to the right; every mode, not only Swipe Layer.",
+  SwipeUp = "Pulses on a swipe upwards; every mode, not only Swipe Layer.",
+  SwipeDown = "Pulses on a swipe downwards; every mode, not only Swipe Layer.",
+  Gesture = "The last gesture or the hint text, in upper case.",
+  DragDistance = "Normalised distance of the current or last drag; the pad diagonal is 1.",
+  DragAngle = "Degrees of the current or last drag; 0 is right, 90 is up.",
+  ZoomIn = "Hold to zoom the camera in.",
+  ZoomOut = "Hold to zoom the camera out.",
+  MaxSpeed = "The fastest pan and tilt speed sent to the camera, in percent.",
+  ZoomSpeed = "The zoom speed sent to the camera, in percent.",
+  CameraStatus = "The camera driver's status text.",
+  CameraIP = "The IP address of the VISCA over IP camera.",
+  CameraView = "The Demo camera's view; copy it onto the UCI like the pad's Display.",
+}
+
+-- Fills in Description from DESCRIPTIONS for every control of a list that has none.
+local function describe(list)
+  for _, def in ipairs(list) do
+    if def.Description == nil then def.Description = DESCRIPTIONS[def.Name] end
+  end
+  return list
+end
+
 -- The common controls of spec section 3 (every mode).
 local function commonControls()
-  return {
+  return describe{
     indicator("Status", "Status", "Output", "Setup"),
     { Name = "Display", ControlType = "Button", ButtonType = "Momentary", Group = "Setup", Display = true },
     text("Picker", "Input", "Setup"),
@@ -12476,6 +12905,7 @@ local function commonControls()
     button("Calibrate", "Toggle", "Input", "Setup"),
     text("Calibration", nil, "Setup"),
     indicator("PickerLayout", "Text", nil, "Setup"),
+    indicator("SetupVersion", "Text", nil, "Setup"),
     knob("ReleaseTime", "Seconds", 0.1, 1.0, 0.25, "Input", "Setup"),
     knob("LongPressTime", "Seconds", 0.3, 3, 0.6, "Input", "Setup"),
     button("Lock", "Toggle", "Input", "Setup"),
@@ -12510,7 +12940,7 @@ local function cameraControls(kind)
   if kind == CAMERA_DEMO then
     list[#list + 1] = { Name = "CameraView", ControlType = "Button", ButtonType = "Momentary", Group = "Camera", Display = true }
   end
-  return list
+  return describe(list)
 end
 
 -- Builds the control list for props. Returns (list, meta, order) where
@@ -12731,11 +13161,15 @@ local function newLayout(page, props, meta, order, prettyName, baseW)
     return L.put(key, { Style = "Meter", MeterStyle = opts.meterStyle or "Level", Position = pos, Size = size,
                         PrettyName = opts.pretty })
   end
-  -- The pad drawing: a flat white read-only button whose icon the runtime sets.
+  -- The pad drawing: a flat white read-only button whose icon the runtime
+  -- sets. Margin, Padding and StrokeWidth are 0 (Padding defaults to 1) so
+  -- the icon's viewBox maps onto the control's pixels exactly and no face
+  -- edge shows before the first frame; the stroke is white like the face.
   function L.display(key, pos, size)
     return L.put(key, { Style = "Button", ButtonStyle = "Momentary", ButtonVisualStyle = "Flat",
                         IsReadOnly = true, Legend = "", Color = WHITE, UnlinkOffColor = true,
-                        OffColor = WHITE, CornerRadius = 0, Position = pos, Size = size })
+                        OffColor = WHITE, StrokeColor = WHITE, StrokeWidth = 0, Margin = 0, Padding = 0,
+                        CornerRadius = 0, Position = pos, Size = size })
   end
 
   -- Picks the style from the control definition.
@@ -13000,48 +13434,112 @@ local function isOutput(m)
   return (pin == "Output" or pin == "Both") and m.def.Name ~= "Status"
 end
 
-local function pageOutputs(L, props, mt)
+-- Output arrays longer than OUT_ROWS are drawn as mini cells, OUT_PAGE_CELLS
+-- per Outputs page (a 64 x 64 Matrix has 4096 Cross pins: one page of them
+-- would carry thousands of widgets and cost Designer a million instructions
+-- to lay out). Returns per page the list of { m, first, last } chunks.
+local function outputChunks(meta, order)
+  local pages = {}
+  local p, room = 1, OUT_PAGE_CELLS
+  for _, name in ipairs(order) do
+    local m = meta[name]
+    if isOutput(m) and m.count > OUT_ROWS then
+      local i = 1
+      while i <= m.count do
+        if room == 0 then p, room = p + 1, OUT_PAGE_CELLS end
+        local j = math.min(m.count, i + room - 1)
+        pages[p] = pages[p] or {}
+        pages[p][#pages[p] + 1] = { m = m, first = i, last = j }
+        room = room - (j - i + 1)
+        i = j + 1
+      end
+    end
+  end
+  return pages
+end
+
+-- Number of Outputs pages for these properties (1 plus one per extra block
+-- of OUT_PAGE_CELLS mini cells).
+function Framework.outputPageCount(props, meta, order)
+  if not (meta and order) then
+    local built
+    built, meta, order = Framework.buildControls(props)
+  end
+  return math.max(1, #outputChunks(meta, order))
+end
+
+-- One chunk of mini cells, 32 per row, written straight into the layout
+-- (the entries are what L.button / L.knob / L.led / L.place would build,
+-- without the per-key lookups: a page of 1024 cells must stay cheap for
+-- Designer's design-time Lua). Returns the y below the block.
+local function miniCells(L, m, first, last, y)
+  local def = m.def
+  local name = def.Name
+  local cols = math.min(m.count, MINI_COLS)
+  L.caption(string.format("%s %d..%d (%d per row)", spaced(name):upper(), first, last, cols), { M, y }, { 400, 10 }, "Left")
+  y = y + 12
+  local prefix = m.pinned and (m.pretty .. " ") or nil
+  local ct = def.ControlType
+  local kind = def.ButtonType or "Momentary"
+  local color = buttonColor(kind)
+  local isLed = (ct == "Indicator" and (def.IndicatorType == "Led" or def.IndicatorType == "Status"))
+  local readOnly = (ct ~= "Text") and true or nil
+  local step = MINI + 2
+  local offBG, magenta, ok, stroke = Nikita.BG, Nikita.Magenta, Nikita.OK, Nikita.Stroke
+  local placed, layout = L.placed, L.layout
+  local keyPrefix = name .. " "
+  local col, x, cy, rows = 0, M, y, 1
+  for i = first, last do
+    local e
+    if ct == "Button" then
+      e = { Style = "Button", ButtonStyle = kind, Legend = tostring(i), Color = color, UnlinkOffColor = true,
+            OffColor = offBG, FontSize = 7, CornerRadius = 2, Position = { x, cy }, Size = { MINI, MINI } }
+    elseif ct == "Knob" then
+      e = { Style = "Knob", Color = magenta, Position = { x, cy }, Size = { MINI, MINI } }
+    elseif isLed then
+      e = { Style = "Led", Color = ok, UnlinkOffColor = true, OffColor = stroke,
+            Position = { x + 4, cy + 4 }, Size = { 16, 16 } }
+    else
+      e = { Style = "Text", HTextAlign = "Left", FontSize = 7, IsReadOnly = readOnly,
+            Position = { x, cy }, Size = { MINI, MINI } }
+    end
+    if prefix then e.PrettyName = prefix .. i end
+    local key = keyPrefix .. i
+    placed[key] = true
+    layout[key] = e
+    col = col + 1
+    if col == cols and i < last then col, x, cy, rows = 0, M, cy + step, rows + 1
+    else x = x + step end
+  end
+  L.track({ M, y }, { cols * step, rows * step })
+  return y + rows * step + GAP
+end
+
+local function pageOutputs(L, props, mt, pageNo)
+  pageNo = pageNo or 1
   local y0 = HEADER + GAP + 20
-  L.title("O U T P U T S", { M, HEADER + GAP }, { 400, 12 })
-  local n = 0
-  local big = {}
-  for _, name in ipairs(L.order) do
-    local m = L.meta[name]
-    if isOutput(m) then
-      if m.count <= OUT_ROWS then
+  L.title((pageNo == 1) and "O U T P U T S" or ("O U T P U T S   " .. pageNo), { M, HEADER + GAP }, { 400, 12 })
+  local y = y0
+  if pageNo == 1 then
+    local n = 0
+    for _, name in ipairs(L.order) do
+      local m = L.meta[name]
+      if isOutput(m) and m.count <= OUT_ROWS then
         for i = 1, m.count do
           local col, row = math.floor(n / OUT_ROWS), n % OUT_ROWS
           L.cell(layoutKey(name, i, m.count), M + col * (OUT_CELL_W + G), y0 + row * (OUT_CELL_H + G), OUT_CELL_W, OUT_CELL_H)
           n = n + 1
         end
-      else
-        big[#big + 1] = m
       end
     end
+    if n > 0 then y = y0 + math.min(n, OUT_ROWS) * (OUT_CELL_H + G) + GAP end
   end
-  local y = y0
-  if n > 0 then y = y0 + math.min(n, OUT_ROWS) * (OUT_CELL_H + G) + GAP end
-  -- Arrays longer than 16: compact blocks of mini cells, 32 per row.
-  for _, m in ipairs(big) do
-    local cols = math.min(m.count, 32)
-    L.caption(string.format("%s 1..%d (%d per row)", spaced(m.def.Name):upper(), m.count, cols), { M, y }, { 400, 10 }, "Left")
-    y = y + 12
-    for i = 1, m.count do
-      local col, row = (i - 1) % cols, math.floor((i - 1) / cols)
-      local key = layoutKey(m.def.Name, i, m.count)
-      local x, cy = M + col * (MINI + 2), y + row * (MINI + 2)
-      if m.def.ControlType == "Button" then
-        L.button(key, tostring(i), { x, cy }, { MINI, MINI }, { fontSize = 7, radius = 2 })
-      elseif m.def.ControlType == "Knob" then
-        L.knob(key, { x, cy }, { MINI, MINI })
-      elseif m.def.ControlType == "Indicator" and (m.def.IndicatorType == "Led" or m.def.IndicatorType == "Status") then
-        L.led(key, { x + 4, cy + 4 }, { 16, 16 })
-      else
-        L.place(key, { x, cy }, { MINI, MINI }, { fontSize = 7 })
-      end
-    end
-    y = y + math.ceil(m.count / cols) * (MINI + 2) + GAP
+  -- Arrays longer than 16: compact blocks of mini cells, 32 per row, paged.
+  local chunks = outputChunks(L.meta, L.order)[pageNo] or {}
+  for _, ch in ipairs(chunks) do
+    y = miniCells(L, ch.m, ch.first, ch.last, y)
   end
+  if pageNo ~= 1 then return end
   local W, H = padSize(props)
   local ctx = { page = "Outputs", W = W, H = H, x = M, y = y, w = PAD_FIT_W, M = M, GAP = GAP, G = G }
   if mt and type(mt.layout) == "function" then
@@ -13071,8 +13569,12 @@ local function pageAbout(L, props, mt)
   L.label("Touch Pad for Q-SYS, version " .. tostring(PluginInfo.Version), { M, y + 132 }, { 400, 14 }, { color = Nikita.Text })
   L.label("Touch input through a native Color Picker; drawing as a script-set icon.", { M, y + 150 }, { 480, 14 })
   L.label("Mode: " .. modeOf(props) .. ". Sixteen modes, every result on a pin. Open source.", { M, y + 166 }, { 480, 14 })
+  -- The first start writes the documented defaults of the toggles once and
+  -- records it here (blank = not yet), see the runtime's first-run step.
+  L.caption("FIRST-RUN SETUP", { M, y + 186 }, { 160, 10 }, "Left")
+  L.readout("SetupVersion", { M, y + 198 }, { 80, 20 }, { fontSize = 9 })
   local W, H = padSize(props)
-  local ctx = { page = "About", W = W, H = H, x = M, y = y + 190, w = 480, M = M, GAP = GAP, G = G }
+  local ctx = { page = "About", W = W, H = H, x = M, y = y + 230, w = 480, M = M, GAP = GAP, G = G }
   if mt and type(mt.layout) == "function" then
     local ok, err = pcall(mt.layout, L, "About", props, ctx)
     if not ok then L.problems[#L.problems + 1] = "About: mode layout error: " .. tostring(err) end
@@ -13113,10 +13615,10 @@ function GetControlLayout(props)
   local mode = modeOf(props)
   local mt = modeTable(mode)
   local kind = cameraKind(props, mode)
-  local names = Framework.pageNames(props)
+  local _, meta, order = Framework.buildControls(props)
+  local names = Framework.pageNames(props, meta, order)
   local index = propInt(props, "page_index", 1, 1, #names)
   local page = names[index] or "Pad"
-  local _, meta, order = Framework.buildControls(props)
 
   local baseW = MIN_PAGE_W
   if page == "Setup" then baseW = M + SETUP_COL_W + GAP + SETUP_COL_W + M end
@@ -13128,7 +13630,9 @@ function GetControlLayout(props)
   elseif page == "Setup" then
     pageSetup(L, props, mt, kind)
   elseif page == "Outputs" then
-    pageOutputs(L, props, mt)
+    pageOutputs(L, props, mt, 1)
+  elseif page:match("^Outputs (%d+)$") then
+    pageOutputs(L, props, mt, tonumber(page:match("^Outputs (%d+)$")))
   elseif page == "Display" then
     pageDisplay(L, props, mt)
   elseif page == "About" then
@@ -13149,6 +13653,7 @@ end
 function GetPins(props) return {} end
 function GetComponents(props) return {} end
 function GetWiring(props) return {} end
+end
 -- ===== 50_runtime.lua =====
 -- Nikita Visual Arts – nikitavisual.art
 -- Touch Pad for Q-SYS: runtime (Q adapters, engine, picker binding, gestures, frames, modes)
@@ -13166,6 +13671,18 @@ function GetWiring(props) return {} end
 -- Every onTouchStart is followed by exactly one onTouchEnd: a touch the
 -- engine has to abandon (lock, rebind, calibration, a clock step) ends with
 -- info.aborted = true (info.reason names the cause) and no gesture.
+--
+-- Engine API handed to create(E): W, H, T (theme), props, font, hint,
+-- camera; ctl(name, index), ctls(name), out(name, value, index),
+-- pulse(name, index), setGesture(text), status(text, level), invalidate(),
+-- animate(on), now(), after(s, fn), every(s, fn), log(...), dbg(...),
+-- file.*, http.post, json.*, cameraFactory(kind, opts);
+-- setSwipeDistance(fraction) / swipeDistance() set and read the swipe
+-- distance of the recognizer (fraction of the pad diagonal, 0.05..0.8,
+-- default 0.2, applied to every touch); restartStroke(x, y, t) tells the
+-- engine that the live touch's stroke starts again there (its swipe at the
+-- lift and the drag outputs measure from the restart). The engine never
+-- publishes its touch record to modes: the global TouchPad is for tests.
 
 Q = Q or {}
 NikitaTimers = NikitaTimers or {}     -- timer objects live here so they are never collected
@@ -13804,6 +14321,8 @@ if Controls then (function()
   local DOUBLE_TIME, DOUBLE_DIST = 0.4, 40
   local DRAG_START = 12
   local SWIPE_TIME, SWIPE_RATIO, SWIPE_FRACTION = 0.6, 1.5, 0.2
+  local SWIPE_MIN, SWIPE_MAX = 0.05, 0.8  -- the range E.setSwipeDistance accepts (the Swipe Layer knob's)
+  local swipeFraction = SWIPE_FRACTION    -- the live swipe distance (fraction of the diagonal), see E.setSwipeDistance
   local LANDING_WAIT = 0.12            -- the other axis is waited for this long
   local PANEL_LEAD, PANEL_BUFFER = 0.15, 0.1
   local RESUME_WINDOW = 1.5
@@ -14136,6 +14655,19 @@ if Controls then (function()
   function E.log(...) Q.print(...) end
   function E.dbg(...) dbg(...) end
   function E.status(text, level) setStatus(tostring(text or ""), level or "ok") end
+  -- The swipe distance the engine's recognizer uses for every touch (a
+  -- fraction of the pad diagonal, spec 5.4; 0.2 unless a mode asks for
+  -- another). nil or a value that is not a number restores the default;
+  -- numbers are clamped to 0.05..0.8. Returns the fraction in force.
+  function E.setSwipeDistance(fraction)
+    local v = tonumber(fraction)
+    if v == nil or v ~= v then v = SWIPE_FRACTION end
+    if v < SWIPE_MIN then v = SWIPE_MIN end
+    if v > SWIPE_MAX then v = SWIPE_MAX end
+    swipeFraction = v
+    return v
+  end
+  function E.swipeDistance() return swipeFraction end
   E.file = {
     base = function() return Q.fileBase() end,
     read = function(path) return Q.readFile(path) end,
@@ -14154,6 +14686,34 @@ if Controls then (function()
     recovered("camera", cam)
     return nil
   end
+
+  -- ---------- first-run defaults ----------
+  -- Toggles declared with DefaultValue = true (SourceActive, AllowCalls,
+  -- ExclusiveColumns, Masked, AutoSubmit, ShowBackground) are written true
+  -- once, on the first start, in case Designer does not apply a boolean
+  -- DefaultValue to a Button; SetupVersion remembers that it was done, so an
+  -- integrator's later choice to turn one off is kept. Runs before the mode
+  -- instance reads its toggles; the writes happen while unarmed, so the
+  -- engine ignores their events.
+  local SETUP_VERSION = "1"
+  local function applyFirstRunDefaults()
+    local marker = ctlOf("SetupVersion")
+    if marker == nil then return end
+    local done = ""
+    pcall(function() done = tostring(marker.String or "") end)
+    if done ~= "" then return end
+    for name, m in pairs(META) do
+      local def = m.def or {}
+      if def.ControlType == "Button" and def.ButtonType == "Toggle" and def.DefaultValue == true then
+        local list = ctlsOf(name)
+        for i = 1, #list do
+          pcall(function() if not list[i].Boolean then list[i].Boolean = true end end)
+        end
+      end
+    end
+    pcall(function() marker.String = SETUP_VERSION end)
+  end
+  protect("first-run defaults", applyFirstRunDefaults)
 
   -- ---------- mode instance ----------
   local modeTable = Modes and Modes[MODE] or nil
@@ -14274,11 +14834,14 @@ if Controls then (function()
     end
   end
 
+  local booting = true           -- while the load runs, a frame waits for its own engine turn
+
   local function scheduleFrame()
     if frameTimer then return end
     local now = Q.now()
     local wait = FRAME - (now - lastFrameAt)
     if drawRetryAt - now > wait then wait = drawRetryAt - now end
+    if booting and wait < 0.001 then wait = 0.001 end
     if wait <= 0.0005 then
       drawNow()
       return
@@ -14354,6 +14917,25 @@ if Controls then (function()
       out("DragDistance", U.clamp(U.dist(touch.x0, touch.y0, touch.x, touch.y) / DIAG, 0, 2))
       out("DragAngle", U.angleDeg(touch.x - touch.x0, touch.y - touch.y0))
     end
+  end
+
+  -- A mode that sees the finger land again inside one engine touch (the
+  -- Swipe Layer: a report after a gap or a jump across the pad, within the
+  -- release time) tells the engine that the live touch's stroke starts
+  -- again at (x, y, t): the swipe classified at the lift, DragDistance and
+  -- DragAngle then measure from there. Taps are untouched (the touch's
+  -- travel so far still counts). Returns true while a touch is live.
+  function E.restartStroke(x, y, t)
+    local touch = S.touch
+    if not touch or S.state ~= DOWN or touch.calib then return false end
+    x, y = tonumber(x), tonumber(y)
+    t = tonumber(t)
+    if x == nil or y == nil then x, y = touch.x, touch.y end
+    if t == nil then t = touch.t end
+    touch.x0, touch.y0, touch.t0 = x, y, t
+    dbg(sformat("stroke restarts at %.1f %.1f t=%.3f", x, y, t))
+    liveOutputs(touch)
+    return true
   end
 
   -- ---------- calibration (spec 5.2) ----------
@@ -14473,7 +15055,7 @@ if Controls then (function()
   local function swipeOf(touch, x, y, duration)
     local dx, dy = x - touch.x0, y - touch.y0
     local dist = sqrt(dx * dx + dy * dy)
-    if duration > SWIPE_TIME or dist < SWIPE_FRACTION * DIAG then return nil, dist end
+    if duration > SWIPE_TIME or dist < swipeFraction * DIAG then return nil, dist end
     local ax, ay = abs(dx), abs(dy)
     if ax >= SWIPE_RATIO * ay then
       return (dx > 0) and "right" or "left", dist
@@ -14953,18 +15535,34 @@ if Controls then (function()
 
   local SKIP_HANDLER = { Display = true, CameraView = true, Status = true, PickerLayout = true, Gesture = true }
 
+  -- One guarded handler per control name, shared by every element of a
+  -- Count control (a 64 x 64 Matrix has 4096 Cross pins: a closure per
+  -- element would cost the load most of its budget); the element's index
+  -- comes from a map keyed by the control object. The assignments run under
+  -- one pcall per name, element by element only when that failed.
   local function installHandlers()
     for name, m in pairs(META) do
       local def = m.def or {}
       local skip = SKIP_HANDLER[name] or (def.PinStyle == "Output")
       if not skip then
         local list = ctlsOf(name)
-        for i = 1, #list do
-          local ctl = list[i]
-          local idx = i
-          pcall(function()
-            ctl.EventHandler = guard("ctl " .. name, function(c) onControlChange(name, idx, c) end)
-          end)
+        local indexOf = {}
+        local handler = guard("ctl " .. name, function(c) onControlChange(name, indexOf[c] or 1, c) end)
+        local ok = pcall(function()
+          for i = 1, #list do
+            local ctl = list[i]
+            indexOf[ctl] = i
+            ctl.EventHandler = handler
+          end
+        end)
+        if not ok then
+          for i = 1, #list do
+            local ctl = list[i]
+            pcall(function()
+              indexOf[ctl] = i
+              ctl.EventHandler = handler
+            end)
+          end
         end
       end
       if m.choices and type(m.choices) == "table" then
@@ -15078,5 +15676,10 @@ if Controls then (function()
     if lockNow ~= S.locked then onLock(Controls.Lock) end
   end))
   call("onStart")
+  -- The first frame is drawn on the next engine turn, not in the load: the
+  -- load already binds the picker, installs the handlers and creates the
+  -- mode, and a 64 x 64 Matrix or 32 zones would otherwise draw their cold
+  -- first frame in the same call (spec 0: one call never nears the limit).
   protect("frame", E.invalidate)
+  booting = false
 end)() end

@@ -35,8 +35,8 @@ do
   local DOUBLE_TIME = 0.4                -- second tap on the same tile within this = double
   local FLASH = 0.8                      -- seconds a freshly routed screen glows
   local NAME_IN_TEXT = 40                -- characters of a name used in the Gesture text
-  local COLD_CHARS = 560                 -- cold-tile cost units spent per frame (about 45 VM instructions each)
-  local COLD_TILE_COST = 60              -- a cold tile's fixed cost in those units (box, icon, truncation)
+  local COLD_BUDGET = 28000              -- estimated VM instructions spent on cold tiles per frame
+  local COLD_TILE_COST = 4000            -- a cold tile's fixed cost in those (canvas, box, icon, cache)
   local WARM_DELAY = 0.03                -- seconds until the follow-up frame
   local DRAG_START = 12                  -- px a press moves before it carries (the engine's drag threshold)
   local HOLD_POLL = 0.5                  -- the put-down timer waits this long while a finger rests on a tile
@@ -79,19 +79,28 @@ do
     controls = function(C, props)
       local nS = countOf(props, "Sources", 4)
       local nD = countOf(props, "Destinations", 2)
-      C.add{ Name = "SourceName", ControlType = "Text", Count = nS, PinStyle = "Input", Group = "Sources" }
+      C.add{ Name = "SourceName", ControlType = "Text", Count = nS, PinStyle = "Input", Group = "Sources",
+             Description = "The name drawn on each source tile." }
       C.add{ Name = "SourceActive", ControlType = "Button", ButtonType = "Toggle", Count = nS,
-             PinStyle = "Input", Group = "Sources", DefaultValue = true }
-      C.add{ Name = "DestName", ControlType = "Text", Count = nD, PinStyle = "Input", Group = "Routing" }
+             PinStyle = "Input", Group = "Sources", DefaultValue = true,
+             Description = "Signal present on each source; off dims the tile." }
+      C.add{ Name = "DestName", ControlType = "Text", Count = nD, PinStyle = "Input", Group = "Routing",
+             Description = "The name drawn on each destination tile." }
       C.add{ Name = "Route", ControlType = "Knob", ControlUnit = "Integer", Min = 0, Max = nS, DefaultValue = 0,
-             Count = nD, PinStyle = "Both", Group = "Routing" }
+             Count = nD, PinStyle = "Both", Group = "Routing",
+             Description = "The source number routed to each destination; 0 is none." }
       C.add{ Name = "Routed", ControlType = "Button", ButtonType = "Trigger", Count = nD, PinStyle = "Output",
-             Group = "Routing" }
-      C.add{ Name = "RouteName", ControlType = "Text", Count = nD, PinStyle = "Output", Group = "Routing" }
-      C.add{ Name = "ClearRoutes", ControlType = "Button", ButtonType = "Trigger", PinStyle = "Input", Group = "Routing" }
-      C.add{ Name = "TapOnly", ControlType = "Button", ButtonType = "Toggle", PinStyle = "Input", Group = "Routing" }
+             Group = "Routing",
+             Description = "Pulses when each destination's route changes." }
+      C.add{ Name = "RouteName", ControlType = "Text", Count = nD, PinStyle = "Output", Group = "Routing",
+             Description = "The name of the source routed to each destination." }
+      C.add{ Name = "ClearRoutes", ControlType = "Button", ButtonType = "Trigger", PinStyle = "Input", Group = "Routing",
+             Description = "Clears every route." }
+      C.add{ Name = "TapOnly", ControlType = "Button", ButtonType = "Toggle", PinStyle = "Input", Group = "Routing",
+             Description = "On: no drags; tap a source and then a screen." }
       C.add{ Name = "AllowCalls", ControlType = "Button", ButtonType = "Toggle", PinStyle = "Input", Group = "Routing",
-             DefaultValue = true }
+             DefaultValue = true,
+             Description = "On: a double tap on a source skips screens whose name holds a call word." }
     end,
 
     -- Names (or Sources / Destinations above 16) hold the name boxes; the Pad
@@ -694,27 +703,32 @@ do
       -- A tile is rendered once per visual state (picked, routed, dimmed,
       -- pressed, hovered, flashing, the routed source's name) into a scratch
       -- canvas and the string is replayed on later frames. Rendering from
-      -- scratch costs a fixed part plus the characters the label fitting
-      -- walks (the name's length capped by what the tile width can hold), so
-      -- a frame spends at most COLD_CHARS of those units on cold tiles: six
-      -- tiles of 23 characters on a 500 px pad, three of 117 on a 1600 px one.
-      -- The rest show their box only and a follow-up frame WARM_DELAY later
-      -- fills them, so 64 x 64 names of 120 characters never near the budget.
+      -- scratch costs a fixed part plus the label's fitting (Font.fitCost:
+      -- the characters the tile width can hold, non-ASCII names being
+      -- several times dearer), so a frame spends at most COLD_BUDGET of
+      -- those estimated instructions on cold tiles: five tiles of 33 ASCII
+      -- characters on a 500 px pad, three of 112 on a 1600 px one, fewer
+      -- with CJK or emoji names. The rest show their box only and a
+      -- follow-up frame WARM_DELAY later fills them, so 64 x 64 names of
+      -- 120 characters in any script never near the frame budget.
       local coldLeft, needWarm, warmTimer = 0, false, nil
       local coldCount, coldSpent = 0, 0               -- the last frame's cold tiles and their cost
 
       local function fitCost(kind, i, maxW, size)
-        local n = #rawName(kind, i)
-        if n == 0 then n = 10 end                        -- "Source 64"
-        local holds = floor(maxW / (size * 0.5)) + 1     -- characters the width can take
-        return min(n, holds)
+        local name = rawName(kind, i)
+        if name == "" then name = "Source 64" end
+        return Font.fitCost(name, size, maxW)
       end
 
+      -- Placeholder boxes share one scratch canvas per frame (each is the
+      -- slice of parts it added) and are kept on the tile.
+      local phScratch = nil
       local function placeholder(tl, radius)
         if tl.ph then return tl.ph end
-        local s = Svg.new(W, H, { limit = 2000 })
-        s:rect(tl.x + 0.5, tl.y + 0.5, tl.w - 1, tl.h - 1, { fill = T.panel, stroke = T.line, sw = 1, rx = radius })
-        tl.ph = table.concat(s.parts)
+        if not phScratch then phScratch = Svg.new(W, H, { limit = 20000 }) end
+        local p0 = #phScratch.parts
+        phScratch:rect(tl.x + 0.5, tl.y + 0.5, tl.w - 1, tl.h - 1, { fill = T.panel, stroke = T.line, sw = 1, rx = radius })
+        tl.ph = table.concat(phScratch.parts, "", p0 + 1, #phScratch.parts)
         return tl.ph
       end
 
@@ -725,7 +739,7 @@ do
         local cost = COLD_TILE_COST + fitCost(kind, i, maxW, size)
         if withSub then cost = cost + fitCost("S", r, maxW, 11) end
         -- the first cold tile of a frame always renders, so a page keeps filling
-        if cost > coldLeft and coldLeft < COLD_CHARS then
+        if cost > coldLeft and coldLeft < COLD_BUDGET then
           needWarm = true
           return placeholder(tl, o.radius)
         end
@@ -780,7 +794,7 @@ do
 
       function self:draw(c)
         local now = E.now()
-        coldLeft, needWarm = COLD_CHARS, false
+        coldLeft, needWarm, phScratch = COLD_BUDGET, false, nil
         coldCount, coldSpent = 0, 0
         if capH > 0 then
           c:text(areaS.x + 2, areaS.y - 5, "SOURCES", { size = 10, fill = T.muted, weight = "bold", spacing = 1 })
@@ -832,7 +846,7 @@ do
         return plan.page, #plan.pages, table.concat(plan.pages, ",")
       end
       function self:pickedSource() return picked end
-      function self:coldStats() return coldCount, coldSpent, COLD_CHARS end
+      function self:coldStats() return coldCount, coldSpent, COLD_BUDGET end
       function self:isCarrying() return carry ~= nil and carry.dragging end
 
       return self

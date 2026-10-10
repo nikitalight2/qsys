@@ -101,19 +101,30 @@ do
 
     controls = function(C, props)
       C.add{ Name = "GridSize", ControlType = "Knob", ControlUnit = "Integer", Min = GRID_MIN, Max = GRID_MAX,
-             DefaultValue = GRID_DEFAULT, PinStyle = "Input" }
-      C.add{ Name = "Pattern", ControlType = "Text", PinStyle = "Input" }
-      C.add{ Name = "Unlocked", ControlType = "Button", ButtonType = "Trigger", PinStyle = "Output" }
-      C.add{ Name = "Failed", ControlType = "Button", ButtonType = "Trigger", PinStyle = "Output" }
-      C.add{ Name = "Locked", ControlType = "Button", ButtonType = "Toggle", PinStyle = "Both" }
+             DefaultValue = GRID_DEFAULT, PinStyle = "Input",
+             Description = "Dots per side of the grid, 3 to 5." }
+      C.add{ Name = "Pattern", ControlType = "Text", PinStyle = "Input",
+             Description = "The secret as digits, 1-5-9-6 or 1596, numbered left to right, top to bottom." }
+      C.add{ Name = "Unlocked", ControlType = "Button", ButtonType = "Trigger", PinStyle = "Output",
+             Description = "Pulses when the drawn pattern matches." }
+      C.add{ Name = "Failed", ControlType = "Button", ButtonType = "Trigger", PinStyle = "Output",
+             Description = "Pulses when the drawn pattern does not match." }
+      C.add{ Name = "Locked", ControlType = "Button", ButtonType = "Toggle", PinStyle = "Both",
+             Description = "On after Max Tries failures for Lockout Seconds; off clears the lockout." }
       C.add{ Name = "MaxTries", ControlType = "Knob", ControlUnit = "Integer", Min = TRIES_MIN, Max = TRIES_MAX,
-             DefaultValue = TRIES_DEFAULT, PinStyle = "Input" }
+             DefaultValue = TRIES_DEFAULT, PinStyle = "Input",
+             Description = "Failures allowed before the lockout." }
       C.add{ Name = "LockoutSeconds", ControlType = "Knob", ControlUnit = "Integer", Min = LOCK_MIN, Max = LOCK_MAX,
-             DefaultValue = LOCK_DEFAULT, PinStyle = "Input" }
-      C.add{ Name = "LastPattern", ControlType = "Indicator", IndicatorType = "Text", PinStyle = "Output" }
-      C.add{ Name = "Learn", ControlType = "Button", ButtonType = "Toggle", PinStyle = "Input" }
-      C.add{ Name = "Masked", ControlType = "Button", ButtonType = "Toggle", PinStyle = "Input" }
-      C.add{ Name = "AutoSubmit", ControlType = "Button", ButtonType = "Toggle", PinStyle = "Input" }
+             DefaultValue = LOCK_DEFAULT, PinStyle = "Input",
+             Description = "How long the lockout lasts." }
+      C.add{ Name = "LastPattern", ControlType = "Indicator", IndicatorType = "Text", PinStyle = "Output",
+             Description = "The pattern just drawn." }
+      C.add{ Name = "Learn", ControlType = "Button", ButtonType = "Toggle", PinStyle = "Input",
+             Description = "On: the next drawn pattern is stored as the secret." }
+      C.add{ Name = "Masked", ControlType = "Button", ButtonType = "Toggle", PinStyle = "Input",
+             Description = "Hides the trail; a row of small dots counts the joined dots instead." }
+      C.add{ Name = "AutoSubmit", ControlType = "Button", ButtonType = "Toggle", PinStyle = "Input",
+             Description = "Checks as soon as the drawn pattern is as long as the secret." }
     end,
 
     pages = {},

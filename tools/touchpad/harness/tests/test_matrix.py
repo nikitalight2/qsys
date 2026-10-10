@@ -41,12 +41,9 @@ def boot(sources=4, dests=3, props=None, **kw):
     kw.setdefault("picker", "Color_Picker")
     kw.setdefault("plugin", PLUGIN)
     q = QSys(props=p, **kw)
-    if sources * dests > 600:
-        # The engine installs one handler per control in the load dispatch:
-        # 900 Cross controls cost it about 115,000 instructions and 4096 about
-        # 280,000 before the mode runs. The runner would fail the load budget,
-        # so these tests check the handler and frame maxima themselves (check()).
-        q.allow_budget = True
+    # The load of a 64 x 64 matrix stays under the handler budget: the engine
+    # shares one handler per control name and draws the first frame on the
+    # next engine turn, so the runner's budget check covers the load as well.
     q.advance(0.2)
     return q
 
@@ -695,3 +692,66 @@ def test_matrix_paint_summary_counts_the_cells_left_painted():
     drag(q, cell(q, 1, 1), cell(q, 4, 1))
     assert [is_on(q, r, 1) for r in (1, 2, 3, 4)] == [True] * 4
     assert q.pin("Gesture")["String"] == "SET 4 CROSSPOINTS"
+
+
+def test_matrix_cross_write_without_a_change_does_not_reroute():
+    # With ExclusiveColumns off a column can hold several sources and Route n
+    # names the one routed last. A Cross n pin event that changes nothing (a
+    # same-value write that fires, ctl:Trigger()) must leave Route n alone:
+    # only a pad tap on an on cell routes it "last".
+    q = boot(4, 3)
+    q.set_pin("ExclusiveColumns", False)
+    q.set_pin("Cross", True, 1)                              # source 1 -> dest 1
+    q.set_pin("Cross", True, 4)                              # source 2 -> dest 1, routed last
+    q.advance(0.2)
+    assert q.pin("Route", 1)["Value"] == 2
+    q.trigger("Cross", 1)                                    # no value change
+    q.advance(0.2)
+    assert q.pin("Route", 1)["Value"] == 2
+    q.set_pin("Cross", True, 1, fire=True)                   # same value, handler fired
+    q.advance(0.2)
+    assert q.pin("Route", 1)["Value"] == 2
+    assert q.pin("Cross", 1)["Boolean"] is True and q.pin("Cross", 4)["Boolean"] is True
+    q.set_pin("Cross", False, 7, fire=True)                  # an off cell written off: nothing
+    q.advance(0.2)
+    assert q.pin("Route", 1)["Value"] == 2
+    q.set_pin("Cross", False, 4)                             # a real change still re-routes
+    q.advance(0.2)
+    assert q.pin("Route", 1)["Value"] == 1
+    assert q.errors == []
+
+
+def test_matrix_first_start_writes_exclusive_columns_default_once():
+    # ExclusiveColumns (DefaultValue = true) is written true on the first
+    # start when the design left it false; SetupVersion records the step.
+    q = QSys(mode="Matrix", props={"Sources": 3, "Destinations": 2}, picker="Color_Picker", plugin=PLUGIN, runtime=False)
+    q.set_pin("ExclusiveColumns", False)
+    q._dispatch("load", q._chunk)
+    q.advance(0.2)
+    assert q.pin("ExclusiveColumns")["Boolean"] is True and q.pin("SetupVersion")["String"] == "1"
+    q.set_pin("Cross", True, 1)                              # exclusive: a second source replaces the first
+    q.set_pin("Cross", True, 3)
+    q.advance(0.2)
+    assert q.pin("Cross", 1)["Boolean"] is False and q.pin("Route", 1)["Value"] == 2
+    assert q.errors == []
+
+
+def test_matrix_cold_first_frame_with_non_latin_names_stays_within_budget():
+    # Source and destination names present at load in CJK / emoji / Cyrillic:
+    # headers are rendered by an estimate of their label cost per frame.
+    cjk = "\u4f1a\u8b70\u5ba4\u30a8\u30ea\u30a2"
+    for label, fn in (("cjk20", lambda i: (cjk * 4)[:18] + "%02d" % i), ("cjk128", lambda i: (cjk * 22)[:126] + "%02d" % i),
+                      ("emoji10", lambda i: "\U0001F600" * 8 + "%02d" % i), ("jp7", lambda i: cjk[:6] + str(i % 10))):
+        q = QSys(mode="Matrix", props={"Sources": 64, "Destinations": 64}, picker="Color_Picker", plugin=PLUGIN, runtime=False)
+        for i in range(1, 65):
+            q.set_pin("SourceName", fn(i), i)
+            q.set_pin("DestName", fn(i), i)
+        q._dispatch("load", q._chunk)
+        q.advance(0.05)
+        assert q.budget()["max_frame"] < 52000, (label, q.budget()["max_frame"])
+        for _ in range(30):
+            q.advance(0.05)
+        assert q.icon().count("<text") >= 24, label                 # 12 + 12 headers filled
+        assert q.budget()["max_frame"] < 52000, label
+        assert q.errors == []
+        q.close()

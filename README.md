@@ -11,7 +11,7 @@ Q-SYS Designer plugins by Nikita Visual Arts.
 | Plugin | File | Version |
 |---|---|---|
 | Mic Mixer | `plugins/NikitaMicMixer.qplug` | 2.0.0 |
-| Touch Pad | `plugins/NikitaTouchPad.qplug` | 1.0.0 |
+| Touch Pad | `plugins/NikitaTouchPad.qplug` | 1.0.1 |
 
 ## Mic Mixer
 
@@ -131,9 +131,9 @@ pin and control of every mode, built from the plugin by
 ### Test status
 
 Built and tested only in an offline harness that fakes the Q-SYS runtime
-(108 scenario tests and 98 unit tests at the time of writing, with mode-level
-tests for XY Pad only); never opened in Q-SYS Designer, never run on a Core
-or a touch panel. The Color Picker's control names and axis orientation are
+(541 scenario tests covering the engine, the camera drivers and all sixteen
+modes, and 101 unit tests with 38964 assertions at the time of writing);
+never opened in Q-SYS Designer, never run on a Core or a touch panel. The Color Picker's control names and axis orientation are
 inferred, with Swap Axes, Flip X, Flip Y and the Calibrate tool as the
 remedies. See "What has been tested, honestly" in the guide.
 

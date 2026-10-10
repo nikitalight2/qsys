@@ -72,7 +72,7 @@ def ring(cx, cy, rx, ry, n=16):
 def test_zones_controls_pins_and_defaults():
     q = boot()
     names = q.control_names()
-    assert len(names) == 50
+    assert len(names) == 51
     for i in range(1, 9):
         assert "ZoneName %d" % i in names and "ZoneSelected %d" % i in names
     for n in ("SelectAll", "ClearAll", "SelectedList", "Edit", "ShowBackground", "ZoneLayout", "Exclusive", "Columns"):
@@ -431,7 +431,7 @@ def test_zones_thirty_two_zones_stay_within_budget():
     q = boot(props={"Zones": 32, "Pad Width": 1600, "Pad Height": 1200, "Max Frame Rate": "30"})
     for i in range(1, 33):
         q.set_pin("ZoneName", "Meeting room number %d on the east wing" % i, i)
-    q.advance(0.2)                                                   # tiles re-render ten per frame
+    q.advance(0.5)                                                   # tiles re-render a few per frame, by their label cost
     svg = q.icon()
     assert len(svg) < 40000 and all("Meeting room number %d" % i in svg for i in range(1, 33))
     q.drag([(100 + 15 * i, 60 + 11 * i) for i in range(100)], seconds=2.0)  # from zone 1 down a diagonal
@@ -608,3 +608,45 @@ def test_zones_layout_warning_clears_and_wrong_shapes_warn():
     q.set_pin("ZoneLayout", "[]")                                    # an empty list is the grid, not a mistake
     assert q.status() == ok and abs(zone(q, 1)[0] - 0.03) < 1e-9
     assert q.run("return TouchPad.inst.custom") is False
+
+
+def test_zones_first_start_writes_show_background_default_once():
+    q = QSys(mode="Zone Select", props={"Zones": 4}, picker="Color_Picker", plugin=plugin_path(), runtime=False)
+    q.set_pin("ShowBackground", False)
+    q._dispatch("load", q._chunk)
+    q.advance(0.2)
+    assert q.pin("ShowBackground")["Boolean"] is True and q.pin("SetupVersion")["String"] == "1"
+    assert q.run("return TouchPad.inst.background") is True
+    assert q.errors == []
+
+
+def test_zones_cold_first_frame_with_non_latin_names_stays_within_budget():
+    # Zone names saved in the design (present when the script loads) in a
+    # non-Latin script: the first frame renders tiles by an estimate of their
+    # label cost, the rest follow on later frames, so no frame nears 60,000.
+    names = {
+        "cyrillic": "\u041f\u0435\u0440\u0435\u0433\u043e\u0432\u043e\u0440\u043d\u0430\u044f ",
+        "hebrew": "\u05d0\u05d6\u05d5\u05e8 \u05d9\u05e9\u05d9\u05d1\u05d5\u05ea ",
+        "cjk20": "\u4f1a\u8b70\u5ba4\u30a8\u30ea\u30a2" * 3 + "\u4f1a\u8b70",
+        "emoji128": "\U0001F600" * 126,
+    }
+    for label, base in names.items():
+        for (w, h) in ((500, 500), (1600, 1200)):
+            q = QSys(mode="Zone Select", props={"Zones": 32, "Pad Width": w, "Pad Height": h},
+                     picker="Color_Picker", plugin=plugin_path(), runtime=False)
+            for i in range(1, 33):
+                q.set_pin("ZoneName", base + "%02d" % i, i)
+            q._dispatch("load", q._chunk)
+            q.advance(0.05)
+            first = q.budget()["max_frame"]
+            assert first < 52000, (label, w, h, first)
+            for _ in range(40):
+                q.advance(0.05)
+            svg = q.icon()
+            assert svg.count("<text") >= 32 + (1 if q.pin("Gesture")["String"] else 0) - 1, (label, w, h)
+            assert q.budget()["max_frame"] < 52000, (label, w, h)
+            q.set_pin("Edit", True)                                  # every tile re-renders, spread over frames
+            q.advance(1.0)
+            assert q.budget()["max_frame"] < 52000, (label, w, h, "edit")
+            assert q.errors == []
+            q.close()

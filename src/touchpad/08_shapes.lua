@@ -6,6 +6,7 @@
 -- are stroke paths on a 24 x 24 grid placed with a translate/scale group, so
 -- one icon costs one raw element and well under 400 characters.
 
+do
 Shapes = Shapes or {}
 
 local floor, min, max = math.floor, math.min, math.max
@@ -15,12 +16,13 @@ local num, frac = Svg.num, Svg.frac
 -- ---------- pad frame, hint, title ----------
 
 -- background "Solid" | "Transparent" | "Panel"; unknown values draw Solid.
--- Transparent draws nothing so the UCI shows through.
+-- Transparent draws nothing so the UCI shows through; Panel is the theme's
+-- panel colour at 80 % so the page art shows through slightly (spec 2).
 function Shapes.padFrame(c, T, W, H, radius, background)
   if background == "Transparent" then return c end
   radius = radius or 0
-  local fill = (background == "Panel") and T.panel or T.bg
-  c:rect(0, 0, W, H, { fill = fill, rx = radius })
+  local panel = (background == "Panel")
+  c:rect(0, 0, W, H, { fill = panel and T.panel or T.bg, rx = radius, opacity = panel and 0.8 or nil })
   c:rect(0.5, 0.5, W - 1, H - 1, { fill = "none", stroke = T.line, sw = 1, rx = radius })
   return c
 end
@@ -303,4 +305,5 @@ function Shapes.iconFor(name, kind)
   end
   if isDestination(kind) then return "display" end
   return "laptop"
+end
 end

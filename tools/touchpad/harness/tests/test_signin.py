@@ -126,7 +126,7 @@ def test_signin_controls_pins_and_idle_drawing():
               "PenWidth": "Input"}
     for name, style in expect.items():
         assert styles.get(name) == style, (name, styles.get(name))
-    assert len(q.control_names()) == 26 + len(expect)
+    assert len(q.control_names()) == 27 + len(expect)
     assert abs(q.pin("PenWidth")["Value"] - 3) < 1e-9
     assert q.pin("TodayCount")["String"] == "0" and q.pin("SendStatus")["String"] == "Off"
     assert q.pin("Gesture")["String"] == HINT.upper()
@@ -477,7 +477,7 @@ def test_signin_fields_show_on_the_pad():
     q.set_pin("GuestCompany", "Acme")
     q.set_pin("Visiting", "Nikita")
     q.set_pin("RoomName", "Lobby")
-    q.advance(0.05)
+    q.advance(0.15)                                          # one header line is fitted per frame
     t = texts(q.icon())
     assert "Ana Lopez" in t and "Acme  -  visiting Nikita" in t
     assert "Lobby" in t and "Today: 0" in t                  # the room and the count are separate texts
@@ -765,3 +765,53 @@ def test_signin_trigger_release_does_not_rerun_the_action():
     sign(t)
     t.trigger("Submit")
     assert t.pulses("Submitted") == 1 and t.pin("LastGuest")["String"] == "Cy"
+
+
+def test_signin_clear_writes_back_a_whitespace_only_pin():
+    # A field pin holding only spaces normalises to "" inside the mode; Clear,
+    # Submit's form clear and the idle clear must write the pins back so a UCI
+    # text box bound to them does not keep showing the stale spaces.
+    q = boot()
+    q.set_pin("GuestName", "   ")
+    q.set_pin("GuestCompany", " \t ")
+    q.set_pin("Visiting", "  ")
+    q.advance(0.1)
+    assert q.run("return TouchPad.inst.fields.name, TouchPad.inst.fields.company") == ("", "")
+    press(q, "Clear")
+    q.advance(0.1)
+    assert q.pin("GuestName")["String"] == ""
+    assert q.pin("GuestCompany")["String"] == ""
+    assert q.pin("Visiting")["String"] == ""
+    # the same after a sign-in whose company was spaces
+    sign_in(q, name="Ana Lopez", company="   ")
+    q.advance(0.1)
+    assert q.pin("GuestCompany")["String"] == "" and q.pin("GuestName")["String"] == ""
+    # and after the idle clear (a form with only whitespace is empty already)
+    q.set_pin("GuestName", "Ana")
+    q.set_pin("Visiting", "   ")
+    q.advance(195)                                           # 3 idle minutes, checked every 10 s
+    assert q.pin("GuestName")["String"] == "" and q.pin("Visiting")["String"] == ""
+    assert q.errors == []
+
+
+def test_signin_long_non_ascii_fields_fit_one_line_per_frame():
+    # Each header line (name; company and visiting; room) is fitted on its own
+    # frame when it changes, so four 120-character CJK / emoji / Latin-1
+    # fields on a wide pad never put more than one fit in a frame.
+    for label, ch in (("cjk", "\u4e2d"), ("emoji", "\U0001F600"), ("latin1", "\u00e9")):
+        for (w, h) in ((1600, 1200), (1000, 700)):
+            q = boot(props={"Pad Width": w, "Pad Height": h})
+            for f in ("GuestName", "GuestCompany", "Visiting", "RoomName"):
+                q.set_pin(f, ch * 120)
+            q.advance(0.5)
+            assert q.budget()["max_frame"] < 50000, (label, w, h, q.budget()["max_frame"])
+            svg = q.icon()
+            assert svg.count("...") >= 1, (label, w, h)                  # at least the 240-character sub-line is cut
+            assert q.pin("GuestName")["String"] == ch * 120
+            # a drag (signature) now redraws every frame at the warm cost
+            b = box(q)
+            pts = [(b[0] + 20 + k * 10, b[1] + b[3] / 2 + (k % 3) * 4) for k in range(20)]
+            q.drag(pts, seconds=1.0, panel_touch=True)
+            assert q.budget()["max_frame"] < 50000, (label, w, h, "drag")
+            assert q.errors == []
+            q.close()

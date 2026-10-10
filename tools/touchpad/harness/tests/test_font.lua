@@ -96,7 +96,9 @@ function test_cache()
   Font.width("cached", 15)
   T.eq(Font.cacheSize(15, "normal"), 1, "size has its own cache")
   Font.width(string.rep("x", 200), 14)
-  T.eq(Font.cacheSize(14, "normal"), 1, "strings over 128 chars are not cached")
+  T.eq(Font.cacheSize(14, "normal"), 2, "strings over 128 chars are cached up to 512 bytes")
+  Font.width(string.rep("x", 600), 14)
+  T.eq(Font.cacheSize(14, "normal"), 2, "strings over 512 bytes are not cached")
   for i = 1, 600 do Font.width("s" .. i, 14) end
   T.ok(Font.cacheSize(14, "normal") <= 512, "cache bounded at 512")
   T.near(Font.width("cached", 14), a, 1e-9, "still correct after eviction")
@@ -200,4 +202,41 @@ function test_fit_bad_width()
   local c = Svg.new(10, 10)
   T.eq(c:textFit(0, 0, nil, "abc"), "", "textFit without a width draws nothing")
   T.ok(string.find(c:finish(), "<text", 1, true) == nil, "nothing drawn")
+end
+
+-- ---------- regressions: measurement cost of non-ASCII text ----------
+
+function test_non_ascii_cost_bounds()
+  -- Font.fit walks only the characters that can fit, however long the
+  -- string; Font.width of 128 non-ASCII code points stays cheap.
+  local sets = {
+    string.rep("\195\169", 128),           -- Latin-1
+    string.rep("\208\191", 128),           -- Cyrillic
+    string.rep("\215\169", 128),           -- Hebrew
+    string.rep("\228\184\173", 128),      -- CJK
+    string.rep("\240\159\152\128", 128), -- emoji
+  }
+  for i = 1, #sets do
+    Font.clearCache()
+    local f = T.instructions(function() Font.fit(sets[i], 14, 40) end)
+    T.ok(f < 1500, "fit of 128 non-ASCII chars to 40 px costs little (" .. f .. ")")
+    T.eq(string.sub(Font.fit(sets[i], 14, 40), -3), "...", "it is truncated")
+    Font.clearCache()
+    local w = T.instructions(function() Font.width(sets[i], 14) end)
+    T.ok(w < 8000, "width of 128 non-ASCII chars is bounded (" .. w .. ")")
+    local f2 = T.instructions(function() Font.fit(sets[i] .. "x", 14, 40) end)
+    T.ok(f2 < 1500, "fit of a longer string to 40 px costs the same (" .. f2 .. ")")
+  end
+  Font.clearCache()
+  local long = string.rep("\228\184\173", 300)
+  local f = T.instructions(function() Font.fit(long, 14, 60) end)
+  T.ok(f < 1500, "a 900 byte CJK string fitted to 60 px costs little (" .. f .. ")")
+  local ok = Font.fit(long, 14, 60)
+  T.ok(Font.width(ok, 14) <= 60 and #ok % 3 == 0, "and the result fits on a boundary")
+  -- the per-character classification agrees with U.utf8next on odd input
+  local odd = "a\224\160\128\237\159\191\240\144\128\128\244\143\191\191\224\128\128\237\160\128\240\128\128\128\244\144\128\128\255\192\128z\228\184"
+  local units = 0
+  for _, cp in ipairs(U.utf8chars(odd)) do units = units + Font.cpWidth(cp) end
+  T.near(Font.width(odd, 10), units * 10 / 1000, 1e-9, "edge sequences measure as utf8next decodes them")
+  T.eq(Font.fit(odd, 10, Font.width(odd, 10)), odd, "and fit whole at their width")
 end

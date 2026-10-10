@@ -113,6 +113,7 @@ local function clamp(v, lo, hi)
 end
 
 -- ---------------------------------------------------------------- hook
+local sethook = debug.sethook
 local function hook() F.ticks = F.ticks + 1 end
 
 function F.pause()
@@ -304,8 +305,19 @@ CtlMT.__index = function(ctl, k)
   if k == "Trigger" then return F.trigger end
   return F.state[ctl][k]
 end
+-- A property write is a C call on a Core: the counter stops on the first
+-- instruction of the metamethod (F.ctl_set pauses too, but only after its
+-- own bookkeeping, which would charge the script some 25 instructions per
+-- write; a 64 x 64 Matrix writes 4096 EventHandlers in its load alone).
 CtlMT.__newindex = function(ctl, k, v)
-  F.ctl_set(ctl, k, v, false, "lua")
+  local on = F.hook_on
+  if on then
+    F.hook_on = false
+    sethook()
+  end
+  local ok, err = pcall(F.ctl_set, ctl, k, v, false, "lua")
+  F.resume(on)
+  if not ok then error(err, 0) end
 end
 CtlMT.__tostring = function(ctl)
   return "Control(" .. F.state[ctl].key .. ")"

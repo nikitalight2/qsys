@@ -69,7 +69,7 @@ def test_panner_controls_and_speaker_counts():
             assert want in names, (name, want)
         assert "SpeakerGain %d" % (count + 1) not in names
         assert int(q.run("return #Controls.SpeakerGain")) == count
-        assert len(names) == 26 + 4 + count
+        assert len(names) == 27 + 4 + count
         assert q.pin("Divergence")["Value"] == 0.5
         assert q.run("return TouchPad.inst.layoutName") == name
         assert q.status().startswith("OK") or "Picker OK" in q.status()

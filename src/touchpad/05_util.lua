@@ -4,6 +4,7 @@
 -- No Q-SYS dependency. Every loop is bounded by the size of its input so a
 -- call never approaches the Core's per-callback instruction limit.
 
+do
 U = U or {}
 
 local floor, abs, sqrt, atan, pi = math.floor, math.abs, math.sqrt, math.atan, math.pi
@@ -184,24 +185,68 @@ local function escapeAscii(run)
   return (run:gsub('[%c&<>"]', ESC))
 end
 
--- Results for short strings are memoised (colours, ids and names repeat
--- on every frame); the cache is bounded and simply reset when full.
-local ASCII_CACHE, asciiCount, ASCII_CACHE_MAX, ASCII_CACHE_KEY = {}, 0, 1024, 64
+-- Results are memoised (colours, ids, names and fitted labels repeat on
+-- every frame); the cache is bounded and simply reset when full.
+local ASCII_CACHE, asciiCount, ASCII_CACHE_MAX, ASCII_CACHE_KEY = {}, 0, 1024, 512
+local ASCII_SLICE = 512          -- bytes decoded per byte array
 
+-- Decodes the UTF-8 sequence at bytes[k] exactly as utf8next does (invalid
+-- or truncated -> 63 and one byte). Returns cp, bytesConsumed.
+local function cpAt(bytes, k)
+  local b = bytes[k]
+  if b < 0x80 then return b, 1 end
+  local need, cp, lo2, hi2 = 0, 0, 0x80, 0xBF
+  if b >= 0xC2 and b <= 0xDF then need, cp = 1, b - 0xC0
+  elseif b >= 0xE0 and b <= 0xEF then
+    need, cp = 2, b - 0xE0
+    if b == 0xE0 then lo2 = 0xA0 elseif b == 0xED then hi2 = 0x9F end
+  elseif b >= 0xF0 and b <= 0xF4 then
+    need, cp = 3, b - 0xF0
+    if b == 0xF0 then lo2 = 0x90 elseif b == 0xF4 then hi2 = 0x8F end
+  else
+    return 63, 1
+  end
+  local b2 = bytes[k + 1]
+  if not b2 or b2 < lo2 or b2 > hi2 then return 63, 1 end
+  cp = cp * 64 + (b2 - 0x80)
+  for j = 2, need do
+    local bj = bytes[k + j]
+    if not bj or bj < 0x80 or bj > 0xBF then return 63, 1 end
+    cp = cp * 64 + (bj - 0x80)
+  end
+  return cp, need + 1
+end
+
+-- The string is walked as byte arrays of ASCII_SLICE bytes (a sequence cut
+-- by a slice end is re-read from the next slice): ASCII runs inside a slice
+-- are escaped in one go, every other sequence becomes a character reference.
 local function asciiSlow(s)
-  local parts, i, n = {}, 1, #s
+  local parts, np, i, n = {}, 0, 1, #s
   while i <= n do
-    local a = sfind(s, "[\128-\255]", i)
-    if not a then
-      parts[#parts + 1] = escapeAscii(ssub(s, i))
-      break
+    local stop = i + ASCII_SLICE - 1
+    if stop > n then stop = n end
+    local bytes = { sbyte(s, i, stop) }
+    local m = #bytes
+    if stop < n then m = m - 3 end          -- keep a whole sequence inside the slice
+    local k = 1
+    while k <= m do
+      local b = bytes[k]
+      if b < 0x80 then
+        local j = k + 1
+        while j <= m and bytes[j] < 0x80 do j = j + 1 end
+        np = np + 1
+        parts[np] = escapeAscii(ssub(s, i + k - 1, i + j - 2))
+        k = j
+      else
+        local cp, len = cpAt(bytes, k)
+        np = np + 1
+        -- U+FFFE and U+FFFF are valid UTF-8 but not XML characters
+        if cp == 63 or cp == 0xFFFE or cp == 0xFFFF then parts[np] = "?"
+        else parts[np] = "&#" .. cp .. ";" end
+        k = k + len
+      end
     end
-    if a > i then parts[#parts + 1] = escapeAscii(ssub(s, i, a - 1)) end
-    local cp, nx = utf8next(s, a)
-    -- U+FFFE and U+FFFF are valid UTF-8 but not XML characters
-    if cp == 63 or cp == 0xFFFE or cp == 0xFFFF then parts[#parts + 1] = "?"
-    else parts[#parts + 1] = "&#" .. cp .. ";" end
-    i = nx
+    i = i + k - 1
   end
   return concat(parts)
 end
@@ -573,4 +618,5 @@ function U.isoTime(t)
   local secs = t % 86400
   local y, m, d = civil(days)
   return sformat("%04d-%02d-%02dT%02d:%02d:%02dZ", y, m, d, secs // 3600, (secs // 60) % 60, secs % 60)
+end
 end

@@ -8,15 +8,17 @@
 -- diagonal a swipe must cover, 0.05..0.8, default 0.2). A swipe needs
 -- distance and speed: 0.6 s at most from the start of its stroke to the lift.
 --
--- The engine classifies a whole touch from its first point with a fixed 0.2
--- threshold. The mode works in strokes instead and keeps the engine's view of
--- the touch in step with the current stroke through the engine's live touch
--- record (TouchPad.state.touch, the white-box handle the engine publishes for
--- later modules): the record's origin follows the stroke, and a stroke the
--- knob calls too short is hidden from the engine's threshold. So the knob
--- owns the swipe distance in both directions, the mode pulses the swipes the
--- engine does not see, and the two never pulse the same swipe twice. Without
--- the handle the mode still pulses what the engine misses.
+-- The engine classifies a whole touch at its lift, from the touch's origin,
+-- against its own swipe distance. The mode owns that distance through the
+-- engine hook E.setSwipeDistance(fraction) (the knob's value, applied to
+-- the engine's recognizer for every touch) and works in strokes: when the
+-- finger lands again inside one engine touch the mode classifies the stroke
+-- that just ended itself and tells the engine through E.restartStroke(x, y,
+-- t) that the live touch starts again there, so the engine classifies the
+-- last stroke from the right origin. The two never pulse the same swipe
+-- twice: the engine pulses what it classifies, the mode pulses the strokes
+-- the engine never sees (strokes ended by a landing, and a touch resumed
+-- after a taken-back lift, which the engine does not classify).
 --
 -- Quick swipes in a row each count. With Panel Touch wired every lift is
 -- certain, so the engine already separates them. Without Panel Touch a
@@ -40,7 +42,6 @@ do
   local TRAIL_MAX = 40                        -- points kept (older ones are dropped)
   local TRAIL_STEPS = 8                       -- opacity buckets (polylines per frame at most)
   local CHEVRON_LIFE = 0.55                   -- s the chevron stays visible
-  local ENGINE_FRACTION = 0.2                 -- the engine's own fixed swipe distance (fraction of the diagonal)
   local JUMP_FRACTION = 0.3                   -- a single report moving this much of the diagonal is a new stroke
   local LAND_GAP = 0.11                       -- s without a report before a move: more than three missed 30 Hz reports
   local LAND_WAIT = 0.12                      -- s after such a report in which the finger shows whether it landed
@@ -59,7 +60,8 @@ do
     controls = function(C, props)
       C.add({ Name = "SwipeDistance", ControlType = "Knob", ControlUnit = "Float",
               Min = DIST_MIN, Max = DIST_MAX, DefaultValue = DIST_DEFAULT,
-              PinStyle = "Input", Group = "Setup" })
+              PinStyle = "Input", Group = "Setup",
+              Description = "Fraction of the pad diagonal a swipe must cover." })
     end,
 
     pages = {},
@@ -94,7 +96,7 @@ do
         down = false,
         x = 0, y = 0,
         trail = {}, first = 1,                           -- points { x, y, t[, break] }; first = index of the oldest
-        stroke = nil,                                    -- { x0, y0, t0, x, y, t, own, gap }; own: the engine's view follows it
+        stroke = nil,                                    -- { x0, y0, t0, x, y, t, gap }
         chevron = nil,                                   -- { dir, t }
         animating = false,
         locked = false,
@@ -109,6 +111,7 @@ do
         if v < DIST_MIN then v = DIST_MIN end
         if v > DIST_MAX then v = DIST_MAX end
         self.fraction = v
+        E.setSwipeDistance(v)                          -- the engine's recognizer follows the knob
         return v
       end
 
@@ -174,40 +177,9 @@ do
         return true
       end
 
-      local function newStroke(x, y, t, own)
-        self.stroke = { x0 = x, y0 = y, t0 = t, x = x, y = y, t = t, own = own }
+      local function newStroke(x, y, t)
+        self.stroke = { x0 = x, y0 = y, t0 = t, x = x, y = y, t = t }
         return self.stroke
-      end
-
-      -- The engine's live touch record, when it is published (see the header).
-      local function engineTouch()
-        local tp = TouchPad
-        local st = type(tp) == "table" and tp.state or nil
-        local touch = type(st) == "table" and st.touch or nil
-        if type(touch) == "table" and type(touch.t0) == "number" and type(touch.x0) == "number" then
-          return touch
-        end
-        return nil
-      end
-
-      -- Keeps the engine's view of the touch equal to the stroke: its origin
-      -- is the stroke's, and while the knob asks for more than the engine's
-      -- fixed threshold a stroke that is long enough for the engine but not
-      -- for the knob is made too slow for the engine. Only for strokes the
-      -- engine would classify (the first one and those started at a split):
-      -- a resumed touch is never classified by the engine.
-      local function syncEngine(s)
-        if not s.own then return end
-        local touch = engineTouch()
-        if not touch then return end
-        touch.x0, touch.y0 = s.x0, s.y0
-        local dx, dy = s.x - s.x0, s.y - s.y0
-        local d = sqrt(dx * dx + dy * dy)
-        if self.fraction > ENGINE_FRACTION and d >= ENGINE_FRACTION * DIAG and d < self.fraction * DIAG then
-          touch.t0 = s.t0 - SWIPE_TIME - 1
-        else
-          touch.t0 = s.t0
-        end
       end
 
       -- ---------- touch events ----------
@@ -218,14 +190,14 @@ do
       function self:onTouchStart(x, y, t)
         self.down, self.x, self.y = true, x, y
         addPoint(x, y, t)
-        newStroke(x, y, t, true)
+        newStroke(x, y, t)
         animate(true)
         E.invalidate()
       end
 
       function self:onTouchMove(x, y, t, dx, dy)
         local s = self.stroke
-        if not s then s = newStroke(x, y, t, false) end
+        if not s then s = newStroke(x, y, t) end
         local jump = sqrt(dx * dx + dy * dy)
         local landing = t - s.t >= LAND_GAP
         local gap = s.gap
@@ -252,11 +224,11 @@ do
           local dir = classify(s.x0, s.y0, s.t0, ex, ey, et)
           if dir then ownSwipe(dir) end
           if jump >= JUMP then self.trail, self.first = {}, 1 end
-          s = newStroke(ox, oy, ot, true)
+          s = newStroke(ox, oy, ot)
+          E.restartStroke(ox, oy, ot)                    -- the engine classifies the new stroke from here
         end
         s.x, s.y, s.t = x, y, t
         addPoint(x, y, t, landing or jump >= JUMP)      -- a new trail line starts after a gap or a jump
-        syncEngine(s)
         self.x, self.y = x, y
         E.invalidate()
       end
@@ -289,7 +261,7 @@ do
         -- The drag goes on; the engine classified its swipe at the inferred
         -- lift and never classifies a resumed touch, so the continued stroke
         -- is the mode's to classify at the lift.
-        newStroke(x, y, t, false)
+        newStroke(x, y, t)
         addPoint(x, y, t)
         animate(true)
         E.invalidate()
@@ -298,7 +270,6 @@ do
       function self:onControl(name, index, ctl)
         if name == "SwipeDistance" then
           readFraction()
-          if self.stroke then syncEngine(self.stroke) end
           return
         end
         if self.locked then return end                   -- a locked pad reacts to nothing (spec 5.6)

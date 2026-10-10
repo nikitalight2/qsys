@@ -7,6 +7,7 @@
 --
 -- Design time (controls, pages, layout) and the runtime `create(E)` live here.
 
+do
 Modes = Modes or {}
 
 local HINT = "Drag anywhere"
@@ -104,3 +105,4 @@ Modes["XY Pad"] = {
     return self
   end,
 }
+end

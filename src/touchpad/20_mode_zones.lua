@@ -50,18 +50,28 @@ Modes["Zone Select"] = {
 
   controls = function(C, props)
     local n = zoneCount(props)
-    C.add{ Name = "ZoneName", Count = n, ControlType = "Text", PinStyle = "Input", Group = "Zones" }
-    C.add{ Name = "ZoneSelected", Count = n, ControlType = "Button", ButtonType = "Toggle", PinStyle = "Both", Group = "Zones" }
-    C.add{ Name = "SelectAll", ControlType = "Button", ButtonType = "Trigger", PinStyle = "Input", Group = "Zones", Legend = "ALL" }
-    C.add{ Name = "ClearAll", ControlType = "Button", ButtonType = "Trigger", PinStyle = "Input", Group = "Zones", Legend = "NONE" }
-    C.add{ Name = "SelectedList", ControlType = "Text", PinStyle = "Output", Group = "Zones" }
-    C.add{ Name = "Edit", ControlType = "Button", ButtonType = "Toggle", PinStyle = "Input", Group = "Zones", Legend = "EDIT" }
+    C.add{ Name = "ZoneName", Count = n, ControlType = "Text", PinStyle = "Input", Group = "Zones",
+           Description = "The name drawn on each zone." }
+    C.add{ Name = "ZoneSelected", Count = n, ControlType = "Button", ButtonType = "Toggle", PinStyle = "Both", Group = "Zones",
+           Description = "Whether each zone is selected." }
+    C.add{ Name = "SelectAll", ControlType = "Button", ButtonType = "Trigger", PinStyle = "Input", Group = "Zones", Legend = "ALL",
+           Description = "Selects every zone." }
+    C.add{ Name = "ClearAll", ControlType = "Button", ButtonType = "Trigger", PinStyle = "Input", Group = "Zones", Legend = "NONE",
+           Description = "Clears every zone." }
+    C.add{ Name = "SelectedList", ControlType = "Text", PinStyle = "Output", Group = "Zones",
+           Description = "The selected zone numbers, comma separated." }
+    C.add{ Name = "Edit", ControlType = "Button", ButtonType = "Toggle", PinStyle = "Input", Group = "Zones", Legend = "EDIT",
+           Description = "On: drag zones to move or resize them and redraw the last touched one." }
     C.add{ Name = "ShowBackground", ControlType = "Button", ButtonType = "Toggle", PinStyle = "Input", Group = "Zones",
-           DefaultValue = true, Legend = "BACKGROUND" }
-    C.add{ Name = "ZoneLayout", ControlType = "Text", PinStyle = "Both", Group = "Zones" }
-    C.add{ Name = "Exclusive", ControlType = "Button", ButtonType = "Toggle", PinStyle = "Input", Group = "Zones", Legend = "EXCLUSIVE" }
+           DefaultValue = true, Legend = "BACKGROUND",
+           Description = "Draws the pad background behind the zones." }
+    C.add{ Name = "ZoneLayout", ControlType = "Text", PinStyle = "Both", Group = "Zones",
+           Description = "The zone rectangles as a JSON list of {x,y,w,h} in 0..1 pad units." }
+    C.add{ Name = "Exclusive", ControlType = "Button", ButtonType = "Toggle", PinStyle = "Input", Group = "Zones", Legend = "EXCLUSIVE",
+           Description = "On: one zone at a time, like a radio group." }
     C.add{ Name = "Columns", ControlType = "Knob", ControlUnit = "Integer", Min = 1, Max = 8, DefaultValue = 4,
-           PinStyle = "Input", Group = "Zones" }
+           PinStyle = "Input", Group = "Zones",
+           Description = "Columns of the default grid when Zone Layout is blank." }
   end,
 
   -- pages: nil, so the framework adds the Names page (spec section 4).
@@ -763,31 +773,46 @@ Modes["Zone Select"] = {
     end
 
     -- A zone tile is rendered once per (state, geometry, name) and replayed.
-    -- At most TILE_RENDERS tiles are re-rendered per frame: a stale tile keeps
-    -- its old fragment for one frame and the mode asks for another frame.
-    local TILE_RENDERS = 6
-    local renders, stale, scratch = 0, false, nil
+    -- Rendering from scratch costs a fixed part plus the label's fitting
+    -- (Font.fitCost: the characters the tile can hold, non-ASCII names being
+    -- dearer), and a frame spends at most RENDER_BUDGET of those estimated
+    -- instructions on renders. A tile beyond the budget keeps its old
+    -- fragment (stale) or shows a plain box (cold, the first frame or a new
+    -- layout) and the mode asks for another frame, so 32 zones with long
+    -- non-Latin names fill over a few frames instead of breaking one.
+    local RENDER_BUDGET = 20000
+    local TILE_BASE = 2000
+    local renderLeft, stale, scratch = RENDER_BUDGET, false, nil
 
     local function tileFrag(i)
       local z = self.zones[i]
       local on = self.sel[i] and true or false
       local mode = self.edit and ((self.last == i) and "e" or "E") or "-"
-      local key = (on and "1" or "0") .. mode .. z.x .. "," .. z.y .. "," .. z.w .. "," .. z.h .. "|" .. labelOf(i)
+      local label = labelOf(i)
+      local key = (on and "1" or "0") .. mode .. z.x .. "," .. z.y .. "," .. z.w .. "," .. z.h .. "|" .. label
       local e = self.cache[i]
       if e and e.key == key then return e.svg end
-      if e and renders >= TILE_RENDERS then
-        stale = true
-        return e.svg
-      end
-      renders = renders + 1
       local x, y, w, h = z.x * W, z.y * H, z.w * W, z.h * H
+      local size = U.clamp(math.floor(math.min(h * 0.38, w * 0.18)), 9, 16)
+      -- the first render of a frame always goes ahead, so a frame always progresses
+      local cost = TILE_BASE + Font.fitCost(label, size, w - 16)
+      local over = cost > renderLeft and renderLeft < RENDER_BUDGET
+      if over then
+        stale = true
+        if e then return e.svg end
+      end
       -- One scratch canvas per frame; each tile is the slice of parts it added.
       if not scratch then scratch = Svg.new(W, H, { limit = 50000, family = FAMILY }) end
       local s = scratch
       local p0 = #s.parts
-      local size = U.clamp(math.floor(math.min(h * 0.38, w * 0.18)), 9, 16)
+      if over then
+        s:rect(x + 1, y + 1, w - 2, h - 2, { fill = on and T.accent or T.well, opacity = on and 0.9 or 1,
+                                             rx = math.min(10, h / 4) })
+        return table.concat(s.parts, "", p0 + 1, #s.parts)
+      end
+      renderLeft = renderLeft - cost
       local picked = self.edit and self.last == i
-      Shapes.tile(s, T, x, y, w, h, labelOf(i),
+      Shapes.tile(s, T, x, y, w, h, label,
         { on = on, radius = math.min(10, h / 4), size = size, picked = picked,
           accent = picked and T.accent2 or nil })
       if self.edit then
@@ -803,7 +828,7 @@ Modes["Zone Select"] = {
     end
 
     function self:draw(c)
-      renders, stale, scratch = 0, false, nil
+      renderLeft, stale, scratch = RENDER_BUDGET, false, nil
       if self.background then
         c:rect(inset, inset, W - 2 * inset, H - 2 * inset,
           { fill = T.panel, stroke = T.line, sw = 1, rx = math.max(4, math.floor(inset * 1.2)) })

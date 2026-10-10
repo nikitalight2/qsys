@@ -14,6 +14,18 @@
 -- Every onTouchStart is followed by exactly one onTouchEnd: a touch the
 -- engine has to abandon (lock, rebind, calibration, a clock step) ends with
 -- info.aborted = true (info.reason names the cause) and no gesture.
+--
+-- Engine API handed to create(E): W, H, T (theme), props, font, hint,
+-- camera; ctl(name, index), ctls(name), out(name, value, index),
+-- pulse(name, index), setGesture(text), status(text, level), invalidate(),
+-- animate(on), now(), after(s, fn), every(s, fn), log(...), dbg(...),
+-- file.*, http.post, json.*, cameraFactory(kind, opts);
+-- setSwipeDistance(fraction) / swipeDistance() set and read the swipe
+-- distance of the recognizer (fraction of the pad diagonal, 0.05..0.8,
+-- default 0.2, applied to every touch); restartStroke(x, y, t) tells the
+-- engine that the live touch's stroke starts again there (its swipe at the
+-- lift and the drag outputs measure from the restart). The engine never
+-- publishes its touch record to modes: the global TouchPad is for tests.
 
 Q = Q or {}
 NikitaTimers = NikitaTimers or {}     -- timer objects live here so they are never collected
@@ -652,6 +664,8 @@ if Controls then (function()
   local DOUBLE_TIME, DOUBLE_DIST = 0.4, 40
   local DRAG_START = 12
   local SWIPE_TIME, SWIPE_RATIO, SWIPE_FRACTION = 0.6, 1.5, 0.2
+  local SWIPE_MIN, SWIPE_MAX = 0.05, 0.8  -- the range E.setSwipeDistance accepts (the Swipe Layer knob's)
+  local swipeFraction = SWIPE_FRACTION    -- the live swipe distance (fraction of the diagonal), see E.setSwipeDistance
   local LANDING_WAIT = 0.12            -- the other axis is waited for this long
   local PANEL_LEAD, PANEL_BUFFER = 0.15, 0.1
   local RESUME_WINDOW = 1.5
@@ -984,6 +998,19 @@ if Controls then (function()
   function E.log(...) Q.print(...) end
   function E.dbg(...) dbg(...) end
   function E.status(text, level) setStatus(tostring(text or ""), level or "ok") end
+  -- The swipe distance the engine's recognizer uses for every touch (a
+  -- fraction of the pad diagonal, spec 5.4; 0.2 unless a mode asks for
+  -- another). nil or a value that is not a number restores the default;
+  -- numbers are clamped to 0.05..0.8. Returns the fraction in force.
+  function E.setSwipeDistance(fraction)
+    local v = tonumber(fraction)
+    if v == nil or v ~= v then v = SWIPE_FRACTION end
+    if v < SWIPE_MIN then v = SWIPE_MIN end
+    if v > SWIPE_MAX then v = SWIPE_MAX end
+    swipeFraction = v
+    return v
+  end
+  function E.swipeDistance() return swipeFraction end
   E.file = {
     base = function() return Q.fileBase() end,
     read = function(path) return Q.readFile(path) end,
@@ -1002,6 +1029,34 @@ if Controls then (function()
     recovered("camera", cam)
     return nil
   end
+
+  -- ---------- first-run defaults ----------
+  -- Toggles declared with DefaultValue = true (SourceActive, AllowCalls,
+  -- ExclusiveColumns, Masked, AutoSubmit, ShowBackground) are written true
+  -- once, on the first start, in case Designer does not apply a boolean
+  -- DefaultValue to a Button; SetupVersion remembers that it was done, so an
+  -- integrator's later choice to turn one off is kept. Runs before the mode
+  -- instance reads its toggles; the writes happen while unarmed, so the
+  -- engine ignores their events.
+  local SETUP_VERSION = "1"
+  local function applyFirstRunDefaults()
+    local marker = ctlOf("SetupVersion")
+    if marker == nil then return end
+    local done = ""
+    pcall(function() done = tostring(marker.String or "") end)
+    if done ~= "" then return end
+    for name, m in pairs(META) do
+      local def = m.def or {}
+      if def.ControlType == "Button" and def.ButtonType == "Toggle" and def.DefaultValue == true then
+        local list = ctlsOf(name)
+        for i = 1, #list do
+          pcall(function() if not list[i].Boolean then list[i].Boolean = true end end)
+        end
+      end
+    end
+    pcall(function() marker.String = SETUP_VERSION end)
+  end
+  protect("first-run defaults", applyFirstRunDefaults)
 
   -- ---------- mode instance ----------
   local modeTable = Modes and Modes[MODE] or nil
@@ -1122,11 +1177,14 @@ if Controls then (function()
     end
   end
 
+  local booting = true           -- while the load runs, a frame waits for its own engine turn
+
   local function scheduleFrame()
     if frameTimer then return end
     local now = Q.now()
     local wait = FRAME - (now - lastFrameAt)
     if drawRetryAt - now > wait then wait = drawRetryAt - now end
+    if booting and wait < 0.001 then wait = 0.001 end
     if wait <= 0.0005 then
       drawNow()
       return
@@ -1202,6 +1260,25 @@ if Controls then (function()
       out("DragDistance", U.clamp(U.dist(touch.x0, touch.y0, touch.x, touch.y) / DIAG, 0, 2))
       out("DragAngle", U.angleDeg(touch.x - touch.x0, touch.y - touch.y0))
     end
+  end
+
+  -- A mode that sees the finger land again inside one engine touch (the
+  -- Swipe Layer: a report after a gap or a jump across the pad, within the
+  -- release time) tells the engine that the live touch's stroke starts
+  -- again at (x, y, t): the swipe classified at the lift, DragDistance and
+  -- DragAngle then measure from there. Taps are untouched (the touch's
+  -- travel so far still counts). Returns true while a touch is live.
+  function E.restartStroke(x, y, t)
+    local touch = S.touch
+    if not touch or S.state ~= DOWN or touch.calib then return false end
+    x, y = tonumber(x), tonumber(y)
+    t = tonumber(t)
+    if x == nil or y == nil then x, y = touch.x, touch.y end
+    if t == nil then t = touch.t end
+    touch.x0, touch.y0, touch.t0 = x, y, t
+    dbg(sformat("stroke restarts at %.1f %.1f t=%.3f", x, y, t))
+    liveOutputs(touch)
+    return true
   end
 
   -- ---------- calibration (spec 5.2) ----------
@@ -1321,7 +1398,7 @@ if Controls then (function()
   local function swipeOf(touch, x, y, duration)
     local dx, dy = x - touch.x0, y - touch.y0
     local dist = sqrt(dx * dx + dy * dy)
-    if duration > SWIPE_TIME or dist < SWIPE_FRACTION * DIAG then return nil, dist end
+    if duration > SWIPE_TIME or dist < swipeFraction * DIAG then return nil, dist end
     local ax, ay = abs(dx), abs(dy)
     if ax >= SWIPE_RATIO * ay then
       return (dx > 0) and "right" or "left", dist
@@ -1801,18 +1878,34 @@ if Controls then (function()
 
   local SKIP_HANDLER = { Display = true, CameraView = true, Status = true, PickerLayout = true, Gesture = true }
 
+  -- One guarded handler per control name, shared by every element of a
+  -- Count control (a 64 x 64 Matrix has 4096 Cross pins: a closure per
+  -- element would cost the load most of its budget); the element's index
+  -- comes from a map keyed by the control object. The assignments run under
+  -- one pcall per name, element by element only when that failed.
   local function installHandlers()
     for name, m in pairs(META) do
       local def = m.def or {}
       local skip = SKIP_HANDLER[name] or (def.PinStyle == "Output")
       if not skip then
         local list = ctlsOf(name)
-        for i = 1, #list do
-          local ctl = list[i]
-          local idx = i
-          pcall(function()
-            ctl.EventHandler = guard("ctl " .. name, function(c) onControlChange(name, idx, c) end)
-          end)
+        local indexOf = {}
+        local handler = guard("ctl " .. name, function(c) onControlChange(name, indexOf[c] or 1, c) end)
+        local ok = pcall(function()
+          for i = 1, #list do
+            local ctl = list[i]
+            indexOf[ctl] = i
+            ctl.EventHandler = handler
+          end
+        end)
+        if not ok then
+          for i = 1, #list do
+            local ctl = list[i]
+            pcall(function()
+              indexOf[ctl] = i
+              ctl.EventHandler = handler
+            end)
+          end
         end
       end
       if m.choices and type(m.choices) == "table" then
@@ -1926,5 +2019,10 @@ if Controls then (function()
     if lockNow ~= S.locked then onLock(Controls.Lock) end
   end))
   call("onStart")
+  -- The first frame is drawn on the next engine turn, not in the load: the
+  -- load already binds the picker, installs the handlers and creates the
+  -- mode, and a 64 x 64 Matrix or 32 zones would otherwise draw their cold
+  -- first frame in the same call (spec 0: one call never nears the limit).
   protect("frame", E.invalidate)
+  booting = false
 end)() end

@@ -55,18 +55,28 @@ do
     hint = HINT,
 
     controls = function(C, props)
-      C.add({ Name = "Pin", ControlType = "Text", PinStyle = "Input", DefaultValue = "1234" })
-      C.add({ Name = "Entry", ControlType = "Text", PinStyle = "Output" })
-      C.add({ Name = "Masked", ControlType = "Button", ButtonType = "Toggle", PinStyle = "Input", DefaultValue = true })
-      C.add({ Name = "AutoSubmit", ControlType = "Button", ButtonType = "Toggle", PinStyle = "Input", DefaultValue = true })
-      C.add({ Name = "Learn", ControlType = "Button", ButtonType = "Toggle", PinStyle = "Input" })
-      C.add({ Name = "Accepted", ControlType = "Button", ButtonType = "Trigger", PinStyle = "Output" })
-      C.add({ Name = "Rejected", ControlType = "Button", ButtonType = "Trigger", PinStyle = "Output" })
-      C.add({ Name = "Locked", ControlType = "Button", ButtonType = "Toggle", PinStyle = "Both" })
+      C.add({ Name = "Pin", ControlType = "Text", PinStyle = "Input", DefaultValue = "1234",
+              Description = "The accepted code or codes, separated by commas." })
+      C.add({ Name = "Entry", ControlType = "Text", PinStyle = "Output",
+              Description = "The digits entered so far." })
+      C.add({ Name = "Masked", ControlType = "Button", ButtonType = "Toggle", PinStyle = "Input", DefaultValue = true,
+              Description = "Shows dots instead of digits on the pad." })
+      C.add({ Name = "AutoSubmit", ControlType = "Button", ButtonType = "Toggle", PinStyle = "Input", DefaultValue = true,
+              Description = "Submits as soon as the entry is as long as a code." })
+      C.add({ Name = "Learn", ControlType = "Button", ButtonType = "Toggle", PinStyle = "Input",
+              Description = "On: the next code entered and confirmed with Enter is stored as the Pin." })
+      C.add({ Name = "Accepted", ControlType = "Button", ButtonType = "Trigger", PinStyle = "Output",
+              Description = "Pulses when an entered code is accepted." })
+      C.add({ Name = "Rejected", ControlType = "Button", ButtonType = "Trigger", PinStyle = "Output",
+              Description = "Pulses when an entered code is rejected." })
+      C.add({ Name = "Locked", ControlType = "Button", ButtonType = "Toggle", PinStyle = "Both",
+              Description = "On after Max Tries failures for Lockout Seconds; off clears the lockout." })
       C.add({ Name = "MaxTries", ControlType = "Knob", ControlUnit = "Integer", Min = MIN_TRIES, Max = MAX_TRIES,
-              DefaultValue = 5, PinStyle = "Input" })
+              DefaultValue = 5, PinStyle = "Input",
+              Description = "Failures allowed before the lockout." })
       C.add({ Name = "LockoutSeconds", ControlType = "Knob", ControlUnit = "Integer", Min = MIN_LOCKOUT,
-              Max = MAX_LOCKOUT, DefaultValue = 60, PinStyle = "Input" })
+              Max = MAX_LOCKOUT, DefaultValue = 60, PinStyle = "Input",
+              Description = "How long the lockout lasts." })
     end,
 
     pages = {},

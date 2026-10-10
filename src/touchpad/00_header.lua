@@ -8,8 +8,8 @@
 
 PluginInfo = {
   Name = "Nikita Visual Arts~Touch Pad",
-  Version = "1.0.0",
-  BuildVersion = "1.0.0.0",
+  Version = "1.0.1",
+  BuildVersion = "1.0.1.0",
   Id = "98fc51fe-ce4d-4fa9-95f5-bd40ddc340b0",
   Author = "Nikita Visual Arts – nikitavisual.art",
   Description = "Touch gestures, camera control, zone select, drag and drop, dials, faders, panners, pattern lock, keypad, sign-in and whiteboard on any Q-SYS UCI through a hidden Color Picker. Nikita Visual Arts – nikitavisual.art",
