@@ -329,6 +329,7 @@ do
     d.zoomDir = 0
     d.saved = {}              -- speed control key -> Position before the move
     d.posTemplate = nil
+    d.zoomDiv = 1             -- units of the third ptz.preset number per 0..1 (1, 100 or 16384)
     d.bindAt = nil            -- time of the last binding attempt
 
     -- Opens the component and probes the candidate control names; a camera
@@ -388,12 +389,17 @@ do
       pcall(function() c.Position = clamp(s, 0, 1) end)
     end
 
+    -- A pan/tilt stop restores the pan and tilt sliders only: the zoom slider
+    -- belongs to zoom(0), since a zoom may still be held across a pan/tilt stop.
+    local PT_SPEEDS = { "panspeed", "tiltspeed" }
     local function restoreSpeeds()
-      for key, p in pairs(d.saved) do
+      for i = 1, #PT_SPEEDS do
+        local key = PT_SPEEDS[i]
+        local p = d.saved[key]
         local c = d.ctl[key]
         if c and type(p) == "number" then pcall(function() c.Position = p end) end
+        d.saved[key] = nil
       end
-      d.saved = {}
     end
 
     local function release(times)
@@ -533,8 +539,11 @@ do
       self.posTemplate = s
       local z = nums[3]
       if z ~= nil then
-        if z > 1 and z <= 100 then z = z / 100 elseif z > 100 then z = z / 16384 end
-        z = clamp(z, 0, 1)
+        -- 0..1, a percentage or VISCA-style 0..16384 units: the divisor, once
+        -- learnt, sticks (a percent camera at 1 means 1 %) and is reused on writes
+        local div = (z > 100) and 16384 or ((z > 1) and 100 or 1)
+        if div > self.zoomDiv then self.zoomDiv = div end
+        z = clamp(z / self.zoomDiv, 0, 1)
       end
       if type(cb) == "function" then cb(nums[1], nums[2], z) end
       return nums[1], nums[2], z
@@ -543,14 +552,19 @@ do
     function d.gotoPosition(self, pan, tilt, z)
       local c = ensure() and self.ctl.position or nil
       if c == nil then return false end
-      local vals = { num(pan, 0), num(tilt, 0), z ~= nil and clamp(num(z, 0), 0, 1) or nil }
+      local zv = (z ~= nil) and clamp(num(z, 0), 0, 1) * self.zoomDiv or nil
+      local vals = { num(pan, 0), num(tilt, 0), zv }
       local text
       if type(self.posTemplate) == "string" and #parseNumbers(self.posTemplate) >= 2 then
         local i = 0
         text = string.gsub(self.posTemplate, "[-%d%.]+", function(n)
           if tonumber(n) == nil then return n end
           i = i + 1
-          if i <= 3 and vals[i] ~= nil then return sformat("%.4f", vals[i]) end
+          if i <= 3 and vals[i] ~= nil then
+            -- a number the camera wrote without decimals stays an integer
+            if sfind(n, ".", 1, true) then return sformat("%.4f", vals[i]) end
+            return sformat("%d", round(vals[i]))
+          end
           return n
         end)
       else
@@ -571,8 +585,9 @@ do
   end
 
   -- ================================================================ VISCA over IP
-  -- Per-brand table: transport, port, Sony header, speed limits, position nibbles and scales.
-  -- pos scale: units per degree (16-bit cameras: 0x2200 = 170 degrees).
+  -- Per-brand table: transport, port, Sony header, speed limits. Position
+  -- nibbles and scales follow the camera's replies (see MODELS and posForm).
+  -- 16-bit cameras: 0x2200 = 170 degrees.
   local SCALE16 = 0x2200 / 170
   local BRANDS = {
     ["PTZOptics"] = { transport = "tcp", port = 5678, header = false, panMax = 0x18, tiltMax = 0x14 },
@@ -590,6 +605,20 @@ do
   local INQUIRY_TIMEOUT = 1.0
   local MISSES_FOR_WARNING = 3
   local QUEUE_CAP = 16
+  -- 20-bit position scales (units per degree) and the absolute-position speed
+  -- form per Sony model id (CAM_VersionInq 8x 09 00 02 FF -> y0 50 GGGG HHHH JJJJ KK FF):
+  -- SRG-360SHE/280SHE: 0x15400 = 170 degrees, 5+5 nibbles, "VV 00" speed bytes;
+  -- BRC-X1000 (5+4) and ILME-FR7 (5+5): 0x09CA7 = 170 degrees, "vv ww" speed bytes.
+  local SCALE_SRG = 0x15400 / 170
+  local SCALE_X1000 = 0x9CA7 / 170
+  local MODELS = {
+    [0x0604] = { name = "SRG-360SHE", scale = SCALE_SRG, ww = false },
+    [0x0605] = { name = "SRG-280SHE", scale = SCALE_SRG, ww = false },
+    [0x0519] = { name = "BRC-X1000", scale = SCALE_X1000, ww = true },
+    [0x051E] = { name = "ILME-FR7", scale = SCALE_X1000, ww = true },
+  }
+  local VENDOR_SONY = 0x0001
+  local VERSION_INQ = "\129\9\0\2\255"
 
   local function be16(n) return schar(floor(n / 256) % 256, n % 256) end
   local function be32(n)
@@ -631,22 +660,32 @@ do
     d.lastDrive = nil           -- the last pan/tilt drive payload (dedup)
     d.lastZoom = nil
     d.vv, d.ww = 6, 6           -- last speeds, reused by stops
-    d.queue = {}                -- bytes waiting for a TCP connection
+    d.queue = {}                -- { bytes, times, kind } waiting for a TCP connection: state, not history
     d.buf = ""                  -- TCP reply stream
     d.pending = nil             -- a position inquiry in flight
     d.replies, d.posReplies, d.misses = 0, 0, 0
     d.warnedNoPos = false
     d.pan, d.tilt, d.zoomPos = nil, nil, nil
     d.lastReply = ""
+    -- The absolute-position form follows the last position reply (nibbles,
+    -- scale, speed bytes); 16-bit 4+4 at 0x2200/170 until a camera answers.
+    d.posForm = { pn = 4, tn = 4, scale = SCALE16, ww = true }
+    d.vendor, d.model, d.modelInfo = nil, nil, nil
+    d.verSeq = nil              -- sequence number of the version inquiry (its error reply is quiet)
+    d.assumed20 = false         -- a 5+5 reply without a model id: SRG scale noted once
 
     local function describe()
       local where = (d.ip and d.ip ~= "") and (d.ip .. ":" .. tostring(d.port)) or "(no IP)"
-      return sformat("VISCA %s %s %s", brandName, string.upper(brand.transport), where)
+      local s = sformat("VISCA %s %s %s", brandName, string.upper(brand.transport), where)
+      if d.modelInfo then s = s .. " " .. d.modelInfo.name
+      elseif d.model then s = s .. sformat(" model %04X", d.model) end
+      return s
     end
 
     -- ---- replies ----
-    local function onReply(p)
-      -- p: one VISCA message without the IP header, ending in FF
+    local function onReply(p, seq)
+      -- p: one VISCA message without the IP header, ending in FF; seq: the
+      -- header's sequence number when the brand has one
       local n = #p
       if n < 3 then return end
       d.replies = d.replies + 1
@@ -655,6 +694,10 @@ do
       if b1 % 16 ~= 0 or floor(b1 / 16) < 8 then return end     -- not y0
       local hi = floor(b2 / 16)
       if hi == 6 then
+        if seq ~= nil and seq == d.verSeq then
+          d.verSeq = nil                                          -- no version inquiry: not an error
+          return
+        end
         report(E, d, describe() .. ": camera error " .. sformat("%02X", sbyte(p, 3) or 0), "warn")
         return
       end
@@ -664,12 +707,36 @@ do
         -- zoom position 90 50 0p 0q 0r 0s FF
         d.zoomPos = clamp(unnibbles(p, 3, 4, false) / ZOOM_MAX, 0, 1)
         if pend then pend.zoom = d.zoomPos end
+      elseif n == 10 then
+        -- version: y0 50 GG GG HH HH JJ JJ KK FF (vendor, model, ROM, sockets)
+        d.verSeq = nil
+        d.vendor = sbyte(p, 3) * 256 + sbyte(p, 4)
+        d.model = sbyte(p, 5) * 256 + sbyte(p, 6)
+        d.modelInfo = (d.vendor == VENDOR_SONY) and MODELS[d.model] or nil
+        if d.modelInfo and d.posForm.pn == 5 then
+          d.posForm.scale, d.posForm.ww = d.modelInfo.scale, d.modelInfo.ww
+        end
+        if d.statusLevel == "ok" then report(E, d, describe(), "ok") end
       elseif n == 11 or n == 12 or n == 13 then
         local pn = (n == 11) and 4 or 5
         local tn = n - 3 - pn
-        local scale = (pn == 4) and SCALE16 or (0x15400 / 170)
-        d.pan = unnibbles(p, 3, pn, true) / scale
-        d.tilt = unnibbles(p, 3 + pn, tn, true) / scale
+        local form = d.posForm
+        form.pn, form.tn = pn, tn
+        if pn == 4 then
+          form.scale, form.ww = SCALE16, true
+        elseif tn == 4 then
+          form.scale, form.ww = SCALE_X1000, true                 -- the BRC-X1000 layout
+        elseif d.modelInfo then
+          form.scale, form.ww = d.modelInfo.scale, d.modelInfo.ww
+        else
+          form.scale, form.ww = SCALE_SRG, false                  -- SRG-360SHE family assumed
+          if not d.assumed20 then
+            d.assumed20 = true
+            report(E, d, describe() .. ": 20-bit positions, SRG-360SHE scale assumed (no model id)", "ok")
+          end
+        end
+        d.pan = unnibbles(p, 3, pn, true) / form.scale
+        d.tilt = unnibbles(p, 3 + pn, tn, true) / form.scale
         d.posReplies = d.posReplies + 1
         d.misses = 0
         if pend then pend.pan, pend.tilt = d.pan, d.tilt end
@@ -682,12 +749,12 @@ do
       end
     end
 
-    local function splitMessages(data)
+    local function splitMessages(data, seq)
       local from, len, count = 1, #data, 0
       while from <= len and count < 32 do
         local e = sfind(data, "\255", from, true)
         if not e then break end
-        onReply(ssub(data, from, e))
+        onReply(ssub(data, from, e), seq)
         from = e + 1
         count = count + 1
       end
@@ -696,8 +763,13 @@ do
 
     local function onUdp(data)
       if type(data) ~= "string" then return end
-      if brand.header and #data >= 8 then data = ssub(data, 9) end
-      splitMessages(data)
+      local seq
+      if brand.header and #data >= 8 then
+        local a, b, c, e = sbyte(data, 5, 8)
+        seq = ((a * 256 + b) * 256 + c) * 256 + e
+        data = ssub(data, 9)
+      end
+      splitMessages(data, seq)
     end
 
     local function onTcp(data)
@@ -713,7 +785,30 @@ do
       if not (d.sock and d.sock.connected) then return end
       local q = d.queue
       d.queue = {}
-      for i = 1, #q do d.sock:send(q[i]) end
+      for i = 1, #q do
+        local e = q[i]
+        for _ = 1, e.times do d.sock:send(e.bytes) end
+      end
+    end
+
+    -- While a TCP socket is down the queue holds state, not history: a command
+    -- with a kind (pan/tilt drive, zoom, absolute move, inquiry) replaces the
+    -- queued command of its kind, so a stop always supersedes the drives before
+    -- it; a repeat of the same bytes (stops go out three times) adds to its count.
+    local function enqueue(bytes, kind)
+      local q = d.queue
+      if kind then
+        for i = 1, #q do
+          if q[i].kind == kind then
+            local old = table.remove(q, i)
+            local times = (old.bytes == bytes) and min(old.times + 1, 3) or 1
+            q[#q + 1] = { bytes = bytes, times = times, kind = kind }
+            return
+          end
+        end
+      end
+      if #q >= QUEUE_CAP then table.remove(q, 1) end            -- the oldest goes, never the newest
+      q[#q + 1] = { bytes = bytes, times = 1, kind = kind }
     end
 
     local function readIp()
@@ -724,21 +819,27 @@ do
       return s, brand.port
     end
 
-    local function send(payload, inquiry)
+    -- kind: see enqueue; returns the sequence number used (header brands) or true.
+    local function send(payload, inquiry, kind)
       if not d.sock then return false end
-      local bytes = payload
+      local bytes, seq = payload, true
       if brand.header then
+        seq = d.seq
         bytes = (inquiry and "\1\16" or "\1\0") .. be16(#payload) .. be32(d.seq) .. payload
         d.seq = d.seq + 1
         if d.seq > 0xFFFFFFFF then d.seq = 1 end
       end
       d.sent = d.sent + 1
       if brand.transport == "udp" then
-        return d.sock:send(bytes)
+        d.sock:send(bytes)
+        return seq
       end
-      if d.sock.connected then return d.sock:send(bytes) end
-      if #d.queue < QUEUE_CAP then d.queue[#d.queue + 1] = bytes end
-      return true
+      if d.sock.connected then
+        d.sock:send(bytes)
+        return seq
+      end
+      enqueue(bytes, kind)
+      return seq
     end
 
     function d.connect(self)
@@ -751,9 +852,11 @@ do
       if brand.transport == "udp" then
         self.sock = Q.udp({ ip = ip, port = self.port, onData = function(data) onUdp(data) end })
         if brand.header then
-          -- Sony RESET control command; the next sequence number is 1.
+          -- Sony RESET control command; the next sequence number is 1. The
+          -- version inquiry tells 20-bit cameras apart (scale, speed bytes).
           self.sock:send("\2\0\0\1\0\0\0\0\1")
           self.seq = 1
+          self.verSeq = send(VERSION_INQ, true, "ver")
         end
       else
         self.sock = Q.tcp({ ip = ip, port = self.port, onData = function(data) onTcp(data) end,
@@ -792,7 +895,7 @@ do
       local k = knobScale(E, "MaxSpeed", 0.5)
       if h == 0 and v == 0 then
         local stop = "\129\1\6\1" .. schar(self.vv, self.ww) .. "\3\3\255"
-        for _ = 1, 3 do send(stop) end
+        for _ = 1, 3 do send(stop, nil, "pt") end
         self.lastDrive = nil
         return
       end
@@ -803,7 +906,7 @@ do
       local cmd = "\129\1\6\1" .. schar(self.vv, self.ww, hb, vb) .. "\255"
       if cmd ~= self.lastDrive then
         self.lastDrive = cmd
-        send(cmd)
+        send(cmd, nil, "pt")
       end
     end
 
@@ -812,7 +915,7 @@ do
       s = clamp(num(s, 0), -1, 1)
       local dir = sign(s)
       if dir == 0 then
-        for _ = 1, 3 do send("\129\1\4\7\0\255") end
+        for _ = 1, 3 do send("\129\1\4\7\0\255", nil, "z") end
         self.lastZoom = nil
         return
       end
@@ -820,7 +923,7 @@ do
       local cmd = "\129\1\4\7" .. schar((dir > 0 and 0x20 or 0x30) + p) .. "\255"
       if cmd ~= self.lastZoom then
         self.lastZoom = cmd
-        send(cmd)
+        send(cmd, nil, "z")
       end
     end
 
@@ -832,22 +935,24 @@ do
     function d.home(self)
       if not ensure() then return end
       self.lastDrive = nil
-      send("\129\1\6\4\255")
+      send("\129\1\6\4\255", nil, "abs")
     end
 
+    -- Absolute position in the shape of the camera's own position replies:
+    -- 4+4 nibbles at 0x2200/170 until the camera has answered (16-bit models),
+    -- 5+4 / 5+5 nibbles with the model's scale after a 20-bit reply.
     function d.gotoPosition(self, pan, tilt, z)
       if not ensure() then return end
       local k = knobScale(E, "MaxSpeed", 0.5)
+      local form = self.posForm
       local vv = speedByte(k, brand.panMax)
-      local ww = speedByte(k, brand.tiltMax)
-      local pn, tn = brand.panNibbles or 4, brand.tiltNibbles or 4
-      local scale = brand.scale or SCALE16
-      local cmd = "\129\1\6\2" .. schar(vv, ww) .. nibbles(num(pan, 0) * scale, pn)
-        .. nibbles(num(tilt, 0) * scale, tn) .. "\255"
+      local ww = form.ww and speedByte(k, brand.tiltMax) or 0
+      local cmd = "\129\1\6\2" .. schar(vv, ww) .. nibbles(num(pan, 0) * form.scale, form.pn)
+        .. nibbles(num(tilt, 0) * form.scale, form.tn) .. "\255"
       self.lastDrive = nil
-      send(cmd)
+      send(cmd, nil, "abs")
       if z ~= nil then
-        send("\129\1\4\71" .. nibbles(clamp(num(z, 0), 0, 1) * ZOOM_MAX, 4) .. "\255")
+        send("\129\1\4\71" .. nibbles(clamp(num(z, 0), 0, 1) * ZOOM_MAX, 4) .. "\255", nil, "zabs")
       end
     end
 
@@ -857,10 +962,13 @@ do
         return
       end
       if self.pending then
-        -- one inquiry at a time: the newer caller replaces the older one
+        -- one inquiry at a time: the newer caller replaces the older one, whose
+        -- nil answer is delivered on the next engine turn so that a callback
+        -- that polls again never re-enters this call
         local old = self.pending
+        self.pending = nil
         if old.timer then old.timer:cancel() end
-        if type(old.cb) == "function" then old.cb(nil) end
+        if type(old.cb) == "function" then E.after(0, function() old.cb(nil) end) end
       end
       local pend = { cb = cb, pan = nil, tilt = nil, zoom = nil }
       self.pending = pend
@@ -874,8 +982,8 @@ do
         end
         if type(cb) == "function" then cb(nil) end
       end)
-      send("\129\9\6\18\255", true)
-      send("\129\9\4\71\255", true)
+      send("\129\9\6\18\255", true, "ipt")
+      send("\129\9\4\71\255", true, "iz")
     end
 
     function d.status(self)

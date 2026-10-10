@@ -325,9 +325,10 @@ def test_qsys_zoom_home_privacy_and_position():
     assert cam(q, "return cam:getPosition()") == (12.5, -3.0, 0.25)
     assert cam(q, "local r cam:getPosition(function(p, t, z) r = p + t + z end) return r") == 9.75
     cam(q, "cam:gotoPosition(-20, 5, 0.5)")
-    assert c.get("ptz.preset")["String"] == "-20.0000, 5.0000, 0.5000"   # the read shape is kept
+    # the read shape is kept: decimals where the camera wrote them, zoom in its units (percent)
+    assert c.get("ptz.preset")["String"] == "-20.0000, 5.0000, 50"
     cam(q, "cam:gotoPosition(1, 2)")
-    assert c.get("ptz.preset")["String"] == "1.0000, 2.0000, 0.5000"     # zoom unchanged
+    assert c.get("ptz.preset")["String"] == "1.0000, 2.0000, 50"         # zoom unchanged
     q.budget()
 
 
@@ -385,19 +386,25 @@ def test_visca_sony_header_reset_and_sequence_numbers():
     assert q.tcp_connects == []
     raw = [d for _, _, d in q.udp_sent]
     assert raw[0] == b"\x02\x00\x00\x01\x00\x00\x00\x00\x01"       # RESET control command first
+    # then the version inquiry (sequence 1) that tells the 20-bit models apart
+    assert raw[1] == b"\x01\x10\x00\x05\x00\x00\x00\x01" + b"\x81\x09\x00\x02\xff"
+    assert len(raw) == 2 and cam(q, "return cam.verSeq") == 1
     assert all(ip == "10.0.0.5" and port == 52381 for ip, port, _ in q.udp_sent)
     cam(q, "cam:drive(0, 1)")
-    # up: pan speed floors at 01, tilt 12 of 0x17 (MaxSpeed 50 %); sequence 1 after the RESET
-    assert q.udp_sent[-1][2] == b"\x01\x00\x00\x09\x00\x00\x00\x01" + b"\x81\x01\x06\x01\x01\x0c\x03\x01\xff"
+    # up: pan speed floors at 01, tilt 12 of 0x17 (MaxSpeed 50 %); sequence 2
+    assert q.udp_sent[-1][2] == b"\x01\x00\x00\x09\x00\x00\x00\x02" + b"\x81\x01\x06\x01\x01\x0c\x03\x01\xff"
     cam(q, "cam:drive(0, 0)")
-    seqs = [d[4:8] for _, _, d in q.udp_sent[2:]]
-    assert seqs == [b"\x00\x00\x00\x02", b"\x00\x00\x00\x03", b"\x00\x00\x00\x04"]
-    assert all(d[:4] == b"\x01\x00\x00\x09" for _, _, d in q.udp_sent[2:])
+    seqs = [d[4:8] for _, _, d in q.udp_sent[3:]]
+    assert seqs == [b"\x00\x00\x00\x03", b"\x00\x00\x00\x04", b"\x00\x00\x00\x05"]
+    assert all(d[:4] == b"\x01\x00\x00\x09" for _, _, d in q.udp_sent[3:])
     assert udp_payloads(q)[-1] == b"\x81\x01\x06\x01\x01\x0c\x03\x03\xff"
     cam(q, "cam:getPosition(function() end)")
     inq = q.udp_sent[-2:]
-    assert inq[0][2] == b"\x01\x10\x00\x05\x00\x00\x00\x05\x81\x09\x06\x12\xff"   # inquiry type 01 10
-    assert inq[1][2] == b"\x01\x10\x00\x05\x00\x00\x00\x06\x81\x09\x04\x47\xff"
+    assert inq[0][2] == b"\x01\x10\x00\x05\x00\x00\x00\x06\x81\x09\x06\x12\xff"   # inquiry type 01 10
+    assert inq[1][2] == b"\x01\x10\x00\x05\x00\x00\x00\x07\x81\x09\x04\x47\xff"
+    # a camera without CAM_VersionInq answers a syntax error for sequence 1: not reported
+    q.inject_udp(b"\x01\x11\x00\x04\x00\x00\x00\x01\x90\x60\x02\xff")
+    assert cam_status(q) == "VISCA Sony UDP 10.0.0.5:52381" and cam(q, "return cam.verSeq == nil")
     # Sony tilt speed tops at 0x17
     q.set_pin("MaxSpeed", 100)
     cam(q, "cam:drive(1, -1)")
@@ -461,7 +468,8 @@ def test_visca_inquiries_are_answered_per_reply():
     assert cam(q, "return cam.pending == nil and cam.posReplies == 1")
     # ACK / completion / 20-bit replies are parsed too; an error reply shows on CameraStatus
     q.inject_udp(b"\x01\x11\x00\x03\x00\x00\x00\x07\x90\x41\xff")
-    q.inject_udp(b"\x01\x11\x00\x0c\x00\x00\x00\x08" + b"\x90\x50" + b"\x01\x05\x04\x00\x00" + b"\x00\x00\x00\x00" + b"\xff")
+    # (a 5+4 nibble reply is the BRC-X1000 layout: 0x09CA7 = +170 degrees)
+    q.inject_udp(b"\x01\x11\x00\x0c\x00\x00\x00\x08" + b"\x90\x50" + b"\x00\x09\x0c\x0a\x07" + b"\x00\x00\x00\x00" + b"\xff")
     assert near(cam(q, "return cam.pan"), 170) and near(cam(q, "return cam.tilt"), 0)
     q.inject_udp(b"\x01\x11\x00\x04\x00\x00\x00\x09\x90\x60\x02\xff")
     assert cam_status(q) == "VISCA Sony UDP 10.0.0.5:52381: camera error 02"
@@ -494,6 +502,8 @@ def test_visca_camera_that_never_answers_sets_a_warning():
     assert cam(q, "return cam.misses") == 3
     # a newer inquiry replaces a pending one (the older caller gets nil)
     cam(q, "A = 'wait' B = 'wait' cam:getPosition(function(p) A = tostring(p) end) cam:getPosition(function(p) B = tostring(p) end)")
+    assert q.run("return A, B") == ("wait", "wait")                          # delivered on the next turn
+    q.advance(0.01)
     assert q.run("return A, B") == ("nil", "wait")
     q.advance(1.1)
     assert q.run("return B") == "nil"
@@ -592,3 +602,187 @@ def test_camera_drivers_stay_within_the_budget():
     b = d.budget()
     assert b["max_frame"] < 60000 and b["max_handler"] < 120000
     assert d.icon_writes("CameraView") >= 30                       # the view follows the motion
+
+
+# ------------------------------------------------------- review regressions
+
+def test_visca_tcp_queue_keeps_the_stops_across_a_reconnect():
+    """A socket drop during a drag: the queue holds state, so the flush on
+    reconnect ends with the pan/tilt and zoom stops, three times each."""
+    q = visca("PTZOptics", "10.0.0.9")
+    q.set_pin("MaxSpeed", 100)
+    n0 = len(q.tcp_sent)
+    q.tcp_event("Closed")                                   # a network blip; TcpSocket reconnects by itself
+    assert cam(q, "return cam.sock.connected") is False
+    for i in range(1, 21):                                  # 20 distinct speeds while offline
+        cam(q, "cam:drive(%f, 0)" % (i / 24.0))
+    assert cam(q, "return #cam.queue") == 1                  # only the newest drive is kept
+    cam(q, "cam:zoom(1)")
+    cam(q, "cam:drive(0, 0)")                               # the finger lifts: pan/tilt stop ...
+    cam(q, "cam:zoom(0)")                                   # ... and zoom stop
+    assert cam(q, "return #cam.queue, cam.queue[1].times, cam.queue[2].times") == (2, 3, 3)
+    assert len(q.tcp_sent) == n0
+    q.tcp_event("Connected", index=1)
+    flushed = [d for _, _, d in q.tcp_sent[n0:]]
+    assert flushed == [b"\x81\x01\x06\x01\x14\x01\x03\x03\xff"] * 3 + [b"\x81\x01\x04\x07\x00\xff"] * 3
+    assert cam(q, "return #cam.queue") == 0
+    # a drive after a queued stop supersedes it; an unrelated command keeps its place
+    q.tcp_event("Closed")
+    cam(q, "cam:drive(0, 0) cam:home() cam:drive(-1, 0)")
+    q.tcp_event("Connected", index=1)
+    flushed = [d for _, _, d in q.tcp_sent[n0 + 6:]]
+    assert flushed == [b"\x81\x01\x06\x04\xff", b"\x81\x01\x06\x01\x18\x01\x01\x03\xff"]
+    # 29 zoom changes then a zoom stop: the stop is what reaches the camera
+    q.tcp_event("Closed")
+    for i in range(1, 30):
+        cam(q, "cam:zoom(%f)" % ((i % 7 + 1) / 7.0))
+    cam(q, "cam:zoom(0)")
+    n1 = len(q.tcp_sent)
+    q.tcp_event("Connected", index=1)
+    assert [d for _, _, d in q.tcp_sent[n1:]] == [b"\x81\x01\x04\x07\x00\xff"] * 3
+    # commands without a kind are capped at 16, the oldest dropped first
+    q.tcp_event("Closed")
+    q.run("for i = 1, 20 do TouchPad.E.camera.sock:send(string.char(i)) end")
+    assert cam(q, "return #cam.queue") == 0                 # (the raw handle has no queue)
+    cam(q, "for i = 1, 20 do cam.queue[#cam.queue + 1] = { bytes = string.char(i), times = 1 } end")
+    q.run("""
+      local cam = TouchPad.E.camera
+      for i = 1, 4 do cam:drive(i / 10, 0) end             -- same kind: still one entry
+    """)
+    assert cam(q, "return #cam.queue, cam.queue[1].bytes") == (20, "\x02")   # entry 1 was dropped
+    q.tcp_event("Connected", index=1)
+    assert q.tcp_sent[-1][2] == b"\x81\x01\x06\x01\x0a\x01\x02\x03\xff"
+
+
+def test_visca_absolute_position_follows_the_reply_shape_and_model():
+    """20-bit cameras: the write uses the nibble count of the last position
+    reply and the scale of the model the version inquiry reported."""
+    def pos13(seq, pan, tilt):
+        return b"\x01\x11\x00\x0d\x00\x00\x00" + bytes([seq]) + b"\x90\x50" + pan + tilt + b"\xff"
+    def zoom7(seq):
+        return b"\x01\x11\x00\x07\x00\x00\x00" + bytes([seq]) + b"\x90\x50\x00\x00\x00\x00\xff"
+    # an SRG-360SHE: model 0604, 5+5 nibbles, 0x15400 = 170 degrees, "VV 00" speed bytes
+    q = visca("Sony")
+    q.inject_udp(b"\x01\x11\x00\x0a\x00\x00\x00\x01" + b"\x90\x50\x00\x01\x06\x04\x01\x23\x02\xff")
+    assert cam(q, "return cam.vendor, cam.model, cam.modelInfo.name") == (1, 0x0604, "SRG-360SHE")
+    assert cam_status(q) == "VISCA Sony UDP 10.0.0.5:52381 SRG-360SHE"
+    cam(q, "P = nil cam:getPosition(function(p, t, z) P = {p, t, z} end)")
+    q.inject_udp(pos13(5, b"\x00\x01\x04\x00\x00", b"\x00\x00\x00\x00\x00"))     # 0x01400 = +10 deg
+    q.inject_udp(zoom7(6))
+    assert q.run("return P[1], P[2], P[3]") == (10, 0, 0)
+    cam(q, "cam:gotoPosition(P[1], P[2])")
+    sent = udp_payloads(q)[-1]
+    assert sent == b"\x81\x01\x06\x02\x0c\x00" + b"\x00\x01\x04\x00\x00" + b"\x00\x00\x00\x00\x00" + b"\xff"
+    assert len(sent) == 17
+    cam(q, "cam:gotoPosition(-170, -30, 1)")
+    p = udp_payloads(q)
+    assert p[-2] == b"\x81\x01\x06\x02\x0c\x00" + b"\x0e\x0a\x0c\x00\x00" + b"\x0f\x0c\x04\x00\x00" + b"\xff"
+    assert p[-1] == b"\x81\x01\x04\x47\x04\x00\x00\x00\xff"
+    # an ILME-FR7 (051E): 5+5 nibbles at 0x09CA7 = 170 degrees, "vv ww" speed bytes
+    f = visca("Sony")
+    f.inject_udp(b"\x01\x11\x00\x0a\x00\x00\x00\x01" + b"\x90\x50\x00\x01\x05\x1e\x00\x10\x02\xff")
+    assert cam_status(f) == "VISCA Sony UDP 10.0.0.5:52381 ILME-FR7"
+    cam(f, "P = nil cam:getPosition(function(p, t, z) P = {p, t, z} end)")
+    f.inject_udp(pos13(5, b"\x00\x09\x0c\x0a\x07", b"\x0f\x0e\x04\x05\x0b"))     # +170, -30 deg
+    f.inject_udp(zoom7(6))
+    pan, tilt = f.run("return P[1], P[2]")
+    assert near(pan, 170) and near(tilt, -30, 1e-3)
+    cam(f, "cam:gotoPosition(170, -30)")
+    assert udp_payloads(f)[-1] == b"\x81\x01\x06\x02\x0c\x0c" + b"\x00\x09\x0c\x0a\x07" + b"\x0f\x0e\x04\x05\x0b" + b"\xff"
+    # a BRC-X1000 reply (5+4 nibbles) is that layout whatever the model: 0x00937 = 10 degrees
+    x = visca("Sony")
+    cam(x, "P = nil cam:getPosition(function(p, t, z) P = {p, t, z} end)")
+    x.inject_udp(b"\x01\x11\x00\x0c\x00\x00\x00\x05" + b"\x90\x50" + b"\x00\x00\x09\x03\x07" + b"\x00\x00\x00\x00" + b"\xff")
+    x.inject_udp(zoom7(6))
+    assert near(x.run("return P[1]"), 10, 1e-3) and x.run("return P[2]") == 0
+    cam(x, "cam:gotoPosition(10, 0)")
+    assert udp_payloads(x)[-1] == b"\x81\x01\x06\x02\x0c\x0c" + b"\x00\x00\x09\x03\x07" + b"\x00\x00\x00\x00" + b"\xff"
+    # 5+5 without a model id: the SRG scale is assumed and said once on CameraStatus
+    u = visca("Sony")
+    cam(u, "P = nil cam:getPosition(function(p, t, z) P = {p, t, z} end)")
+    u.inject_udp(pos13(5, b"\x00\x01\x04\x00\x00", b"\x00\x00\x00\x00\x00"))
+    u.inject_udp(zoom7(6))
+    assert u.run("return P[1]") == 10
+    assert cam_status(u) == "VISCA Sony UDP 10.0.0.5:52381: 20-bit positions, SRG-360SHE scale assumed (no model id)"
+    cam(u, "cam:gotoPosition(10, 0)")
+    assert udp_payloads(u)[-1] == b"\x81\x01\x06\x02\x0c\x00" + b"\x00\x01\x04\x00\x00" + b"\x00\x00\x00\x00\x00" + b"\xff"
+    # a later model id re-scales the form; a 16-bit reply brings 4+4 back
+    u.inject_udp(b"\x01\x11\x00\x0a\x00\x00\x00\x01" + b"\x90\x50\x00\x01\x05\x1e\x00\x10\x02\xff")
+    cam(u, "cam:gotoPosition(10, 0)")
+    assert udp_payloads(u)[-1] == b"\x81\x01\x06\x02\x0c\x0c" + b"\x00\x00\x09\x03\x07" + b"\x00\x00\x00\x00\x00" + b"\xff"
+    cam(u, "cam:getPosition(function() end)")
+    u.inject_udp(b"\x01\x11\x00\x0b\x00\x00\x00\x09" + b"\x90\x50" + b"\x00\x02\x00\x00" + b"\x00\x00\x00\x00" + b"\xff")
+    cam(u, "cam:gotoPosition(10, 0)")
+    assert udp_payloads(u)[-1] == b"\x81\x01\x06\x02\x0c\x0c" + b"\x00\x02\x00\x00" + b"\x00\x00\x00\x00" + b"\xff"
+    # a non-Sony vendor id shows the raw model and keeps the 16-bit form
+    o = visca("Marshall")
+    o.inject_udp(b"\x01\x11\x00\x0a\x00\x00\x00\x01" + b"\x90\x50\x00\x20\x01\x02\x00\x10\x02\xff")
+    assert cam_status(o) == "VISCA Marshall UDP 10.0.0.5:52381 model 0102"
+    cam(o, "cam:gotoPosition(10, 10)")
+    assert udp_payloads(o)[-1] == b"\x81\x01\x06\x02\x0c\x0c" + b"\x00\x02\x00\x00" + b"\x00\x02\x00\x00" + b"\xff"
+    q.budget()
+
+
+def test_qsys_zoom_held_across_a_pan_stop_keeps_the_knob_speed():
+    q, c = qsys_cam()
+    cam(q, "cam:zoom(1)")                                   # Zoom + held: setup.zoom.speed 0.4 -> 0.5
+    assert near(c.get("setup.zoom.speed")["Value"], 0.5)
+    cam(q, "cam:drive(1, 0)")                               # a joystick nudge ...
+    assert near(c.get("setup.pan.speed")["Value"], 0.5)
+    cam(q, "cam:drive(0, 0)")                               # ... and release while the zoom is held
+    assert c.get("zoom.in")["Boolean"] is True
+    assert near(c.get("setup.zoom.speed")["Value"], 0.5)   # the knob speed still applies
+    assert near(c.get("setup.pan.speed")["Value"], 0.3)    # pan and tilt sliders are restored
+    assert near(c.get("setup.tilt.speed")["Value"], 0.2)
+    cam(q, "cam:zoom(0)")
+    assert c.get("zoom.in")["Boolean"] is False
+    assert near(c.get("setup.zoom.speed")["Value"], 0.4)   # restored by the zoom stop
+    # stop() while both are held restores all three
+    cam(q, "cam:drive(-1, 1) cam:zoom(-1) cam:stop()")
+    assert near(c.get("setup.pan.speed")["Value"], 0.3) and near(c.get("setup.tilt.speed")["Value"], 0.2)
+    assert near(c.get("setup.zoom.speed")["Value"], 0.4)
+    assert cam(q, "return next(cam.saved) == nil")
+
+
+def test_visca_getposition_repoll_from_a_nil_answer_does_not_recurse():
+    q = visca("Sony")
+    q.run("""
+      N = 0
+      local cam = TouchPad.E.camera
+      local function cb(p) N = N + 1 if p == nil then cam:getPosition(cb) end end
+      cam:getPosition(cb)
+      OK, ERR = pcall(cam.getPosition, cam, function(p) B = tostring(p) end)
+    """)
+    assert q.run("return OK, N") == (True, 0)               # nothing re-entered the call
+    assert cam(q, "return cam.pending ~= nil")
+    q.advance(0.01)
+    assert q.run("return N") == 1                           # the old caller got nil once, re-polled ...
+    q.advance(0.01)
+    assert q.run("return B, N") == ("nil", 1)               # ... and displaced the newer caller
+    # the surviving inquiry is answered normally
+    q.inject_udp(b"\x01\x11\x00\x0b\x00\x00\x00\x09" + b"\x90\x50" + b"\x00\x02\x00\x00" + b"\x00\x00\x00\x00" + b"\xff")
+    q.inject_udp(b"\x01\x11\x00\x07\x00\x00\x00\x0a" + b"\x90\x50\x00\x00\x00\x00\xff")
+    assert q.run("return N") == 2 and cam(q, "return cam.pending == nil")
+    assert not q.errors
+    q.budget()
+
+
+def test_qsys_zoom_round_trip_keeps_the_camera_units():
+    q, c = qsys_cam()                                       # ptz.preset "12.5, -3.0, 25"
+    assert cam(q, "return cam:getPosition()") == (12.5, -3.0, 0.25)
+    cam(q, "local p, t, z = cam:getPosition() cam:gotoPosition(p, t, z)")
+    assert c.get("ptz.preset")["String"] == "12.5000, -3.0000, 25"
+    assert cam(q, "return cam.zoomDiv") == 100
+    # a percent camera at 1 % after the divisor is known: 1 % and not full zoom
+    c.set("ptz.preset", "0.0, 0.0, 1")
+    assert cam(q, "return cam:getPosition()") == (0.0, 0.0, 0.01)
+    # 0..16384 units
+    q2, c2 = qsys_cam("Cam2", dict(NC_CONTROLS, **{"ptz.preset": {"String": "0 0 8192"}}))
+    assert cam(q2, "return cam:getPosition()") == (0.0, 0.0, 0.5)
+    cam(q2, "cam:gotoPosition(5, 5, 0.25)")
+    assert c2.get("ptz.preset")["String"] == "5 5 4096"
+    # a 0..1 camera writes 0..1 with decimals, as before
+    q3, c3 = qsys_cam("Cam3", dict(NC_CONTROLS, **{"ptz.preset": {"String": "0.0 0.0 0.5"}}))
+    assert cam(q3, "return cam:getPosition()") == (0.0, 0.0, 0.5)
+    cam(q3, "cam:gotoPosition(1, 1, 0.75)")
+    assert c3.get("ptz.preset")["String"] == "1.0000 1.0000 0.7500"

@@ -27,6 +27,7 @@ Modes = Modes or {}
 
 do
   local HINT = "Tap a key, swipe left to delete"
+  local SHORT_HINT = "Swipe left deletes"          -- for pads too narrow for the full hint
   -- 3 x 4 keys, row by row; "C" clears, "E" enters.
   local KEYS = { "1", "2", "3", "4", "5", "6", "7", "8", "9", "C", "0", "E" }
   local MAX_CODES, MAX_CODE_LEN, MAX_ENTRY, MAX_PIN_TEXT = 32, 16, 16, 1024
@@ -107,6 +108,7 @@ do
         flash = nil, flashHandle = nil,         -- key index highlighted after a tap
         feedback = nil, feedbackText = "", feedbackHandle = nil,  -- "ok" | "bad"
         downKey = nil, downX = 0, downY = 0,    -- key under a resting finger
+        keyGesture = nil,      -- gesture text of the key pressed at this lift (re-applied after the engine's TAP)
         masked = true, auto = true, learn = false,
         keys = {},             -- { x, y, w, h, label } per key, computed once
       }
@@ -125,6 +127,7 @@ do
         self.keys[i] = { x = m + col * (keyW + g), y = gridY + row * (keyH + g), w = keyW, h = keyH, label = KEYS[i] }
       end
       local keyRadius = U.clamp(math.floor(math.min(keyW, keyH) * 0.16), 3, 14)
+      local hintText = (Font.width(HINT, 12, nil) <= W - 16) and HINT or SHORT_HINT
       local digitSize = U.clamp(math.floor(math.min(keyH * 0.5, keyW * 0.45)), 10, 44)
 
       local function hitKey(x, y)
@@ -225,6 +228,7 @@ do
         -- lock earned by a submit keeps the last code there (see submit).
         if self.entry ~= "" then setEntry("") end
         E.out("Locked", true)
+        self.keyGesture = "LOCKED"                -- a lock earned by a key keeps LOCKED after the engine's TAP
         E.setGesture("LOCKED")
         -- One tick per second redraws the countdown and ends the lockout.
         self.lockTimer = E.every(1, function()
@@ -249,19 +253,22 @@ do
           E.out("Pin", entry)
           E.out("Learn", false)
           showFeedback("ok", "Code stored")
-          E.setGesture("CODE STORED")
+          self.keyGesture = "CODE STORED"
+          E.setGesture(self.keyGesture)
           return
         end
         if matches(entry) then
           self.tries = 0
           E.pulse("Accepted")
           showFeedback("ok", "Accepted")
-          E.setGesture("ACCEPTED")
+          self.keyGesture = "ACCEPTED"
+          E.setGesture(self.keyGesture)
           return
         end
         self.tries = self.tries + 1
         E.pulse("Rejected")
-        E.setGesture("REJECTED")
+        self.keyGesture = "REJECTED"
+        E.setGesture(self.keyGesture)
         if self.tries >= ctlInt("MaxTries", 5, MIN_TRIES, MAX_TRIES) then
           lock(ctlInt("LockoutSeconds", 60, MIN_LOCKOUT, MAX_LOCKOUT))
         else
@@ -289,13 +296,16 @@ do
         local label = KEYS[i]
         if label == "C" then
           setEntry("")
-          E.setGesture("CLEAR")
+          self.keyGesture = "CLEAR"
+          E.setGesture(self.keyGesture)
         elseif label == "E" then
-          E.setGesture("ENTER")
+          self.keyGesture = "ENTER"
+          E.setGesture(self.keyGesture)
           submit()
         else
           if #self.entry < MAX_ENTRY then setEntry(self.entry .. label) end
-          E.setGesture(self.masked and "KEY *" or ("KEY " .. label))   -- a masked pad never shows the digit
+          self.keyGesture = self.masked and "KEY *" or ("KEY " .. label)   -- a masked pad never shows the digit
+          E.setGesture(self.keyGesture)
           autoCheck()
         end
         E.invalidate()
@@ -319,7 +329,7 @@ do
       end
 
       function self:onTouchStart(x, y, t)
-        self.downX, self.downY = x, y
+        self.downX, self.downY, self.keyGesture = x, y, nil
         self.downKey = (not self.locked) and hitKey(x, y) or nil
         E.invalidate()
       end
@@ -337,7 +347,7 @@ do
       -- rebind) or a swipe enters nothing.
       function self:onTouchEnd(x, y, t, info)
         local i = self.downKey
-        self.downKey = nil
+        self.downKey, self.keyGesture = nil, nil
         if i and not info.aborted and info.swipe == nil then
           pressKey(i)
         else
@@ -345,8 +355,14 @@ do
         end
       end
 
+      -- The engine writes TAP (and DOUBLE TAP) to Gesture right after
+      -- onTouchEnd: the key's own text (KEY 5, CLEAR, ACCEPTED...) is the
+      -- useful one, so it is put back. A gesture ends the verdict text only
+      -- when the key set none (a lock keeps LOCKED).
       function self:onGesture(gst)
-        if gst.type == "swipe" and gst.dir == "left" then
+        if gst.type == "tap" or gst.type == "double" then
+          if self.keyGesture then E.setGesture(self.keyGesture) end
+        elseif gst.type == "swipe" and gst.dir == "left" then
           backspace()
         end
       end
@@ -484,7 +500,7 @@ do
           drawKeys(c)
         end
         if E.hint and not self.locked then
-          Shapes.hint(c, T, HINT, W, H)
+          Shapes.hint(c, T, hintText, W, H)
         end
       end
 

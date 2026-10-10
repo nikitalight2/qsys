@@ -361,3 +361,133 @@ def test_ptz_frames_stay_within_budget():
     assert b["max_frame"] < 60000 and b["max_handler"] < 120000
     assert len(q.icon()) < 15000
     assert len(q.camera_view()) < 20000
+
+
+# ---------------------------------------------------------------- review fixes
+
+def test_ptz_slow_drag_has_no_speed_spike_at_the_drag_threshold():
+    """The movement accumulated below the drag threshold is applied over the
+    time it took, not over the last report interval: 2 px every 50 ms reads
+    40 px/s from the first applied report on."""
+    q = boot()
+    q.touch([(300, 300)], lift=False)
+    q.advance(0.0)
+    seen = []
+    for i in range(1, 12):
+        q.touch([(300 + 2 * i, 300)], lift=False)
+        seen.append(speeds(q)[0])
+    steady = 40 / (480 * 2.0)                          # 0.0417
+    assert all(v == 0 for v in seen[:6])               # 12 px: still a possible tap
+    assert near(aim(q)[0], 0.5 + 22 / 480)             # nothing of the movement is lost
+    for v in seen[6:]:
+        assert near(v, steady, 0.005), seen             # no 7x jolt on report 7
+    assert leds(q) == (False, True, False, False)
+    q.lift()
+
+
+def test_ptz_resume_speed_spans_the_pause():
+    """A report that resumes a drag after an inferred lift carries the whole
+    movement since the last report: its speed is that movement over the pause."""
+    q = boot()
+    q.touch([(100, 250), (150, 250), (200, 250)], lift=False)
+    t0 = q.run("return TouchPad.E.now()")
+    q.advance(0.5)                                      # inferred lift: speeds 0
+    assert speeds(q) == (0, 0)
+    pan = aim(q)[0]
+    q.touch([(215, 250)], lift=False)
+    t1 = q.run("return TouchPad.E.now()")
+    q.advance(0.15)                                     # the one-axis report lands after 0.12 s; stall is 0.15 s
+    ps = speeds(q)[0]
+    expected = (15 / (t1 - t0)) / (480 * 2.0)          # about 0.03 (the old code reported 0.47)
+    assert near(ps, expected, 0.01) and 0 < ps < 0.1, (ps, expected)
+    assert near(aim(q)[0], pan + 15 / 480)              # the aim still catches up by the 15 px
+    q.lift()
+    assert q.pulses("Press") == 1 and q.pulses("Release") == 1
+
+
+QSYS_CAM = {
+    "pan.left": {"Boolean": False}, "pan.right": {"Boolean": False},
+    "tilt.up": {"Boolean": False}, "tilt.down": {"Boolean": False},
+    "zoom.in": {"Boolean": False}, "zoom.out": {"Boolean": False},
+    "setup.zoom.speed": {"Value": 0.4, "Min": 0, "Max": 1},
+    "preset.home.load": {"Boolean": False},
+    "ptz.preset": {"String": "0, 0, 50"},
+}
+
+
+def zoom_readout(q):
+    m = re.search(r"ZOOM x[\d.]+", q.icon())
+    return m and m.group(0)
+
+
+def test_ptz_home_keeps_the_zoom_a_qsys_camera_reports():
+    """Only the Demo camera's home resets the zoom: after a Q-SYS camera home
+    the readout and view box follow what the camera reports (zoom 0.5 -> x6.5)."""
+    q = QSys(mode="PTZ Pad", props={"Camera Control": "Q-SYS Camera", "Camera Name": "Cam1"},
+             picker="Color_Picker", plugin=PLUGIN, runtime=False)
+    cam = q.add_component("Cam1", "onvif_camera_operative", controls=dict(QSYS_CAM))
+    q._dispatch("load", q._chunk)
+    q.advance(0.2)
+    assert zoom_readout(q) == "ZOOM x6.5"
+    w_zoomed = view_box(q.icon())[2]
+    q.set_pin("Home", True)
+    q.set_pin("Home", False)
+    q.advance(0.5)                                      # past the first re-read
+    assert aim(q) == (0.5, 0.5)
+    assert cam.get("ptz.preset")["String"] == "0, 0, 50"
+    assert zoom_readout(q) == "ZOOM x6.5" and near(view_box(q.icon())[2], w_zoomed, 0.1)
+    q.advance(3.0)
+    assert zoom_readout(q) == "ZOOM x6.5"
+    # the camera does move the zoom on its own: the later re-read picks it up
+    cam.set("ptz.preset", "0, 0, 0")
+    q.set_pin("Home", True)
+    q.set_pin("Home", False)
+    q.advance(3.0)
+    assert zoom_readout(q) == "ZOOM x1.0"
+
+
+def test_ptz_demo_home_zoom_is_re_read_not_assumed():
+    q = boot(props={"Camera Control": DEMO})
+    q.set_pin("ZoomIn", True)
+    q.advance(1.0)
+    q.set_pin("ZoomIn", False)
+    q.advance(0.3)
+    assert "ZOOM x1.0" not in q.icon()
+    q.double_tap(200, 200, gap=0.15, panel_touch=True)   # the Demo home glides the zoom to 0
+    q.advance(3.0)
+    assert near(cam(q, "return cam.zoomPos"), 0, 1e-6) and "ZOOM x1.0" in q.icon()
+
+
+def test_ptz_home_held_longer_than_the_guard_homes_once():
+    """A Home input held true (a toggle or a held button): its release is not
+    a second home and does not discard an aim change made meanwhile."""
+    q = boot()
+    q.set_pin("Home", True)
+    q.advance(0.3)
+    right_drag(q, dx=200)
+    assert near(aim(q)[0], 0.5 + 200 / 480)
+    q.set_pin("Home", False)                            # 0.8 s after the press
+    q.advance(0.5)
+    assert near(aim(q)[0], 0.5 + 200 / 480)
+    # a toggle left true for seconds, released much later: still one home
+    q.set_pin("Home", True)
+    q.advance(0.5)
+    assert aim(q) == (0.5, 0.5)
+    up_drag(q, x0=320, dy=100)                          # both axes change from the last spot
+    moved = aim(q)
+    assert moved != (0.5, 0.5)
+    q.advance(5.0)
+    q.set_pin("Home", False)
+    q.advance(0.5)
+    assert aim(q) == moved
+    # the UCI button (handler with Boolean false, no press seen) still homes
+    q.trigger("Home")
+    q.advance(0.5)
+    assert aim(q) == (0.5, 0.5)
+    # and a pulse keeps homing exactly once with one outgoing Home pulse
+    right_drag(q, dx=100)
+    q.reset_pulses()
+    q.set_pin("Home", True)
+    q.set_pin("Home", False)
+    q.advance(0.5)
+    assert aim(q) == (0.5, 0.5) and q.pulses("Home") == 1

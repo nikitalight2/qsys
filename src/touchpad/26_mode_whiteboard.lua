@@ -16,7 +16,18 @@
 -- handler simplifies a long stroke at once, a stroke keeps at most 400 points
 -- (halved when it grows past that), the board keeps at most 60 strokes (the
 -- oldest is dropped) and at most 2400 points (the oldest strokes are halved),
--- so the SVG stays far under the canvas limit.
+-- so the SVG stays far under the canvas limit. A stroke ended by an inferred
+-- lift continues when the finger comes back within 1.6 s close to where it
+-- left (a few pen widths); a touch farther away is a new stroke, so letters
+-- written in quick succession without PanelTouch are not joined.
+--
+-- Eraser budget: the finger report is one segment; a stroke is tested
+-- against it through its bounding box, then blocks of 16 kept points through
+-- the block box's extent across and along the finger line, then segment by
+-- segment with the vertices' signed distance and position in the finger
+-- frame (segments on one side farther than the reach, or beyond the ends,
+-- are rejected with two products each); the exact test covers both finger
+-- end points, both stroke vertices and a proper crossing.
 --
 -- Rendering budget: a finished stroke is one cached element string replayed
 -- through c:raw; the live stroke is rendered chunk by chunk as it is
@@ -45,13 +56,15 @@ do
   local SIMPLIFY_TOL = 0.8        -- px
   local MIN_STEP = 1.0            -- px between raw points
   local DOT_MOVE = 2.5            -- px: a touch that moved less is a dot
-  local TRIGGER_GUARD = 0.5       -- s: the trailing edge of a pulse just handled is not a second press
+  local TRIGGER_GUARD = 1.0       -- s: the false edge right after a press accepted with Boolean true is its trailing edge
+  local BLOCK = 16                -- kept points per eraser hit-test block
+  local RESUME_WIDTHS = 3         -- a resume farther than this many pen widths (at least resumeGap px) is a new stroke
   local RESUME_WINDOW = 1.6       -- s: a stroke ended by an inferred lift can be continued
   local TOAST = 1.5               -- s: "Saved" / "Not saved" on the pad
   local REFRESH_AFTER = 0.06      -- s: between lazy re-renders
   local STROKE_SVG_LIMIT = 12000  -- one stroke of 400 points needs about 5000 characters
 
-  local floor, max, min, sqrt = math.floor, math.max, math.min, math.sqrt
+  local floor, max, min, sqrt, abs = math.floor, math.max, math.min, math.sqrt, math.abs
   local concat = table.concat
 
   -- ---------- geometry helpers ----------
@@ -69,19 +82,6 @@ do
     return qx * qx + qy * qy
   end
 
-  local function cross(ax, ay, bx, by, cx, cy)
-    return (bx - ax) * (cy - ay) - (by - ay) * (cx - ax)
-  end
-
-  -- True when the segments AB and CD cross properly.
-  local function segmentsCross(ax, ay, bx, by, cx, cy, dx, dy)
-    local d1 = cross(cx, cy, dx, dy, ax, ay)
-    local d2 = cross(cx, cy, dx, dy, bx, by)
-    local d3 = cross(ax, ay, bx, by, cx, cy)
-    local d4 = cross(ax, ay, bx, by, dx, dy)
-    return ((d1 > 0 and d2 < 0) or (d1 < 0 and d2 > 0)) and ((d3 > 0 and d4 < 0) or (d3 < 0 and d4 > 0))
-  end
-
   -- ---------- stroke engine ----------
 
   -- Coordinates are kept on a 0.5 px grid: a finger does not need more, and
@@ -95,6 +95,7 @@ do
     x, y = q2(x), q2(y)
     return { pts = { x, y }, raw = { x, y }, color = color, width = width, moved = 0,
              minX = x, minY = y, maxX = x, maxY = y, dot = false,
+             blocks = nil,          -- finished: hit-test block boxes (built lazily)
              svg = nil,             -- finished: cached element string
              stale = false, staleAt = 0,   -- finished: svg shows the right shape but wants a re-render
              keptParts = nil }      -- live: rendered chunks of the kept points
@@ -118,7 +119,7 @@ do
     out[#out + 1] = pts[2 * n - 1]
     out[#out + 1] = pts[2 * n]
     s.pts = out
-    s.keptParts = nil
+    s.keptParts, s.blocks = nil, nil
     if s.svg then s.stale, s.staleAt = true, now end
   end
 
@@ -159,7 +160,35 @@ do
     s.dot = (s.moved < DOT_MOVE) or pointCount(s) < 2
   end
 
-  -- True when the finger segment AB passes within r of the stroke.
+  -- Bounding boxes of the kept points in blocks of BLOCK vertices, flat
+  -- (minX, minY, maxX, maxY per block). Block k holds the vertices
+  -- k*BLOCK+1 .. (k+1)*BLOCK+1, so neighbouring blocks share a vertex and
+  -- every segment belongs to one block.
+  local function buildBlocks(s)
+    local pts = s.pts
+    local n = #pts // 2
+    local blocks, nb = {}, 0
+    local i = 1
+    while i < n do
+      local last = min(i + BLOCK, n)
+      local x0, y0 = pts[2 * i - 1], pts[2 * i]
+      local x1, y1 = x0, y0
+      for j = i + 1, last do
+        local x, y = pts[2 * j - 1], pts[2 * j]
+        if x < x0 then x0 = x elseif x > x1 then x1 = x end
+        if y < y0 then y0 = y elseif y > y1 then y1 = y end
+      end
+      blocks[nb + 1], blocks[nb + 2], blocks[nb + 3], blocks[nb + 4] = x0, y0, x1, y1
+      nb = nb + 4
+      i = last
+    end
+    s.blocks = blocks
+    return blocks
+  end
+
+  -- True when the finger segment AB passes within r of the stroke. Points
+  -- are taken in the finger frame (A at the origin, u along AB): s is the
+  -- position along the finger, d the signed distance across it.
   local function strokeHit(s, ax, ay, bx, by, r)
     local reach = r + s.width / 2
     local sx0, sy0 = min(ax, bx) - reach, min(ay, by) - reach
@@ -171,21 +200,51 @@ do
     if s.dot or n < 2 then
       return segDist2(pts[1], pts[2], ax, ay, bx, by) <= r2
     end
-    local px, py = pts[1], pts[2]
-    if segDist2(px, py, ax, ay, bx, by) <= r2 then return true end
-    for i = 2, n do
-      local qx, qy = pts[2 * i - 1], pts[2 * i]
-      -- the segment's own box first: most segments are far from the finger
-      local lo, hi = min(px, qx), max(px, qx)
-      if hi >= sx0 and lo <= sx1 then
-        lo, hi = min(py, qy), max(py, qy)
-        if hi >= sy0 and lo <= sy1 then
-          if segDist2(qx, qy, ax, ay, bx, by) <= r2 then return true end
-          if segmentsCross(ax, ay, bx, by, px, py, qx, qy) then return true end
-          if segDist2(ax, ay, px, py, qx, qy) <= r2 then return true end
+    local ux, uy = bx - ax, by - ay
+    local len = sqrt(ux * ux + uy * uy)
+    if len > 0 then ux, uy = ux / len, uy / len else ux, uy = 1, 0 end
+    local aux, auy = abs(ux), abs(uy)
+    local sHi = len + reach
+    local blocks = s.blocks or buildBlocks(s)
+    for k = 0, #blocks // 4 - 1 do
+      local x0, y0, x1, y1 = blocks[4 * k + 1], blocks[4 * k + 2], blocks[4 * k + 3], blocks[4 * k + 4]
+      local hw, hh = (x1 - x0) / 2, (y1 - y0) / 2
+      local cx, cy = x0 + hw - ax, y0 + hh - ay
+      local dc = cx * uy - cy * ux
+      local ext = auy * hw + aux * hh           -- half extent of the box across the finger line
+      if dc - ext <= reach and dc + ext >= -reach then
+        local sc = cx * ux + cy * uy
+        ext = aux * hw + auy * hh               -- half extent along it
+        if sc + ext >= -reach and sc - ext <= sHi then
+          local i0 = k * BLOCK + 1
+          local i1 = min(i0 + BLOCK, n)
+          local px, py = pts[2 * i0 - 1] - ax, pts[2 * i0] - ay
+          local dp, sp = px * uy - py * ux, px * ux + py * uy
+          for i = i0 + 1, i1 do
+            local qx, qy = pts[2 * i - 1] - ax, pts[2 * i] - ay
+            local dq, sq = qx * uy - qy * ux, qx * ux + qy * uy
+            if not ((dp > reach and dq > reach) or (dp < -reach and dq < -reach)
+                    or (sp < -reach and sq < -reach) or (sp > sHi and sq > sHi)) then
+              -- the stroke's vertices against the finger segment
+              local e = 0
+              if sp < 0 then e = sp * sp elseif sp > len then e = (sp - len) * (sp - len) end
+              if dp * dp + e <= r2 then return true end
+              e = 0
+              if sq < 0 then e = sq * sq elseif sq > len then e = (sq - len) * (sq - len) end
+              if dq * dq + e <= r2 then return true end
+              -- a proper crossing of the finger segment
+              if (dp > 0 and dq < 0) or (dp < 0 and dq > 0) then
+                local sx = sp + (sq - sp) * dp / (dp - dq)
+                if sx >= 0 and sx <= len then return true end
+              end
+              -- the finger's end points against the stroke segment
+              if segDist2(0, 0, px, py, qx, qy) <= r2 then return true end
+              if len > 0 and segDist2(len * ux, len * uy, px, py, qx, qy) <= r2 then return true end
+            end
+            px, py, dp, sp = qx, qy, dq, sq
+          end
         end
       end
-      px, py = qx, qy
     end
     return false
   end
@@ -229,7 +288,7 @@ do
         L.sideCaption(ctx, "PAD")
         L.sideButton(ctx, "Lock", "LOCK")
       elseif page == "Setup" then
-        local ix, iy, iw = L.section(ctx, "W H I T E B O A R D", 118)
+        local ix, iy, iw = L.section(ctx, "W H I T E B O A R D", 130)
         L.caption("WIDTH", { ix, iy }, { 56, 10 })
         L.knob("PenWidth", { ix + 12, iy + 12 }, { 32, 32 })
         L.caption("PEN COLOUR", { ix + 72, iy }, { 120, 10 }, "Left")
@@ -237,8 +296,8 @@ do
         L.toggle("Eraser", "ERASER", { ix + 204, iy + 12 }, { iw - 204, 24 })
         L.caption("LAST SNAPSHOT FILE", { ix, iy + 52 }, { iw, 10 }, "Left")
         L.readout("LastFile", { ix, iy + 64 }, { iw, 22 }, { fontSize = 9 })
-        L.label("Snapshot writes Whiteboard/<time>.svg under design/ (Emulate) or media/ (Core).\nUndo removes the last stroke; the board keeps the newest 60 strokes.",
-                { ix, iy + 90 }, { iw, 28 })
+        L.label("Snapshot writes Whiteboard/<time>.svg under design/ (Emulate) or media/ (Core).\nUndo removes the last stroke; the board keeps the newest 60 strokes.\nHandwriting: wire PanelTouch so every lift is certain and letters are never joined.",
+                { ix, iy + 90 }, { iw, 40 })
       end
     end,
 
@@ -256,10 +315,11 @@ do
         layer = nil,             -- cached SVG of the finished strokes (nil = rebuild)
         resumable = nil,         -- { stroke, at }: a stroke ended by an inferred lift
         toast = nil, toastHandle = nil, staleHandle = nil,
-        acted = {},              -- name -> time of the last trigger handled
+        acted = {},              -- name -> { at, pressed }: the last trigger call accepted
         lastStamp = nil, stampN = 0,
       }
       local eraseR = U.clamp(floor(min(W, H) * 0.03), 8, 20)
+      local resumeGap = U.clamp(floor(min(W, H) * 0.04), 12, 24)
       local radius = U.clamp(tonumber(E.props["Corner Radius"]) or 18, 0, 40)
       local background = tostring(E.props["Background"] or "Solid")
 
@@ -445,6 +505,7 @@ do
         end
         s.keptParts = nil
         trimTotal(now)
+        if not s.dot and not s.blocks then buildBlocks(s) end
         self.layer = nil
       end
 
@@ -529,16 +590,20 @@ do
         end
       end
 
-      -- A Trigger's handler may run with Boolean already false (ctl:Trigger
-      -- or a UCI button); the trailing edge of a pulse just handled is skipped.
+      -- A Trigger's handler may run with Boolean already false (ctl:Trigger,
+      -- a UCI button or the Pad page button), so every false call counts as a
+      -- press, except the false edge that follows a call accepted with Boolean
+      -- true within TRIGGER_GUARD: that is the trailing edge of the same pulse.
       local function triggered(name, ctl)
         local now = E.now()
-        local last = self.acted[name] or -100
-        if ctl.Boolean or now - last >= TRIGGER_GUARD then
-          self.acted[name] = now
-          return true
+        local last = self.acted[name]
+        local pressed = ctl.Boolean and true or false
+        if not pressed and last and last.pressed and now - last.at < TRIGGER_GUARD then
+          last.pressed = false
+          return false
         end
-        return false
+        self.acted[name] = { at = now, pressed = pressed }
+        return true
       end
 
       -- ---------- engine hooks ----------
@@ -573,29 +638,39 @@ do
       end
 
       function self:onTouchEnd(x, y, t, info)
-        self.down = false
-        if self.live then
+        local px, py = self.fx, self.fy
+        self.down, self.fx, self.fy = false, x, y
+        if self.eraser then
+          erase(px, py, x, y)
+        elseif self.live then
           addPoint(self.live, x, y, renderChunk, t)
           local s = self.live
           endStroke(t)
           if info and info.inferred and not info.aborted and not s.dot then
-            self.resumable = { stroke = s, at = t }
+            self.resumable = { stroke = s, at = t, x = x, y = y }
           end
           E.dbg(string.format("whiteboard stroke %d: %d points%s", #self.strokes, pointCount(s), s.dot and " (dot)" or ""))
         end
         E.invalidate()
       end
 
-      -- An inferred lift taken back: the stroke it ended continues.
+      -- An inferred lift taken back: the stroke it ended continues when the
+      -- finger comes back close to where it left; farther away (the next
+      -- letter) it is a new stroke.
       function self:onTouchResume(x, y, t)
         self.down, self.fx, self.fy = true, x, y
         local r = self.resumable
         self.resumable = nil
+        local near = false
+        if r and t - r.at <= RESUME_WINDOW and self.strokes[#self.strokes] == r.stroke then
+          local gap = max(resumeGap, RESUME_WIDTHS * r.stroke.width)
+          near = (x - r.x) * (x - r.x) + (y - r.y) * (y - r.y) <= gap * gap
+        end
         if self.eraser then
           erase(x, y, x, y)
-        elseif r and t - r.at <= RESUME_WINDOW and self.strokes[#self.strokes] == r.stroke then
+        elseif near then
           local s = r.stroke
-          s.dot, s.svg, s.stale, s.keptParts = false, nil, false, nil
+          s.dot, s.svg, s.stale, s.keptParts, s.blocks = false, nil, false, nil, nil
           self.live = s
           self.layer = nil
           addPoint(s, x, y, renderChunk, t)

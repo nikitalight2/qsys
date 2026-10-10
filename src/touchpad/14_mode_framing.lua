@@ -11,16 +11,22 @@
 -- a corrected shot within the same view. A new box drawn outside it first
 -- re-bases the pad on the current shot, so boxes add up: each is relative
 -- to the view the camera has at that moment. A box smaller than 8 % of the
--- pad (width or height) is ignored; a nudge that never crosses the drag
--- threshold changes nothing. A certain lift applies at once; an inferred
--- lift (no Panel Touch) applies 1.5 s later unless the drag resumes.
--- Double tap = zoom out (Reset: the whole home view; pulses Reset). Home
--- (Both) does the same and sends the camera home. InvertPan / InvertTilt
--- mirror the direction of the outputs and of the camera. HFOV and
--- OpticalZoom turn a frame into camera degrees and a zoom position:
--- pan = (cx - 0.5) * HFOV, tilt = (0.5 - cy) * HFOV * 9 / 16, zoom position
--- = (1 / fw - 1) / (OpticalZoom - 1), sent through gotoPosition. Zoom +/-
--- drive the camera and the pad adopts the camera's zoom afterwards.
+-- pad (width or height) is ignored and leaves the view and the previous box
+-- exactly as they were; a nudge that never crosses the drag threshold
+-- changes nothing. A certain lift applies at once; an inferred lift (no
+-- Panel Touch) applies 1.5 s later unless the drag resumes; a new touch, a
+-- new box or Zoom +/- send a pending shot at once, Lock drops it (the pad
+-- is as before the gesture). Double tap = zoom out (Reset: the whole home
+-- view; pulses Reset). Home (Both) does the same and sends the camera home.
+-- InvertPan / InvertTilt mirror the direction of the outputs and of the
+-- camera. HFOV and OpticalZoom turn a frame into camera degrees and a zoom
+-- position: pan = (cx - 0.5) * HFOV, tilt = (0.5 - cy) * HFOV * 9 / 16,
+-- zoom position = (1 / fw - 1) / (OpticalZoom - 1), sent through
+-- gotoPosition; a frame is never tighter than MinFrame or than the camera's
+-- reach 1 / OpticalZoom. Zoom +/- drive the camera and the pad adopts the
+-- camera's zoom afterwards; a box in progress or pending at that moment is
+-- composed onto the zoomed view when it goes out. A Trigger pin held true
+-- counts once: the trailing edge of a pulse is never a second trigger.
 
 Modes = Modes or {}
 
@@ -33,8 +39,7 @@ do
   local MIN_BOX = 0.08                      -- of the pad: a smaller box is ignored (spec 3.5)
   local DRAG_START = 12                     -- px: a nudge below it changes nothing (spec 5.4)
   local PENDING = 1.5                       -- s: an inferred lift applies after this unless resumed
-  local PIN_GUARD = 0.5                     -- s: the trailing edge of a pulse just handled is not a second one
-  local ZOOM_POLL = 0.2                     -- s between zoom readings while Zoom +/- is held
+  local ZOOM_POLL = 0.2                    -- s between zoom readings while Zoom +/- is held
   local HANDLE_MIN = 12                     -- px: corner grab radius (at least)
 
   local function clamp(v, lo, hi)
@@ -106,13 +111,16 @@ do
         corner = nil,                   -- resize: { ax, ay } the anchored (opposite) corner
         accX = 0, accY = 0,
         fx = 0, fy = 0,
-        box0 = nil,                     -- the box before a nudge (restored by Lock)
+        box0 = nil,                     -- the box before a nudge
+        snap = nil,                     -- { px, py, pw, box }: the last state in which nothing was
+                                        -- left unsent; a dropped or ignored gesture goes back to it
         pending = nil,                  -- timer: apply after an inferred lift
         unsent = false,                 -- the box was finished but not sent yet
-        applyAt = -10, resetAt = -10, homeAt = -10,
+        applyAt = -10,
         camZoom = 0,                    -- zoom position 0..1 read from the camera
         zooming = false, zoomPollAt = 0,
-        minimap = nil,
+        adoptZ = nil,                   -- a camera zoom read while a finger worked: adopted at the lift
+        high = {},                      -- Trigger pins whose rising edge was seen and not yet closed
       }
 
       -- ---------- controls ----------
@@ -132,6 +140,18 @@ do
       local function opticalZoom() return clamp(knob("OpticalZoom", 12), 1, 40) end
       local function signX() return toggle("InvertPan") and -1 or 1 end
       local function signY() return toggle("InvertTilt") and -1 or 1 end
+      -- The tightest frame the pad models: MinFrame, but never tighter than
+      -- the camera's optical reach (a 2x camera cannot deliver a 0.25 frame).
+      local function floorFrame() return max(minFrame(), 1 / opticalZoom()) end
+      -- A Trigger pin event: true for a press; the trailing edge (Boolean
+      -- false) of a pulse whose rising edge was seen is never a second press,
+      -- however long the pin was held. A press from the Pad page button
+      -- (Trigger(), no rising edge) counts.
+      local function pressed(name, ctl)
+        if ctl.Boolean then self.high[name] = true; return true end
+        if self.high[name] then self.high[name] = nil; return false end
+        return true
+      end
 
       -- ---------- geometry ----------
       local function normBox(x0, y0, x1, y1)
@@ -162,7 +182,7 @@ do
         if b == nil then return self.px, self.py, self.pw end
         local f, bx, by = shotOf(b)
         local fw = self.pw * f
-        local lo = minFrame()
+        local lo = floorFrame()
         if fw < lo then fw = lo end
         if fw > 1 then fw = 1 end
         local cx = self.px + (bx - 0.5) * self.pw
@@ -223,11 +243,13 @@ do
         local oy = signY() > 0 and 1 - cy or cy
         E.out("FramePan", clamp(ox, 0, 1))
         E.out("FrameTilt", clamp(oy, 0, 1))
-        local lo = minFrame()
+        local lo = floorFrame()
         local z = 0
         if lo < 1 then z = clamp((1 - fw) / (1 - lo), 0, 1) end
         E.out("FrameZoom", z)
       end
+
+      local snapshot                   -- defined with rebase() below
 
       local function cancelPending()
         if self.pending then self.pending:cancel(); self.pending = nil end
@@ -242,6 +264,7 @@ do
         outputs()
         sendFrame(cx, cy, fw)
         self.applyAt = E.now()
+        snapshot()
         E.setGesture("APPLY")
         if pulseOut then E.pulse("Apply") end
         E.invalidate()
@@ -254,15 +277,25 @@ do
         self.box = nil
       end
 
-      local function zoomOut(now, pulseName)
+      -- The state to go back to when a gesture is dropped or ignored.
+      function snapshot()
+        self.snap = { px = self.px, py = self.py, pw = self.pw, box = self.box }
+      end
+      local function restore()
+        local s = self.snap
+        if s == nil then return end
+        self.px, self.py, self.pw, self.box = s.px, s.py, s.pw, s.box
+      end
+
+      local function zoomOut(pulseName)
         cancelPending()
-        self.unsent = false
+        self.unsent, self.adoptZ = false, nil
         self.px, self.py, self.pw = 0.5, 0.5, 1
-        self.box = nil
+        self.box, self.box0 = nil, nil
         self.gesture, self.active = nil, false
+        snapshot()
         outputs()
         if pulseName == "Reset" then
-          self.resetAt = now
           E.setGesture("RESET")
           local c = cam()
           if c and type(c.gotoPosition) == "function" then
@@ -270,7 +303,6 @@ do
             self.camZoom = 0
           end
         else
-          self.homeAt = now
           E.setGesture("HOME")
           local c = cam()
           if c and type(c.home) == "function" then
@@ -281,16 +313,31 @@ do
         E.invalidate()
       end
 
-      -- After Zoom +/-: the pad adopts the camera's zoom as its view.
+      -- The view takes the width of the camera zoom position z (its centre stays).
+      local function adoptZoom(z)
+        local f = 1 + z * (opticalZoom() - 1)
+        self.pw = clamp(1 / f, 0.001, 1)
+        self.px = clamp(self.px, self.pw / 2, 1 - self.pw / 2)
+        self.py = clamp(self.py, self.pw / 2, 1 - self.pw / 2)
+      end
+      -- The applied shot becomes the view, at the camera's zoom.
+      local function adoptNow(z)
+        self.adoptZ = nil
+        rebase()
+        adoptZoom(z)
+        snapshot()
+        outputs()
+        E.invalidate()
+      end
+      -- After Zoom +/-: the pad adopts the camera's zoom as its view. While a
+      -- finger works the zoom is kept for the lift (the box in progress is then
+      -- composed onto the zoomed view); a pending shot composes onto the zoomed
+      -- view when its timer sends it.
       local function adoptCameraZoom()
         readZoom(function(z)
-          rebase()
-          local f = 1 + z * (opticalZoom() - 1)
-          self.pw = clamp(1 / f, 0.001, 1)
-          self.px = clamp(self.px, self.pw / 2, 1 - self.pw / 2)
-          self.py = clamp(self.py, self.pw / 2, 1 - self.pw / 2)
-          outputs()
-          E.invalidate()
+          if self.gesture then self.adoptZ = z; return end
+          if self.unsent then adoptZoom(z); E.invalidate(); return end
+          adoptNow(z)
         end)
       end
 
@@ -308,6 +355,13 @@ do
       local function inside(b, x, y)
         return x >= b.x0 and x <= b.x1 and y >= b.y0 and y <= b.y1
       end
+      -- The moving edge v of a box anchored at a: at least m from a, within lo..hi.
+      local function minSide(v, a, m, lo, hi)
+        if abs(v - a) < m then v = a + (v >= a and m or -m) end
+        if v > hi then v = (a - m >= lo) and a - m or hi end
+        if v < lo then v = (a + m <= hi) and a + m or lo end
+        return v
+      end
 
       -- Applies the finger position to the box in progress.
       local function track(x, y)
@@ -324,16 +378,19 @@ do
         elseif g == "resize" then
           local a = self.corner
           local x1, y1 = clampPoint(x, y)
-          -- the box keeps at least the minimum size on the anchored side
-          if abs(x1 - a.ax) < minW then x1 = a.ax + (x1 >= a.ax and minW or -minW) end
-          if abs(y1 - a.ay) < minH then y1 = a.ay + (y1 >= a.ay and minH or -minH) end
-          self.box = fitBox(normBox(a.ax, a.ay, x1, y1))
+          -- the anchored corner never moves: the box keeps at least the minimum
+          -- size on the finger's side of it, or flips to the other side when
+          -- the minimum does not fit there
+          x1 = minSide(x1, a.ax, minW, vx, vx + vw)
+          y1 = minSide(y1, a.ay, minH, vy, vy + vh)
+          self.box = normBox(a.ax, a.ay, x1, y1)
         end
       end
 
-      local function beginGesture(x, y)
+      local function beginGesture(x, y, resumed)
         local b = self.box
         self.box0 = b
+        if not resumed then snapshot() end
         if b then
           local c = nearCorner(b, x, y)
           if c then
@@ -352,11 +409,11 @@ do
 
       function self:onTouchStart(x, y, t)
         -- a shot still pending from the previous lift goes out first
-        if self.pending then apply(true) end
+        if self.unsent then apply(true) end
         self.down, self.active = true, false
         self.fx, self.fy = x, y
         self.accX, self.accY = 0, 0
-        beginGesture(x, y)
+        beginGesture(x, y, false)
         E.invalidate()
       end
 
@@ -367,12 +424,25 @@ do
           if sqrt(self.accX * self.accX + self.accY * self.accY) <= DRAG_START then return end
           self.active = true
           if self.gesture == "draw" and self.box0 then
-            -- a new box: the pad re-bases on the current shot first
+            -- a new box: a shot still pending (the finger came back from an
+            -- inferred lift) goes out, then the pad re-bases on the current shot
+            if self.unsent then apply(true) end
+            snapshot()
             rebase()
             self.box0 = nil
           end
         end
         track(x, y)
+        E.invalidate()
+      end
+
+      -- The gesture ends without a shot: the pad is as before it (view and
+      -- box), and a camera zoom read meanwhile is adopted now.
+      local function dropGesture(text)
+        restore()
+        self.gesture, self.active, self.down, self.box0 = nil, false, false, nil
+        if text then E.setGesture(text) end
+        if self.adoptZ then adoptNow(self.adoptZ) end
         E.invalidate()
       end
 
@@ -382,25 +452,26 @@ do
         if not self.active then
           -- nothing moved: the box is as it was (a box taken back from an
           -- inferred lift still has to go out)
-          self.gesture = nil
           self.box = self.box0
-          self.box0 = nil
           if not (self.unsent and self.box) then
-            E.invalidate()
+            dropGesture(nil)
             return
           end
         end
         local b = self.box
         if g == "draw" and self.active and (b == nil or b.x1 - b.x0 < minW or b.y1 - b.y0 < minH) then
-          -- too small: ignored (the view was already re-based, the frame is unchanged)
-          self.box = nil
-          self.gesture, self.active = nil, false
-          E.setGesture("TOO SMALL")
-          E.invalidate()
+          -- too small: ignored; the view and the previous box are as they were
+          dropGesture("TOO SMALL")
           return
         end
         self.gesture, self.active = nil, false
         self.box0 = nil
+        if self.adoptZ then
+          -- the camera zoomed while the finger worked: the box is a region of
+          -- what the camera sees now
+          adoptZoom(self.adoptZ)
+          self.adoptZ = nil
+        end
         self.unsent = true
         if inferred then
           cancelPending()
@@ -418,11 +489,8 @@ do
         if self.gesture == nil then self.down = false; return end
         if info and info.aborted then
           -- the engine dropped the touch (Lock, a clock step): nothing is
-          -- sent and the box is as it was before the gesture
-          self.down, self.active, self.gesture = false, false, nil
-          self.box = self.box0
-          self.box0 = nil
-          E.invalidate()
+          -- sent and the pad is as it was before the gesture
+          dropGesture(nil)
           return
         end
         if self.active then track(x, y) end
@@ -435,8 +503,9 @@ do
         self.down = true
         self.fx, self.fy = x, y
         if self.gesture == nil then
-          -- the box finished at the lift: continue as a nudge of that box
-          beginGesture(x, y)
+          -- the box finished at the lift: continue as a nudge of that box (the
+          -- state to go back to is still the one before the lifted gesture)
+          beginGesture(x, y, true)
           self.active = false
           self.accX, self.accY = 0, 0
           E.invalidate()
@@ -450,18 +519,18 @@ do
       end
 
       function self:onGesture(g)
-        if g.type == "double" then zoomOut(g.t or E.now(), "Reset"); E.pulse("Reset") end
+        if g.type == "double" then zoomOut("Reset"); E.pulse("Reset") end
       end
 
       function self:onLock(locked)
         if locked then
+          -- a gesture in progress and a shot still pending are dropped: nothing
+          -- is sent and the pad is as it was before the gesture
           cancelPending()
+          if self.gesture or self.unsent then restore() end
           self.unsent = false
-          if self.gesture then
-            self.box = self.box0
-            self.box0 = nil
-          end
-          self.gesture, self.active, self.down = nil, false, false
+          self.gesture, self.active, self.down, self.box0 = nil, false, false, nil
+          if self.adoptZ then adoptNow(self.adoptZ) end
           local c = cam()
           if c and type(c.stop) == "function" then pcall(c.stop, c) end
         end
@@ -472,16 +541,19 @@ do
       function self:onControl(name, index, ctl)
         local now = E.now()
         if name == "Home" then
-          if ctl.Boolean or now - self.homeAt >= PIN_GUARD then zoomOut(now, "Home") end
+          if pressed(name, ctl) then zoomOut("Home") end
           return
         end
         if name == "Reset" then
-          if ctl.Boolean or now - self.resetAt >= PIN_GUARD then zoomOut(now, "Reset") end
+          if pressed(name, ctl) then zoomOut("Reset") end
           return
         end
         if name == "Apply" then
-          -- re-send the current shot (the pin or the Pad page button)
-          if ctl.Boolean or now - self.applyAt >= PIN_GUARD then
+          -- (re-)send the current shot (the pin or the Pad page button); a
+          -- shot still pending goes out now and not a second time later
+          if pressed(name, ctl) then
+            cancelPending()
+            self.unsent = false
             local cx, cy, fw = compose(self.box)
             outputs()
             sendFrame(cx, cy, fw)
@@ -530,6 +602,7 @@ do
       end
 
       function self:onStart()
+        snapshot()
         outputs()
         readZoom()
       end
@@ -569,7 +642,7 @@ do
         -- the current box
         local b = self.box
         if b then
-          local pending = self.pending ~= nil
+          local pending = self.unsent
           local w, h = b.x1 - b.x0, b.y1 - b.y0
           -- the 16:9 frame the camera really gets, when it is not the box itself
           local gb = ghostOf(b)

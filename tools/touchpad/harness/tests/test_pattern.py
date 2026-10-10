@@ -4,17 +4,50 @@
 pattern against `Pattern`. Unlocked / Failed pulse, LastPattern records the
 drawing, Learn stores the next pattern, Locked goes on after MaxTries failures
 for LockoutSeconds and works from its pin both ways, Masked hides the trail
-and AutoSubmit checks as soon as the drawing is as long as the secret."""
+(a row of small dots under the top line counts the joined dots) and AutoSubmit
+checks as soon as the drawing is as long as the secret (never while learning).
+A pattern has at least two dots: a one-dot drawing (a tap on a dot) is dropped
+without a check or a try, and a one-dot Pattern text is no secret."""
+import os
 import re
+import sys
 
 from harness import QSys
+from harness.qsys_fake import DEFAULT_PLUGIN, plugin_modes
 
 OK, DANGER = "#2ECC8F", "#F0328C"          # the Nikita theme's ok / danger colours
+
+# The full plugin when it carries the Pattern Lock mode, else the per-mode build
+# (python3 tools/touchpad/build.py --modes pattern --out plugins/.build/NikitaTouchPad-pattern.qplug).
+PER_MODE = os.path.join(os.path.dirname(os.path.abspath(DEFAULT_PLUGIN)), ".build", "NikitaTouchPad-pattern.qplug")
+
+
+def has_pattern(path):
+    try:
+        return os.path.exists(path) and "Pattern Lock" in plugin_modes(path)
+    except Exception:
+        return False
+
+
+def plugin_path():
+    """run_tests.py --plugin (it only lints that file, so honour it here too),
+    else the newer of the full plugin and the per-mode build with Pattern Lock."""
+    argv = sys.argv
+    for i, a in enumerate(argv):
+        if a == "--plugin" and i + 1 < len(argv) and has_pattern(argv[i + 1]):
+            return argv[i + 1]
+        if a.startswith("--plugin=") and has_pattern(a[len("--plugin="):]):
+            return a[len("--plugin="):]
+    candidates = [p for p in (DEFAULT_PLUGIN, PER_MODE) if has_pattern(p)]
+    if not candidates:
+        return DEFAULT_PLUGIN
+    return max(candidates, key=os.path.getmtime)
 
 
 def boot(**kw):
     kw.setdefault("mode", "Pattern Lock")
     kw.setdefault("picker", "Color_Picker")
+    kw.setdefault("plugin", plugin_path())
     q = QSys(**kw)
     q.advance(0.2)
     return q
@@ -386,3 +419,266 @@ def test_pattern_themes_sizes_and_budget():
     b = big.budget()
     assert b["max_handler"] < 60000 and b["max_frame"] < 30000
     assert len(big.icon()) < 8000
+
+
+# ---------------------------------------------------------------------------
+# Regression tests from the review of the first version.
+
+
+def texts(svg):
+    return [(float(m.group(1)), float(m.group(2)), float(m.group(3)), m.group(4))
+            for m in re.finditer(r'<text x="([-\d.]+)" y="([-\d.]+)"[^>]*font-size="([\d.]+)"[^>]*>([^<]*)</text>', svg)]
+
+
+def text_box(t):
+    """(top, bottom) of a text's glyph box: baseline y, size -> about y - 0.72 size .. y."""
+    return t[1] - 0.72 * t[2], t[1]
+
+
+def test_pattern_pending_check_that_locks_stops_the_new_touch():
+    """No Panel Touch: a wrong drawing is lifted by silence (its check is pending),
+    and a new touch far away lands inside the resume window. The new touch
+    submits the pending drawing first; when that check reaches MaxTries the
+    pad locks and the new touch must not go on drawing or checking."""
+    q = boot()
+    q.set_pin("Pattern", "1-5-9-6")
+    q.set_pin("MaxTries", 1)
+    q.set_pin("LockoutSeconds", 30)
+    q.touch(path_points(q, [9, 8]), lift=False)                # wrong, no Panel Touch
+    q.advance(0.5)                                             # inferred lift: the check waits
+    assert q.pulses("Failed") == 0 and q.pin("Locked")["Boolean"] is False
+    q.touch(path_points(q, [1, 5, 9, 6]), lift=False)          # a press far from dot 8, not a resume
+    assert q.pulses("Failed") == 1 and q.pin("Locked")["Boolean"] is True
+    assert q.run("return TouchPad.inst.active") is False       # the new touch was dropped
+    assert q.run("return #TouchPad.inst.path") == 0
+    q.advance(0.5)
+    q.advance(1.7)                                             # where its own check would have run
+    assert q.pin("Locked")["Boolean"] is True
+    assert q.pulses("Unlocked") == 0 and q.pulses("Failed") == 1
+    assert q.pin("LastPattern")["String"] == "9-8"
+    assert "Try again in" in q.icon() and "<polyline" not in q.icon()
+    # The same guard inside one touch: an AutoSubmit check that locks the pad
+    # ends the drawing; the finger going on and lifting changes nothing.
+    q.set_pin("Locked", False)
+    q.set_pin("AutoSubmit", True)
+    q.set_pin("Pattern", "1-5-9")
+    draw(q, [1, 2, 3], lift=False)                             # three dots: checked and locked at once
+    assert q.pulses("Failed") == 2 and q.pin("Locked")["Boolean"] is True
+    draw(q, [6, 9], lift=False)
+    q.lift()
+    assert q.pulses("Failed") == 2 and q.pulses("Unlocked") == 0
+    assert q.pin("LastPattern")["String"] == "1-2-3"
+
+
+def test_pattern_auto_submit_never_cuts_a_learned_pattern_short():
+    q = boot()
+    q.set_pin("Pattern", "1-2-3")
+    q.set_pin("AutoSubmit", True)
+    q.set_pin("Learn", True)
+    q.advance(0.05)
+    draw(q, [1, 5, 9, 6, 3], lift=False)                       # longer than the old secret
+    assert q.pin("Pattern")["String"] == "1-2-3"               # nothing stored before the lift
+    assert q.pin("Learn")["Boolean"] is True
+    q.lift()
+    assert q.pin("Pattern")["String"] == "1-5-9-6-3" and q.pin("LastPattern")["String"] == "1-5-9-6-3"
+    assert q.pin("Learn")["Boolean"] is False
+    assert q.pulses("Unlocked") == 0 and q.pulses("Failed") == 0
+    q.advance(1.0)
+    draw(q, [1, 5, 9], lift=False)                             # AutoSubmit is back for checks
+    assert q.pulses("Failed") == 0
+    draw(q, [6, 3], lift=False)
+    assert q.pulses("Unlocked") == 1                           # five dots: checked before the lift
+    q.lift()
+    assert q.pulses("Unlocked") == 1
+
+
+def test_pattern_same_value_grid_size_write_is_a_no_op():
+    q = boot()
+    q.set_pin("Pattern", "1-5-9")
+    draw(q, [1, 5], lift=False)
+    assert q.run("return #TouchPad.inst.path") == 2
+    q.set_pin("GridSize", 3, fire=True)                        # a script re-asserts the same value
+    assert q.run("return #TouchPad.inst.path") == 2            # the drawing in progress stays
+    draw(q, [9], lift=False)
+    q.lift()
+    assert q.pulses("Unlocked") == 1 and q.pin("LastPattern")["String"] == "1-5-9"
+    q.advance(1.0)
+    draw(q, [1, 5], lift=False)
+    q.set_pin("GridSize", 4)                                   # a real change drops the drawing
+    assert q.run("return #TouchPad.inst.path") == 0 and len(circles(q.icon())) == 16
+    q.lift()
+    assert q.pulses("Unlocked") == 1 and q.pulses("Failed") == 0
+    q = boot()                                                 # Panel Touch is sticky: a fresh pad
+    q.set_pin("Pattern", "1-5-9")
+    q.touch(path_points(q, [1, 5, 9]), lift=False)             # no Panel Touch: the check is pending
+    q.advance(0.5)
+    q.set_pin("GridSize", 3, fire=True)
+    assert q.run("return TouchPad.inst.pending ~= nil") is True   # the pending check survives
+    q.advance(2.0)
+    assert q.pulses("Unlocked") == 1 and q.pin("LastPattern")["String"] == "1-5-9"
+
+
+def test_pattern_pending_check_feedback_shows_after_a_new_touch():
+    q = boot()
+    q.set_pin("Pattern", "1-5-9")
+    q.touch(path_points(q, [1, 5, 9]), lift=False)             # right, no Panel Touch
+    q.advance(0.5)                                             # inferred lift: pending
+    assert q.pulses("Unlocked") == 0
+    q.touch([dot(q, 1)], lift=False)                           # a new press far from dot 9
+    assert q.pulses("Unlocked") == 1                           # the pending drawing was checked
+    q.advance(0.05)
+    svg = q.icon()
+    assert "Unlocked" in svg and OK in svg                     # ... and its green result shows
+    assert q.run("return TouchPad.inst.feedback ~= nil") is True
+    q.advance(0.3)
+    assert "Unlocked" in q.icon()
+    q.advance(0.6)                                             # 0.8 s are over
+    assert "Unlocked" not in q.icon()
+    # The result colours its own trail, not the drawing that began under it.
+    q.advance(1.0)
+    q.touch(path_points(q, [1, 2, 3]), lift=False)             # wrong, pending
+    q.advance(0.5)
+    q.touch(path_points(q, [7, 8]), lift=False)                # new press: the red result shows
+    assert q.pulses("Failed") == 1
+    svg = q.icon()
+    assert "Try 1 of 5" in svg and DANGER in svg
+    assert '<polyline' in svg and 'stroke="%s"' % DANGER not in svg   # the new trail is not red
+    q.lift()
+
+
+def test_pattern_pending_check_uses_learn_as_it_was_at_the_lift():
+    q = boot()
+    q.set_pin("Pattern", "1-5-9")
+    q.touch(path_points(q, [3, 5, 7]), lift=False)             # wrong, no Panel Touch
+    q.advance(0.5)                                             # pending
+    q.set_pin("Learn", True)                                   # Learn goes on while the check waits
+    q.advance(1.7)
+    assert q.pulses("Failed") == 1 and q.pin("Pattern")["String"] == "1-5-9"   # not stored
+    assert q.pin("Learn")["Boolean"] is True                   # Learn waits for a pattern drawn under it
+    q.advance(1.0)
+    q.touch(path_points(q, [2, 5, 8]), lift=False)
+    q.advance(0.5)
+    q.set_pin("Learn", False)                                  # switched off while this one waits
+    q.advance(1.7)
+    assert q.pin("Pattern")["String"] == "2-5-8"               # drawn under Learn: stored
+    assert q.pulses("Failed") == 1 and q.pulses("Unlocked") == 0
+
+
+def test_pattern_one_dot_touch_is_not_a_pattern():
+    q = boot()
+    q.set_pin("Pattern", "1-5-9-6")
+    q.set_pin("MaxTries", 2)
+    q.tap(*dot(q, 5), panel_touch=True)                        # stray taps on a dot
+    q.advance(0.5)
+    q.tap(*dot(q, 5), panel_touch=True)
+    assert q.pulses("Failed") == 0 and q.pin("Locked")["Boolean"] is False
+    assert q.pin("LastPattern")["String"] == "" and q.pulses("Tap") == 2
+    assert "Try " not in q.icon() and "<polyline" not in q.icon()
+    q.set_pin("Learn", True)
+    q.tap(*dot(q, 5), panel_touch=True)                        # a tap cannot become the secret
+    assert q.pin("Pattern")["String"] == "1-5-9-6" and q.pin("Learn")["Boolean"] is True
+    draw(q, [3, 5, 7])
+    assert q.pin("Pattern")["String"] == "3-5-7" and q.pin("Learn")["Boolean"] is False
+    q.advance(1.0)
+    q.set_pin("Pattern", "5")                                  # a one-dot secret is no secret
+    q.advance(0.05)
+    assert q.run("return #TouchPad.inst.secret") == 0 and "Set a pattern first" in q.icon()
+    q.tap(*dot(q, 5), panel_touch=True)
+    assert q.pulses("Unlocked") == 0 and q.pulses("Failed") == 0
+    draw(q, [5, 9])
+    assert q.pulses("Failed") == 1                             # two dots are checked (and fail)
+
+
+def test_pattern_one_dot_wobble_is_dropped_at_once():
+    """A finger resting on one dot for longer than a tap, moving a few px, is
+    lifted by silence. The engine can only resume a touch that dragged (12 px),
+    so this lift is final: nothing waits for the resume window."""
+    q = boot()
+    q.set_pin("Pattern", "5-9")
+    x, y = dot(q, 5)
+    q.touch([(x + i, y) for i in range(5)], dt=0.1, lift=False)   # 4 px over 0.4 s, no Panel Touch
+    q.advance(0.5)                                             # the lift is inferred
+    assert q.run("return TouchPad.inst.pending ~= nil") is False
+    assert q.run("return #TouchPad.inst.path") == 0 and "<polyline" not in q.icon()
+    assert "Draw your pattern" in q.icon()                     # the hint is back at once
+    assert q.pulses("Unlocked") == 0 and q.pulses("Failed") == 0
+    q.advance(1.7)
+    assert q.pulses("Unlocked") == 0 and q.pulses("Failed") == 0
+    # A one-dot touch that did drag (out and back) can still be resumed.
+    q.touch([(x, y), (x + 30, y), (x, y)], dt=0.1, lift=False)
+    q.advance(0.5)
+    assert q.run("return TouchPad.inst.pending ~= nil") is True
+    q.touch(path_points(q, [5, 9])[1:], lift=False)            # the finger resumes nearby
+    q.advance(0.5)
+    q.advance(1.7)
+    assert q.pulses("Unlocked") == 1 and q.pin("LastPattern")["String"] == "5-9"
+
+
+def test_pattern_masked_dots_have_their_own_line():
+    q = boot()
+    q.set_pin("Pattern", "1-5-9")
+    q.set_pin("Masked", True)
+    draw(q, [1, 5, 9])
+    svg = q.icon()
+    mask = [c for c in circles(svg) if c[2] == 4.0]
+    tx = [t for t in texts(svg) if t[3] == "Unlocked"]
+    assert len(mask) == 3 and len(tx) == 1
+    top, bottom = text_box(tx[0])
+    for cx, cy, r in mask:
+        assert cy - r >= bottom + 2                            # below the top line
+        assert cy + r <= dot(q, 1)[1] - q.run("return TouchPad.inst.r") - 2   # above the first row
+    assert mask[0][1] == mask[1][1] == mask[2][1] == 41.0
+    assert dot(q, 1) == (70.0, 70.0) and dot(q, 9) == (430.0, 430.0)   # the grid did not move
+    q.advance(1.0)
+    q.set_pin("Learn", True)
+    draw(q, [1, 2], lift=False)
+    svg = q.icon()
+    prompt = [t for t in texts(svg) if t[3] == "Draw the new pattern"]
+    mask = [c for c in circles(svg) if c[2] == 4.0]
+    assert len(prompt) == 1 and len(mask) == 2
+    assert all(cy - r >= text_box(prompt[0])[1] + 2 for cx, cy, r in mask)
+    q.lift()
+
+
+def test_pattern_small_pads_keep_the_texts_off_the_dots():
+    def dot_rows(q):
+        r = q.run("return TouchPad.inst.r")
+        return sorted(set(c[1] for c in circles(q.icon()) if abs(c[2] - r) < 0.1)), r   # the SVG rounds r
+
+    # 120 px: there is no room for the top line or the hint, so neither is drawn
+    q = boot(props={"Pad Width": 120, "Pad Height": 120})
+    q.set_pin("Pattern", "1-5-9")
+    assert "Draw your pattern" not in q.icon()
+    draw(q, [1, 2])
+    svg = q.icon()
+    rows, r = dot_rows(q)
+    assert len(rows) == 3 and rows[1] - rows[0] >= 36         # the grid never gets smaller than this
+    assert q.pulses("Failed") == 1 and DANGER in svg           # the colour still carries the result
+    assert not [t for t in texts(svg) if "Try" in t[3]]
+    q.set_pin("Masked", True)
+    q.advance(1.0)
+    draw(q, [1, 5], lift=False)
+    assert not [c for c in circles(q.icon()) if c[2] == 4.0]  # no room for the masking line either
+    q.lift()
+    q.advance(1.0)
+    draw(q, [1, 5, 9])
+    assert q.pulses("Unlocked") == 1
+
+    # 200 px and a wide 1600 x 300: everything shows and nothing overlaps the dots
+    for w, h in ((200, 200), (1600, 300), (300, 1200)):
+        q = boot(props={"Pad Width": w, "Pad Height": h})
+        q.set_pin("Pattern", "1-5-9")
+        q.set_pin("Masked", True)
+        assert "Draw your pattern" in q.icon()
+        draw(q, [1, 2])
+        svg = q.icon()
+        rows, r = dot_rows(q)
+        tries = [t for t in texts(svg) if "Try 1" in t[3]]
+        mask = [c for c in circles(svg) if c[2] == 4.0]
+        assert len(tries) == 1 and len(mask) == 2, (w, h)
+        assert text_box(tries[0])[1] < mask[0][1] - 4, (w, h)          # top line above the masking dots
+        assert mask[0][1] + 4 < rows[0] - r, (w, h)                    # masking dots above the first row
+        q.advance(1.0)
+        hint = [t for t in texts(q.icon()) if t[3] == "Draw your pattern"]
+        assert len(hint) == 1 and rows[-1] + r < text_box(hint[0])[0], (w, h)   # last row above the hint
+        assert q.budget()["max_frame"] < 30000

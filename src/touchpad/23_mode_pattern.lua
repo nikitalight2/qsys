@@ -7,8 +7,15 @@
 -- bottom). Unlocked / Failed pulse the result, LastPattern carries the drawn
 -- pattern, Learn stores the next drawn pattern as the secret, Locked goes on
 -- after MaxTries failures for LockoutSeconds (and can be driven both ways
--- from its pin). Masked hides the trail; AutoSubmit checks as soon as the
--- drawn pattern is as long as the secret.
+-- from its pin). Masked hides the trail (a row of small dots above the grid
+-- counts the joined dots instead); AutoSubmit checks as soon as the drawn
+-- pattern is as long as the secret (never while learning: the lift decides
+-- the length of a new secret). A pattern has at least two dots: a drawing of
+-- one dot (a tap on a dot) is dropped without a check, does not count as a
+-- try and is not learned, and a Pattern text with fewer than two dots is no
+-- secret. The grid keeps room for the top line (feedback / tries / masked
+-- dots) and the hint; on a pad too small for them the texts are left out
+-- rather than drawn over the dots.
 --
 -- Design time (controls, pages, layout) and the runtime `create(E)` live here.
 
@@ -21,6 +28,10 @@ do
   local HIT = 0.22              -- hit radius as a fraction of the dot spacing
   local RESUME_WAIT = 1.6       -- the engine can take an inferred lift back for 1.5 s
   local MAX_DOTS = 25           -- 5 x 5
+  local MIN_DOTS = 2            -- a pattern (drawn or secret) has at least two dots
+  local DRAG_START = 12         -- px: the engine pauses (and can resume) only a touch that moved this far
+  local MIN_SPACING = 36        -- px between dots: below this the texts make room, not the grid
+  local MASK_R = 4              -- radius of the masking dots
   local MAX_PATTERN_CHARS = 200 -- only this much of the Pattern text is parsed
   local GRID_MIN, GRID_MAX, GRID_DEFAULT = 3, 5, 3
   local TRIES_MIN, TRIES_MAX, TRIES_DEFAULT = 1, 10, 5
@@ -150,7 +161,11 @@ do
         active = false,       -- a finger is drawing
         submitted = false,    -- AutoSubmit checked this touch already
         fx = nil, fy = nil,   -- finger position for the rubber-band segment
+        x0 = 0, y0 = 0, moved = 0, -- touch origin and the farthest the finger got from it
         pending = nil,        -- delayed check after an inferred lift
+        pendingLearn = false, -- the Learn flag at the time of that lift
+        topY = 0, maskY = 0,  -- baselines of the top line and the masking dots
+        showTop = true, showMask = true, showHint = true, -- room for them above / below the grid
         feedback = nil,       -- { kind = "ok"|"fail", text = ... }
         fbTimer = nil,
         tries = 0,
@@ -171,10 +186,24 @@ do
         return clampInt(c and c.Value, lo, hi, default)
       end
 
+      -- The grid is centred; it takes 72 % of the shorter side unless the top
+      -- line, the masking dots and the hint need the room, and it never
+      -- shrinks below MIN_SPACING: on a pad too small for everything the
+      -- texts that would overlap the dots are left out instead (see draw).
       local function buildGrid(n)
         self.n = n
-        local margin = side * 0.14
-        local span = side - 2 * margin
+        local topY = textSize + 14
+        local maskY = topY + 12
+        self.topY, self.maskY = topY, maskY
+        local reserveTop = maskY + MASK_R + 4
+        local reserveBottom = E.hint and 24 or 8
+        local span = side * 0.72
+        local r = 18
+        for _ = 1, 3 do
+          local fit = H - 2 * max(reserveTop, reserveBottom) - 2 * r
+          span = min(side * 0.72, max(fit, MIN_SPACING * (n - 1)))
+          r = max(5, min(18, span / (n - 1) * 0.11))
+        end
         local spacing = span / (n - 1)
         local ox, oy = (W - span) / 2, (H - span) / 2
         local dots = {}
@@ -183,8 +212,10 @@ do
             dots[row * n + col + 1] = { x = ox + col * spacing, y = oy + row * spacing, row = row, col = col }
           end
         end
-        self.dots, self.spacing = dots, spacing
-        self.r = max(5, min(18, spacing * 0.11))
+        self.dots, self.spacing, self.r = dots, spacing, r
+        self.showTop = oy - r >= topY + 4
+        self.showMask = oy - r >= maskY + MASK_R + 2
+        self.showHint = oy + span + r <= H - 22
       end
 
       local function clearPath()
@@ -297,18 +328,23 @@ do
         return best
       end
 
-      local function submit()
+      -- Checks (or learns) the drawn pattern. `learn` is the Learn flag to
+      -- use: a delayed check passes the flag captured at its lift.
+      local function submit(learn)
+        if learn == nil then learn = self.learn end
         cancelPending()
         self.active = false
         self.fx, self.fy = nil, nil
         local path = self.path
-        if #path == 0 then
+        if #path < MIN_DOTS then
+          -- a single dot (a tap on a dot) is not a pattern: no check, no try
+          clearPath()
           E.invalidate()
           return
         end
         local str = patternString(path)
         E.out("LastPattern", str)
-        if self.learn then
+        if learn then
           self.secret = parsePattern(str, self.n * self.n)
           E.out("Pattern", str)
           self.learn = false
@@ -339,7 +375,8 @@ do
         local k = nearestDot(x, y)
         if k and not self.seen[k] then
           addDot(k)
-          if self.auto and not self.submitted and #self.secret > 0 and #self.path >= #self.secret then
+          -- AutoSubmit checks; it never cuts a new secret short while learning
+          if self.auto and not self.learn and not self.submitted and #self.secret > 0 and #self.path >= #self.secret then
             self.submitted = true
             submit()
           end
@@ -347,7 +384,9 @@ do
       end
 
       local function readSecret()
-        self.secret = parsePattern(ctlString("Pattern"), self.n * self.n)
+        local secret = parsePattern(ctlString("Pattern"), self.n * self.n)
+        if #secret < MIN_DOTS then secret = {} end
+        self.secret = secret
       end
 
       function self:onStart()
@@ -362,11 +401,17 @@ do
 
       function self:onTouchStart(x, y, t)
         if isLocked() then return end
-        if self.pending then submit() end
         cancelFeedback()
+        if self.pending then
+          -- the previous drawing was never resumed: check it now, and stop
+          -- here if that check locked the pad
+          submit(self.pendingLearn)
+          if isLocked() then return end
+        end
         clearPath()
         self.active = true
         self.fx, self.fy = x, y
+        self.x0, self.y0, self.moved = x, y, 0
         addNear(x, y)
         E.invalidate()
       end
@@ -374,6 +419,8 @@ do
       function self:onTouchMove(x, y, t, dx, dy)
         if not self.active then return end
         self.fx, self.fy = x, y
+        local d = sqrt((x - self.x0) * (x - self.x0) + (y - self.y0) * (y - self.y0))
+        if d > self.moved then self.moved = d end
         addNear(x, y)
         E.invalidate()
       end
@@ -394,13 +441,16 @@ do
           return
         end
         self.fx, self.fy = nil, nil
-        if info.inferred and not info.tap then
+        if info.inferred and not info.tap and self.moved > DRAG_START then
           -- The engine may take this lift back (a resting finger sends nothing
-          -- in Designer): check once the resume window is over.
+          -- in Designer), but only for a touch that dragged: check once the
+          -- resume window is over, with the Learn flag as it is now.
           cancelPending()
+          local learn = self.learn
+          self.pendingLearn = learn
           self.pending = E.after(RESUME_WAIT, function()
             self.pending = nil
-            submit()
+            submit(learn)
           end)
           E.invalidate()
         else
@@ -429,10 +479,14 @@ do
         if name == "Pattern" then
           readSecret()
         elseif name == "GridSize" then
-          buildGrid(clampInt(ctl.Value, GRID_MIN, GRID_MAX, GRID_DEFAULT))
-          cancelPending()
-          clearPath()
-          readSecret()
+          local n = clampInt(ctl.Value, GRID_MIN, GRID_MAX, GRID_DEFAULT)
+          if n ~= self.n then
+            -- a real change only: a same-value write keeps the drawing in progress
+            buildGrid(n)
+            cancelPending()
+            clearPath()
+            readSecret()
+          end
         elseif name == "Locked" then
           if ctl.Boolean then
             if not isLocked() then lock(true) end
@@ -471,7 +525,12 @@ do
         local locked = isLocked()
         local fb = self.feedback
         local colour = self.learn and T.accent2 or T.accent
-        if fb then colour = (fb.kind == "ok") and T.ok or T.danger end
+        local fbColour = colour
+        if fb then
+          fbColour = (fb.kind == "ok") and T.ok or T.danger
+          -- the result colours the trail it belongs to, not a drawing in progress
+          if not self.active then colour = fbColour end
+        end
         local dots, n, r = self.dots, self.n, self.r
         local path, seen = self.path, self.seen
         local showTrail = not self.masked and not locked
@@ -505,17 +564,18 @@ do
           end
         end
 
-        -- masked entry: one small dot per joined dot, like a hidden PIN
-        if self.masked and not locked and #path > 0 then
-          local step = 12
+        -- masked entry: one small dot per joined dot, like a hidden PIN, on
+        -- its own line under the top line
+        if self.masked and not locked and self.showMask and #path > 0 then
+          local step = 3 * MASK_R
           local x0 = W / 2 - (#path - 1) * step / 2
           for i = 1, #path do
-            c:circle(x0 + (i - 1) * step, textSize + 10, 4, { fill = colour })
+            c:circle(x0 + (i - 1) * step, self.maskY, MASK_R, { fill = colour })
           end
         end
 
         -- the top line: feedback, learn prompt, tries, or the lockout
-        local topY = textSize + 14
+        local topY = self.topY
         if locked then
           c:rect(0, 0, W, H, { fill = T.bg, opacity = 0.55 })
           local s = max(24, min(72, side * 0.18))
@@ -523,8 +583,10 @@ do
           c:text(W / 2, H / 2 + s * 0.5 + textSize, "Locked", { size = textSize + 2, fill = T.text, anchor = "middle", weight = "bold" })
           c:textFit(W / 2, H / 2 + s * 0.5 + textSize * 2.4, W - 16, "Try again in " .. remaining() .. " s",
                     { size = textSize, fill = T.muted, anchor = "middle" })
+        elseif not self.showTop then
+          -- no room above the dots: the colours alone carry the result
         elseif fb then
-          c:textFit(W / 2, topY, W - 16, fb.text, { size = textSize + 1, fill = colour, anchor = "middle", weight = "bold" })
+          c:textFit(W / 2, topY, W - 16, fb.text, { size = textSize + 1, fill = fbColour, anchor = "middle", weight = "bold" })
         elseif self.learn then
           c:textFit(W / 2, topY, W - 16, "Draw the new pattern", { size = textSize, fill = T.accent2, anchor = "middle", weight = "bold" })
         elseif self.tries > 0 and not self.active then
@@ -532,7 +594,7 @@ do
           c:textFit(W / 2, topY, W - 16, "Try " .. self.tries .. " of " .. maxTries, { size = textSize, fill = T.muted, anchor = "middle" })
         end
 
-        if E.hint and not self.active and not locked and not fb and not self.pending then
+        if E.hint and self.showHint and not self.active and not locked and not fb and not self.pending then
           local hint = HINT
           if #self.secret == 0 and not self.learn then hint = HINT_EMPTY end
           Shapes.hint(c, T, hint, W, H)
