@@ -1,0 +1,11 @@
+{
+  "name": "qsys-plugin-dev",
+  "version": "1.0.0",
+  "description": "Write, review and check Q-SYS Designer plugins (.qplug) in Lua: design-time API, control layout, embedded components, wiring and runtime code. Nikita Visual Arts – nikitavisual.art",
+  "author": {
+    "name": "Nikita Visual Arts – nikitavisual.art",
+    "url": "https://nikitavisual.art"
+  },
+  "homepage": "https://nikitavisual.art",
+  "keywords": ["q-sys", "qsys", "qplug", "lua", "qsc", "plugin", "audio", "dsp"]
+}

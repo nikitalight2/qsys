@@ -12,6 +12,9 @@ Q-SYS Designer plugins by Nikita Visual Arts.
 |---|---|---|
 | Mic Mixer | `plugins/NikitaMicMixer.qplug` | 2.0.0 |
 
+Tooling for writing and checking plugins lives in `tools/qsys-plugin-dev/`
+(see [Plugin development tooling](#plugin-development-tooling)).
+
 ## Mic Mixer
 
 A multi-mic console block for Q-SYS: any number of mics (1 to 16), optional
@@ -84,8 +87,30 @@ the debug output together with the Q-SYS Designer version.
 ```
 plugins/NikitaMicMixer.qplug   the plugin
 assets/brand/                  logo files used by the plugin and this README
+tools/qsys-plugin-dev/         coding-assistant plugin + skill for Q-SYS plugin work
 .vscode/                       editor settings and recommended extensions
 ```
+
+## Plugin development tooling
+
+`tools/qsys-plugin-dev/` is a coding-assistant plugin that bundles the
+`qsys-plugin-dev` skill: a guide to the Q-SYS plugin framework (design-time
+tables, layout, pins, components, wiring, runtime API), a branded plugin
+template, and three scripts that work on their own:
+
+| Script | What it does |
+|---|---|
+| `scripts/check_plugin.py` | Static checks for a `.qplug`: syntax, `PluginInfo`, `DefaultValue` versus `Value`, layout keys, enumerations, and (with the `lupa` Python package) a sandbox run of every design-time function with wiring cross-checks. |
+| `scripts/embed_image.py` | Turns a PNG or SVG into the base64 Lua string used for the header logo. |
+| `scripts/qrc_deploy.py` | Lists, fetches and pushes Lua scripts on a Q-SYS Core or Designer emulation over the QRC protocol (port 1710). |
+
+```bash
+pip install lupa   # optional, enables the syntax check and sandbox run
+python3 tools/qsys-plugin-dev/skills/qsys-plugin-dev/scripts/check_plugin.py plugins/NikitaMicMixer.qplug
+```
+
+See `tools/qsys-plugin-dev/README.md` for installing it as a plugin or as a
+bare skill.
 
 ## Editing the plugins in VS Code
 
@@ -94,9 +119,20 @@ Install **[Better Lua for Q-SYS Plugins](https://marketplace.visualstudio.com/it
 documentation for the Q-SYS plugin design-time functions and properties, based
 on the Q-SYS Developer Documentation, and works in `.lua` and `.qplug` files.
 
-Opening this folder in VS Code prompts you to install it (it is listed in
-`.vscode/extensions.json`), and `.vscode/settings.json` maps `*.qplug` to Lua
-so highlighting and IntelliSense apply to the plugin sources.
+Two more extensions are worth having:
+
+- **[Lua for Q-SYS Plugins](https://github.com/shorty456132/qsys-vscode-extension)**
+  (`shorty456132.lua-for-qsys`): snippets for the plugin tables
+  (`ctrls`, `props`, `layout`, `graphics`, `components`).
+- **[Q-SYS Lua Script Deployment](https://github.com/White-Label-AV/qsys-deploy-vscode)**
+  (`WhiteLabelAV.qsys-deploy-vscode`): pushes a Lua file into a Text
+  Controller or Control Script on a Core or Designer emulation from the
+  editor (Ctrl+Alt+D). The `qrc_deploy.py` script in `tools/` does the same
+  from the terminal.
+
+Opening this folder in VS Code prompts you to install them (they are listed
+in `.vscode/extensions.json`), and `.vscode/settings.json` maps `*.qplug` to
+Lua so highlighting and IntelliSense apply to the plugin sources.
 
 ---
 Nikita Visual Arts – nikitavisual.art

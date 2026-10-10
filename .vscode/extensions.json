@@ -3,7 +3,13 @@
   // Better Lua for Q-SYS Plugins: autocomplete and hover docs for the
   // Q-SYS plugin design-time API in .lua and .qplug files.
   // https://marketplace.visualstudio.com/items?itemName=integratorblocks.qsys-intellisense
+  // Lua for Q-SYS Plugins: snippets for the plugin tables.
+  // https://github.com/shorty456132/qsys-vscode-extension
+  // Q-SYS Lua Script Deployment: push Lua to a Core or Designer emulation.
+  // https://github.com/White-Label-AV/qsys-deploy-vscode
   "recommendations": [
-    "integratorblocks.qsys-intellisense"
+    "integratorblocks.qsys-intellisense",
+    "shorty456132.lua-for-qsys",
+    "WhiteLabelAV.qsys-deploy-vscode"
   ]
 }

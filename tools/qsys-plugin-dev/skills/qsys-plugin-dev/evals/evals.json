@@ -1,0 +1,23 @@
+{
+  "skill_name": "qsys-plugin-dev",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "Make me a Q-SYS plugin: a 4-channel gain block with a mute button per channel, a level meter per channel and a status LED. Channel count should be a property from 1 to 8. Save it as plugins/NikitaGain.qplug.",
+      "expected_output": "A complete .qplug with PluginInfo (fresh GUID, Nikita Visual Arts author), a Channel Count property, Gain/Mute/Level/Status controls using DefaultValue, a layout keyed with the Count rule, pins, a mixer component with wiring, and a runtime block that handles Count = 1. check_plugin.py reports 0 errors.",
+      "files": []
+    },
+    {
+      "id": 2,
+      "prompt": "Review plugins/NikitaMicMixer.qplug and tell me what would stop it from loading in Q-SYS Designer or behaving wrongly at runtime. Don't change the file.",
+      "expected_output": "A review that runs the checker, reads the file with the design-time versus runtime split in mind, and lists concrete findings with line references and honest uncertainty about component Type strings.",
+      "files": []
+    },
+    {
+      "id": 3,
+      "prompt": "Add a second page called Setup to my Q-SYS plugin with a combo box to pick a mode (Stereo / Mono / Mid-Side) and a knob for a crossover frequency from 20 Hz to 20 kHz.",
+      "expected_output": "GetPages returns two pages, GetControlLayout branches on props[\"page_index\"], a Text control bound to a ComboBox layout with Choices set at runtime, a Knob with ControlUnit Hz and DefaultValue, and the mode change handled in the runtime block.",
+      "files": []
+    }
+  ]
+}
