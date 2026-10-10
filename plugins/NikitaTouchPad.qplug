@@ -1812,6 +1812,4499 @@ Modes["XY Pad"] = {
     return self
   end,
 }
+-- ===== 11_mode_swipe.lua =====
+-- Nikita Visual Arts – nikitavisual.art
+-- Touch Pad for Q-SYS: Swipe Layer mode
+--
+-- A pad that shows almost nothing: a finger trail that fades behind the
+-- touch and a brief chevron in the direction of a recognised swipe. The
+-- swipe pulses (SwipeLeft / SwipeRight / SwipeUp / SwipeDown) are the common
+-- outputs; this mode adds the Setup knob `SwipeDistance` (fraction of the pad
+-- diagonal a swipe must cover, 0.05..0.8, default 0.2) and recognises the
+-- swipes the engine's fixed 0.2 threshold leaves out when the knob sits
+-- below it. A swipe needs distance and speed: 0.6 s at most from the start
+-- of its stroke to the lift.
+--
+-- Quick swipes in a row each count. With Panel Touch wired every lift is
+-- certain, so the engine already separates them. Without Panel Touch a
+-- finger that lands again within the release time looks like one long
+-- touch whose position jumped: the mode splits the touch into strokes at
+-- such a jump, classifies the stroke that just ended and pulses its swipe at
+-- once, so the second swipe is not lost.
+--
+-- Design time (controls, pages, layout) and the runtime `create(E)` live here.
+
+Modes = Modes or {}
+
+do
+  local HINT = "Swipe in any direction"
+  local SWIPE_TIME, SWIPE_RATIO = 0.6, 1.5    -- spec 5.4
+  local DIST_MIN, DIST_MAX, DIST_DEFAULT = 0.05, 0.8, 0.2
+  local TRAIL_LIFE = 0.7                      -- s a trail point stays visible
+  local TRAIL_MAX = 40                        -- points kept (older ones are dropped)
+  local TRAIL_STEPS = 8                       -- opacity buckets (polylines per frame at most)
+  local CHEVRON_LIFE = 0.55                   -- s the chevron stays visible
+  local JUMP_FRACTION = 0.3                   -- a single report moving this much of the diagonal is a new stroke
+  local DIRS = {
+    left = { -1, 0, "SwipeLeft" }, right = { 1, 0, "SwipeRight" },
+    up = { 0, -1, "SwipeUp" }, down = { 0, 1, "SwipeDown" },
+  }
+  local PIN_DIR = { SwipeLeft = "left", SwipeRight = "right", SwipeUp = "up", SwipeDown = "down" }
+
+  Modes["Swipe Layer"] = {
+    id = "swipe",
+    pretty = "Swipe Layer",
+    hint = HINT,
+
+    controls = function(C, props)
+      C.add({ Name = "SwipeDistance", ControlType = "Knob", ControlUnit = "Float",
+              Min = DIST_MIN, Max = DIST_MAX, DefaultValue = DIST_DEFAULT,
+              PinStyle = "Input", Group = "Setup" })
+    end,
+
+    pages = {},
+
+    layout = function(L, page, props, ctx)
+      if page == "Pad" then
+        L.padDisplay(ctx)
+        L.gesture(ctx)
+        L.hint(ctx, HINT)
+      elseif page == "Setup" then
+        local ix, iy, iw = L.section(ctx, "S W I P E", 56)
+        L.caption("DISTANCE", { ix - 4, iy }, { 64, 10 })
+        L.knob("SwipeDistance", { ix + 12, iy + 12 }, { 32, 32 }, { color = Nikita.Orange })
+        L.label("Swipe distance: the fraction of the pad diagonal a quick stroke\n(0.6 s or less) must cover to count as a swipe. Default 0.2.",
+                { ix + 72, iy + 4 }, { iw - 72, 40 })
+      end
+    end,
+
+    padColour = function(T)
+      return T.bg
+    end,
+
+    create = function(E)
+      local W, H, T = E.W, E.H, E.T
+      local sqrt, abs, floor, min, max = math.sqrt, math.abs, math.floor, math.min, math.max
+      local DIAG = sqrt(W * W + H * H)
+      local JUMP = max(JUMP_FRACTION * DIAG, 120)
+      local width = min(10, max(4, DIAG * 0.012))       -- trail stroke width
+      local chevronSize = min(W, H) * 0.36
+      local self = {
+        fraction = DIST_DEFAULT,
+        down = false,
+        x = 0, y = 0,
+        trail = {}, first = 1,                           -- points { x, y, t }; first = index of the oldest
+        stroke = nil,                                    -- { x0, y0, t0, x, y, t, fresh }
+        chevron = nil,                                   -- { dir, t }
+        animating = false,
+        swipes = 0,                                      -- swipes the mode pulsed itself (tests)
+      }
+
+      -- ---------- helpers ----------
+      local function readFraction()
+        local ctl = E.ctl("SwipeDistance")
+        local v = ctl and tonumber(ctl.Value) or nil
+        if v == nil then v = DIST_DEFAULT end
+        if v < DIST_MIN then v = DIST_MIN end
+        if v > DIST_MAX then v = DIST_MAX end
+        self.fraction = v
+        return v
+      end
+
+      -- Direction of a stroke from (x0, y0, t0) to (x, y, t), or nil.
+      local function classify(x0, y0, t0, x, y, t)
+        local dx, dy = x - x0, y - y0
+        local dist = sqrt(dx * dx + dy * dy)
+        if t - t0 > SWIPE_TIME or dist < self.fraction * DIAG then return nil end
+        local ax, ay = abs(dx), abs(dy)
+        if ax >= SWIPE_RATIO * ay then return (dx > 0) and "right" or "left" end
+        if ay >= SWIPE_RATIO * ax then return (dy > 0) and "down" or "up" end
+        return nil
+      end
+
+      local function animate(on)
+        if on ~= self.animating then
+          self.animating = on
+          E.animate(on)
+        end
+      end
+
+      -- The chevron is timed from now, not from the handler's t: an inferred
+      -- lift carries the time of the last report, already ReleaseTime ago.
+      local function showChevron(dir)
+        if not DIRS[dir] then return end
+        self.chevron = { dir = dir, t = E.now() }
+        animate(true)
+        E.invalidate()
+      end
+
+      -- A swipe the engine did not see: pulse the pin and name the gesture.
+      local function ownSwipe(dir)
+        self.swipes = self.swipes + 1
+        E.pulse(DIRS[dir][3])
+        E.setGesture("SWIPE " .. dir)
+        E.dbg("swipe layer: " .. dir .. " (mode threshold)")
+        showChevron(dir)
+      end
+
+      local function addPoint(x, y, t)
+        local trail = self.trail
+        trail[#trail + 1] = { x, y, t }
+        if #trail - self.first + 1 > TRAIL_MAX then self.first = self.first + 1 end
+        if self.first > 64 then
+          -- compact the array now and then so it never grows without bound
+          local fresh, n = {}, 0
+          for i = self.first, #trail do n = n + 1; fresh[n] = trail[i] end
+          self.trail, self.first = fresh, 1
+        end
+      end
+
+      -- Drops points older than TRAIL_LIFE; returns true when some remain.
+      local function prune(now)
+        local trail = self.trail
+        local i, n = self.first, #trail
+        while i <= n and now - trail[i][3] > TRAIL_LIFE do i = i + 1 end
+        if i > n then
+          self.trail, self.first = {}, 1
+          return false
+        end
+        self.first = i
+        return true
+      end
+
+      local function newStroke(x, y, t, fresh)
+        self.stroke = { x0 = x, y0 = y, t0 = t, x = x, y = y, t = t, fresh = fresh }
+      end
+
+      -- ---------- touch events ----------
+      function self:onStart()
+        readFraction()
+      end
+
+      function self:onTouchStart(x, y, t)
+        self.down, self.x, self.y = true, x, y
+        addPoint(x, y, t)
+        newStroke(x, y, t, false)
+        animate(true)
+        E.invalidate()
+      end
+
+      function self:onTouchMove(x, y, t, dx, dy)
+        local s = self.stroke
+        if s and sqrt(dx * dx + dy * dy) >= JUMP then
+          -- The finger landed somewhere else within the release time: the
+          -- stroke that just ended is classified now, the new one starts here.
+          local dir = classify(s.x0, s.y0, s.t0, s.x, s.y, s.t)
+          if dir then ownSwipe(dir) end
+          self.trail, self.first = {}, 1
+          newStroke(x, y, t, true)
+        elseif s then
+          s.x, s.y, s.t = x, y, t
+        else
+          newStroke(x, y, t, false)
+        end
+        self.x, self.y = x, y
+        addPoint(x, y, t)
+        E.invalidate()
+      end
+
+      function self:onTouchEnd(x, y, t, info)
+        self.down, self.x, self.y = false, x, y
+        local s = self.stroke
+        self.stroke = nil
+        if info.aborted then
+          self.trail, self.first = {}, 1
+          E.invalidate()
+          return
+        end
+        if s and (x ~= s.x or y ~= s.y) then addPoint(x, y, t) end
+        local dir = info.swipe
+        if dir then
+          showChevron(dir)
+        elseif s and not info.tap and (not info.resumed or s.fresh) then
+          -- Below the engine's fixed threshold but above SwipeDistance, or a
+          -- stroke that started after a jump: the mode classifies it.
+          dir = classify(s.x0, s.y0, s.t0, x, y, t)
+          if dir then ownSwipe(dir) end
+        end
+        E.invalidate()
+      end
+
+      function self:onTouchResume(x, y, t)
+        self.down, self.x, self.y = true, x, y
+        -- The drag goes on but its swipe was classified at the inferred lift.
+        newStroke(x, y, t, false)
+        addPoint(x, y, t)
+        animate(true)
+        E.invalidate()
+      end
+
+      function self:onControl(name, index, ctl)
+        if name == "SwipeDistance" then
+          readFraction()
+          return
+        end
+        local dir = PIN_DIR[name]
+        if dir and ctl and ctl.Boolean then
+          -- A script pulsing a swipe pin: show the chevron, pulse nothing.
+          showChevron(dir)
+        end
+      end
+
+      function self:onLock(locked)
+        self.down, self.stroke, self.chevron = false, nil, nil
+        self.trail, self.first = {}, 1
+        animate(false)
+        E.invalidate()
+      end
+
+      function self:tick(dt)
+        local now = E.now()
+        local alive = prune(now) or self.down
+        if self.chevron and now - self.chevron.t > CHEVRON_LIFE then self.chevron = nil end
+        if self.chevron then alive = true end
+        if not alive then animate(false) end
+        E.invalidate()
+      end
+
+      -- ---------- drawing ----------
+      local function drawTrail(c, now)
+        local trail, first, n = self.trail, self.first, #self.trail
+        if n - first < 1 then return end
+        local pts, count, bucket = {}, 0, nil
+        local function flush()
+          if count >= 4 and bucket then
+            local a = bucket / TRAIL_STEPS
+            c:polyline(pts, { stroke = T.accent, sw = width * (0.35 + 0.65 * a), opacity = 0.15 + 0.85 * a,
+                              cap = "round", join = "round" })
+          end
+          pts, count = {}, 0
+        end
+        for i = first + 1, n do
+          local p = trail[i]
+          local age = now - p[3]
+          local a = 1 - age / TRAIL_LIFE
+          if a < 0 then a = 0 end
+          local b = floor(a * TRAIL_STEPS + 0.999)
+          if b < 1 then b = 1 end
+          if b ~= bucket then
+            flush()
+            bucket = b
+            local q = trail[i - 1]
+            pts[1], pts[2], count = q[1], q[2], 2
+          end
+          pts[count + 1], pts[count + 2] = p[1], p[2]
+          count = count + 2
+        end
+        flush()
+      end
+
+      local function drawChevron(c, now)
+        local ch = self.chevron
+        if not ch then return end
+        local a = 1 - (now - ch.t) / CHEVRON_LIFE
+        if a <= 0 then return end
+        local d = DIRS[ch.dir]
+        local fx, fy = d[1], d[2]
+        local px, py = -fy, fx
+        local s = chevronSize
+        local slide = s * 0.3 * (1 - a)
+        local cx, cy = W / 2 + fx * slide, H / 2 + fy * slide
+        local sw = width * 1.6
+        local function chevron(ox, oy, opacity)
+          local bx, by = cx + fx * ox, cy + fy * oy
+          local tipx, tipy = bx + fx * s * 0.22, by + fy * s * 0.22
+          local tx, ty = bx - fx * s * 0.22, by - fy * s * 0.22
+          c:polyline({ tx + px * s * 0.5, ty + py * s * 0.5, tipx, tipy, tx - px * s * 0.5, ty - py * s * 0.5 },
+                     { stroke = T.accent2, sw = sw, opacity = opacity, cap = "round", join = "round" })
+        end
+        chevron(-s * 0.3, -s * 0.3, a * 0.35)
+        chevron(0, 0, a)
+      end
+
+      function self:draw(c)
+        local now = E.now()
+        local hasTrail = prune(now)
+        if hasTrail then drawTrail(c, now) end
+        if self.down then
+          c:circle(self.x, self.y, width * 2.2, { fill = T.accent, opacity = 0.25 })
+          c:circle(self.x, self.y, width * 0.9, { fill = T.accent })
+        end
+        drawChevron(c, now)
+        if E.hint and not self.down and not hasTrail and not self.chevron then
+          Shapes.hint(c, T, HINT, W, H)
+        end
+      end
+
+      return self
+    end,
+  }
+end
+-- ===== 12_mode_joystick.lua =====
+-- Nikita Visual Arts – nikitavisual.art
+-- Touch Pad for Q-SYS: Joystick mode
+--
+-- A virtual joystick: the stick sits where the finger is, measured from the
+-- centre of the pad and scaled by the base radius (the rim is full travel).
+-- Outputs JoyX / JoyY (-1..1), Magnitude (0..1) and the four direction LEDs
+-- (eight-way sectors). Deadzone and Curve shape the response, InvertPan /
+-- InvertTilt flip the axes, Sticky keeps the stick where it is left, Home
+-- re-centres it (and homes the camera). Without Sticky the stick springs
+-- back over 0.15 s through tick(). A camera driver (E.camera) is driven at
+-- the stick's output; the Demo camera's scene is drawn on the Camera View.
+-- Safety: a stuck Panel Touch is released after 30 s without movement.
+
+Modes = Modes or {}
+
+do
+  local floor, sqrt, abs, min, max = math.floor, math.sqrt, math.abs, math.min, math.max
+  local sformat = string.format
+
+  local HINT = "Drag the stick. Double tap: home"
+  local SPRING_TIME = 0.15                -- s, the spring-back animation
+  local STUCK_TIME = 30                   -- s, a resting finger under a stuck Panel Touch
+  local SECTOR = 0.383                    -- cos 67.5 deg: eight-way direction sectors
+  local CURVES = { "Linear", "Squared", "Cubed" }
+
+  local function clamp(v, lo, hi)
+    if v < lo then return lo elseif v > hi then return hi end
+    return v
+  end
+
+  Modes["Joystick"] = {
+    id = "joystick",
+    pretty = "Joystick",
+    hint = HINT,
+
+    controls = function(C, props)
+      C.add({ Name = "JoyX", ControlType = "Knob", ControlUnit = "Float", Min = -1, Max = 1,
+              DefaultValue = 0, PinStyle = "Output" })
+      C.add({ Name = "JoyY", ControlType = "Knob", ControlUnit = "Float", Min = -1, Max = 1,
+              DefaultValue = 0, PinStyle = "Output" })
+      C.add({ Name = "Magnitude", ControlType = "Knob", ControlUnit = "Float", Min = 0, Max = 1,
+              DefaultValue = 0, PinStyle = "Output" })
+      C.add({ Name = "DirLeft", ControlType = "Indicator", IndicatorType = "Led", PinStyle = "Output" })
+      C.add({ Name = "DirRight", ControlType = "Indicator", IndicatorType = "Led", PinStyle = "Output" })
+      C.add({ Name = "DirUp", ControlType = "Indicator", IndicatorType = "Led", PinStyle = "Output" })
+      C.add({ Name = "DirDown", ControlType = "Indicator", IndicatorType = "Led", PinStyle = "Output" })
+      C.add({ Name = "Deadzone", ControlType = "Knob", ControlUnit = "Float", Min = 0, Max = 0.5,
+              DefaultValue = 0.08, PinStyle = "Input" })
+      C.add({ Name = "Curve", ControlType = "Text", DefaultValue = "Linear", PinStyle = "Input",
+              Choices = { "Linear", "Squared", "Cubed" } })
+      C.add({ Name = "Sticky", ControlType = "Button", ButtonType = "Toggle", PinStyle = "Input" })
+      C.add({ Name = "Home", ControlType = "Button", ButtonType = "Trigger", PinStyle = "Both" })
+      C.add({ Name = "InvertPan", ControlType = "Button", ButtonType = "Toggle", PinStyle = "Both" })
+      C.add({ Name = "InvertTilt", ControlType = "Button", ButtonType = "Toggle", PinStyle = "Both" })
+    end,
+
+    pages = {},
+
+    layout = function(L, page, props, ctx)
+      if page == "Pad" then
+        L.padDisplay(ctx)
+        L.gesture(ctx)
+        L.hint(ctx, HINT)
+        L.sideCaption(ctx, "JOYSTICK")
+        L.sideButton(ctx, "Home", "HOME")
+        L.sideButton(ctx, "Sticky", "STICKY")
+        L.sideButton(ctx, "InvertPan", "INVERT PAN")
+        L.sideButton(ctx, "InvertTilt", "INVERT TILT")
+      elseif page == "Setup" then
+        local ix, iy, iw = L.section(ctx, "J O Y S T I C K", 112)
+        L.caption("DEADZONE", { ix, iy }, { 56, 10 })
+        L.knob("Deadzone", { ix + 12, iy + 12 }, { 32, 32 }, { color = Nikita.Purple })
+        L.caption("CURVE", { ix + 68, iy }, { 96, 10 }, "Left")
+        L.combo("Curve", { ix + 68, iy + 14 }, { 96, 22 })
+        L.toggle("Sticky", "STICKY", { ix + 176, iy + 12 }, { 60, 28 })
+        L.trigger("Home", "HOME", { ix + 244, iy + 12 }, { 60, 28 })
+        L.toggle("InvertPan", "INVERT PAN", { ix, iy + 52 }, { 96, 28 })
+        L.toggle("InvertTilt", "INVERT TILT", { ix + 104, iy + 52 }, { 96, 28 })
+        L.label("Deadzone: travel ignored around the centre. Curve: Linear, Squared or Cubed response.\nSticky keeps the stick where it is left; off, it springs back on release.",
+                { ix, iy + 86 }, { iw, 26 })
+      end
+    end,
+
+    padColour = function(T)
+      return T.bg
+    end,
+
+    create = function(E)
+      local W, H, T = E.W, E.H, E.T
+      local cx, cy = W / 2, H / 2
+      local inset = clamp(floor(min(W, H) * 0.06), 8, 28)
+      local R = min(W, H) / 2 - inset              -- base radius: full travel
+      local KNOB = clamp(floor(R * 0.16), 8, 28)
+      local self = {
+        px = 0, py = 0,              -- stick position in -1..1 (y up), unit disc
+        down = false,
+        lastMoveAt = 0,
+        spring = nil,                -- { x0, y0, t } while springing back
+        jx = 0, jy = 0, mag = 0,     -- the published outputs
+        leds = { false, false, false, false },   -- left, right, up, down
+        driveX = nil, driveY = nil,  -- last camera drive sent
+        base = nil,                  -- cached static drawing
+      }
+
+      -- ---------- controls ----------
+      local function knob(name, default, lo, hi)
+        local c = E.ctl(name)
+        if c == nil then return default end
+        local v = c.Value
+        if type(v) ~= "number" then return default end
+        return clamp(v, lo, hi)
+      end
+      local function flag(name)
+        local c = E.ctl(name)
+        return c ~= nil and c.Boolean == true
+      end
+      local function curveName()
+        local c = E.ctl("Curve")
+        local s = c and c.String or "Linear"
+        for i = 1, #CURVES do
+          if s == CURVES[i] then return s end
+        end
+        return "Linear"
+      end
+
+      -- ---------- the response: deadzone, curve, inverts, LEDs ----------
+      local function shaped()
+        local m = sqrt(self.px * self.px + self.py * self.py)
+        if m > 1 then m = 1 end
+        local dz = knob("Deadzone", 0.08, 0, 0.5)
+        local ux, uy = 0, 0
+        if m > 0 then ux, uy = self.px / m, self.py / m end
+        local out = 0
+        if m > dz then
+          out = (m - dz) / (1 - dz)
+          local curve = curveName()
+          if curve == "Squared" then out = out * out
+          elseif curve == "Cubed" then out = out * out * out end
+        end
+        if flag("InvertPan") then ux = -ux end
+        if flag("InvertTilt") then uy = -uy end
+        return ux * out, uy * out, out, ux, uy
+      end
+
+      local function drive(jx, jy)
+        local cam = E.camera
+        if not cam or type(cam.drive) ~= "function" then return end
+        if jx == self.driveX and jy == self.driveY then return end
+        self.driveX, self.driveY = jx, jy
+        cam:drive(jx, jy)
+      end
+
+      local function publish()
+        local jx, jy, mag, ux, uy = shaped()
+        self.jx, self.jy, self.mag = jx, jy, mag
+        local active = mag > 0
+        local leds = self.leds
+        leds[1] = active and ux < -SECTOR
+        leds[2] = active and ux > SECTOR
+        leds[3] = active and uy > SECTOR
+        leds[4] = active and uy < -SECTOR
+        E.out("JoyX", jx)
+        E.out("JoyY", jy)
+        E.out("Magnitude", mag)
+        E.out("DirLeft", leds[1])
+        E.out("DirRight", leds[2])
+        E.out("DirUp", leds[3])
+        E.out("DirDown", leds[4])
+        drive(jx, jy)
+      end
+
+      local function updateAnim()
+        E.animate(self.down or self.spring ~= nil)
+      end
+
+      -- Finger (pad px) -> stick position on the unit disc.
+      local function setStick(x, y)
+        local dx, dy = (x - cx) / R, (cy - y) / R
+        local m = sqrt(dx * dx + dy * dy)
+        if m > 1 then dx, dy = dx / m, dy / m end
+        self.px, self.py = dx, dy
+        self.spring = nil
+        publish()
+        E.invalidate()
+      end
+
+      -- The stick springs back to the centre over SPRING_TIME (via tick);
+      -- the camera stops at once.
+      local function release()
+        if self.px == 0 and self.py == 0 then
+          self.spring = nil
+          updateAnim()
+          return
+        end
+        drive(0, 0)
+        self.spring = { x0 = self.px, y0 = self.py, t = 0 }
+        updateAnim()
+        E.invalidate()
+      end
+
+      local function centre()
+        self.px, self.py = 0, 0
+        self.spring = nil
+        publish()
+        updateAnim()
+        E.invalidate()
+      end
+
+      local function home(fromPad)
+        centre()
+        local cam = E.camera
+        if cam and type(cam.home) == "function" then cam:home() end
+        if fromPad then
+          E.pulse("Home")
+          E.setGesture("HOME")
+        end
+      end
+
+      -- ---------- touches ----------
+      function self:onTouchStart(x, y, t)
+        self.down = true
+        self.lastMoveAt = t
+        setStick(x, y)
+        updateAnim()
+      end
+
+      function self:onTouchMove(x, y, t, dx, dy)
+        self.lastMoveAt = t
+        setStick(x, y)
+      end
+
+      function self:onTouchResume(x, y, t)
+        self:onTouchStart(x, y, t)
+      end
+
+      function self:onTouchEnd(x, y, t, info)
+        self.down = false
+        if info and info.aborted then
+          centre()
+        elseif flag("Sticky") then
+          updateAnim()
+          E.invalidate()
+        else
+          release()
+        end
+      end
+
+      function self:onGesture(g)
+        if g.type == "double" then home(true) end
+      end
+
+      function self:onLock(locked)
+        if locked then
+          self.down = false
+          centre()
+        end
+        E.invalidate()
+      end
+
+      -- ---------- pins ----------
+      function self:onControl(name, index, ctl)
+        if name == "Home" then
+          if ctl.Boolean then home(false) end
+        elseif name == "Sticky" then
+          if not ctl.Boolean and not self.down then release() end
+        elseif name == "InvertPan" or name == "InvertTilt" or name == "Deadzone" or name == "Curve" then
+          publish()
+          E.invalidate()
+        else
+          local cam = E.camera
+          if cam and type(cam.onControl) == "function" then
+            cam:onControl(name, index, ctl)
+            if name == "MaxSpeed" and ((self.driveX or 0) ~= 0 or (self.driveY or 0) ~= 0) then
+              -- the new speed applies to the drive in progress
+              self.driveX, self.driveY = nil, nil
+              drive(self.jx, self.jy)
+            end
+          end
+        end
+      end
+
+      -- ---------- animation and the stuck guard ----------
+      function self:tick(dt)
+        local s = self.spring
+        if s then
+          s.t = s.t + dt
+          local k = s.t / SPRING_TIME
+          if k >= 1 then
+            self.px, self.py, self.spring = 0, 0, nil
+          else
+            local e = 1 - (1 - k) * (1 - k)        -- ease out
+            self.px, self.py = s.x0 * (1 - e), s.y0 * (1 - e)
+          end
+          publish()
+          E.invalidate()
+        end
+        if self.down and E.now() - self.lastMoveAt > STUCK_TIME then
+          self.down = false
+          E.dbg("joystick: released a stuck touch")
+          release()
+        end
+        updateAnim()
+      end
+
+      -- ---------- drawing ----------
+      -- The base never changes: drawn once and replayed as one raw element.
+      local function baseRaw()
+        if self.base then return self.base end
+        local c = Svg.new(W, H, { limit = 20000 })
+        c:circle(cx, cy, R + 4, { fill = T.panel, stroke = T.line, sw = 1 })
+        c:circle(cx, cy, R, { fill = T.well, stroke = T.line, sw = 1 })
+        c:circle(cx, cy, R * 0.5, { fill = "none", stroke = T.line, sw = 1, opacity = 0.6 })
+        c:line(cx - R, cy, cx + R, cy, { stroke = T.line, sw = 1, opacity = 0.7 })
+        c:line(cx, cy - R, cx, cy + R, { stroke = T.line, sw = 1, opacity = 0.7 })
+        local s = clamp(floor(R * 0.12), 10, 22)
+        local d = R - s * 0.7
+        Shapes.icon(c, "chevronLeft", cx - d, cy, s, T.muted)
+        Shapes.icon(c, "chevronRight", cx + d, cy, s, T.muted)
+        Shapes.icon(c, "up", cx, cy - d, s, T.muted)
+        Shapes.icon(c, "down", cx, cy + d, s, T.muted)
+        self.base = table.concat(c.parts)
+        self.chevron = { s = s, d = d }
+        return self.base
+      end
+
+      function self:draw(c)
+        c:raw(baseRaw())
+        local dz = knob("Deadzone", 0.08, 0, 0.5)
+        if dz > 0 then
+          c:circle(cx, cy, R * dz, { fill = "none", stroke = T.accent3, sw = 1, dash = { 3, 3 }, opacity = 0.8 })
+        end
+        local ch = self.chevron
+        local leds = self.leds
+        if leds[1] then Shapes.icon(c, "chevronLeft", cx - ch.d, cy, ch.s, T.accent) end
+        if leds[2] then Shapes.icon(c, "chevronRight", cx + ch.d, cy, ch.s, T.accent) end
+        if leds[3] then Shapes.icon(c, "up", cx, cy - ch.d, ch.s, T.accent) end
+        if leds[4] then Shapes.icon(c, "down", cx, cy + ch.d, ch.s, T.accent) end
+        local kx, ky = cx + self.px * R, cy - self.py * R
+        if self.px ~= 0 or self.py ~= 0 then
+          c:line(cx, cy, kx, ky, { stroke = T.accent, sw = 4, opacity = 0.5, cap = "round" })
+        end
+        if self.down then
+          Shapes.dot(c, T, kx, ky, KNOB)
+        else
+          c:circle(kx, ky, KNOB, { fill = T.accent, stroke = T.onAccent, sw = 1, opacity = 0.85 })
+        end
+        c:text(cx, 20, sformat("X %+.2f   Y %+.2f", self.jx, self.jy),
+          { size = 12, fill = T.muted, anchor = "middle" })
+        if E.hint and not self.down then
+          Shapes.hint(c, T, HINT, W, H)
+        end
+      end
+
+      -- Camera View (Demo camera): the simulated scene.
+      function self:drawCamera(c)
+        local cam = E.camera
+        if cam and type(cam.drawView) == "function" then cam:drawView(c) end
+      end
+
+      function self:onStart()
+        publish()
+      end
+
+      return self
+    end,
+  }
+end
+-- ===== 13_mode_ptzpad.lua =====
+-- Nikita Visual Arts – nikitavisual.art
+-- Touch Pad for Q-SYS: PTZ Pad mode
+--
+-- Drag to aim (spec 3.4). The pad is a map of everything the camera can
+-- reach: a drag moves the aim like a trackpad (relative, scaled by
+-- Sensitivity), so a plain tap moves nothing and a double tap sends the
+-- aim home. Outputs: Pan, Tilt (0..1 absolute aim, 0.5 = home), PanSpeed,
+-- TiltSpeed (-1..1 while dragging; 1 = one pad width per half second),
+-- the direction LEDs, Home (Both), InvertPan / InvertTilt (Both), HFOV and
+-- OpticalZoom (the camera's horizontal field of view in degrees and its
+-- maximum optical zoom factor: they size the view box drawn on the pad).
+-- With a camera set (E.camera) the aim is sent as an absolute position
+-- (pan -170..170 deg, tilt -90..90 deg) at most ten times a second while
+-- dragging, Zoom +/- drive the camera's zoom, and the Camera View shows
+-- the Demo camera's scene.
+
+Modes = Modes or {}
+
+do
+  local floor, abs, min, max, sqrt = math.floor, math.abs, math.min, math.max, math.sqrt
+  local sformat = string.format
+
+  local HINT = "Drag to aim. Double tap = home"
+  local PAN_SPAN, TILT_SPAN = 340, 180      -- degrees across the pad (Pan 0..1, Tilt 0..1)
+  local SPEED_REF = 2.0                     -- pad widths per second that read as speed 1
+  local DRAG_START = 12                     -- px: a touch that moves less is a tap (spec 5.4)
+  local LED_ON = 0.02                       -- |speed| above which a direction LED lights
+  local STALL = 0.15                        -- s without a report: speeds fall to 0
+  local HOME_TIME = 0.25                    -- s: the aim glides home
+  local CAM_RATE = 0.1                      -- s between absolute positions sent to a camera
+  local ZOOM_POLL = 0.2                     -- s between zoom readings while Zoom +/- is held
+  local HOME_GUARD = 0.5                    -- s: the trailing edge of a Home pulse is not a second home
+
+  local function clamp(v, lo, hi)
+    if v < lo then return lo elseif v > hi then return hi end
+    return v
+  end
+
+  Modes["PTZ Pad"] = {
+    id = "ptzpad",
+    pretty = "PTZ Pad",
+    hint = HINT,
+
+    controls = function(C, props)
+      C.add{ Name = "Pan", ControlType = "Knob", ControlUnit = "Float", Min = 0, Max = 1, DefaultValue = 0.5, PinStyle = "Output" }
+      C.add{ Name = "Tilt", ControlType = "Knob", ControlUnit = "Float", Min = 0, Max = 1, DefaultValue = 0.5, PinStyle = "Output" }
+      C.add{ Name = "PanSpeed", ControlType = "Knob", ControlUnit = "Float", Min = -1, Max = 1, DefaultValue = 0, PinStyle = "Output" }
+      C.add{ Name = "TiltSpeed", ControlType = "Knob", ControlUnit = "Float", Min = -1, Max = 1, DefaultValue = 0, PinStyle = "Output" }
+      C.add{ Name = "DirLeft", ControlType = "Indicator", IndicatorType = "Led", PinStyle = "Output" }
+      C.add{ Name = "DirRight", ControlType = "Indicator", IndicatorType = "Led", PinStyle = "Output" }
+      C.add{ Name = "DirUp", ControlType = "Indicator", IndicatorType = "Led", PinStyle = "Output" }
+      C.add{ Name = "DirDown", ControlType = "Indicator", IndicatorType = "Led", PinStyle = "Output" }
+      C.add{ Name = "Sensitivity", ControlType = "Knob", ControlUnit = "Float", Min = 0.2, Max = 3, DefaultValue = 1, PinStyle = "Input" }
+      C.add{ Name = "Home", ControlType = "Button", ButtonType = "Trigger", PinStyle = "Both" }
+      C.add{ Name = "InvertPan", ControlType = "Button", ButtonType = "Toggle", PinStyle = "Both" }
+      C.add{ Name = "InvertTilt", ControlType = "Button", ButtonType = "Toggle", PinStyle = "Both" }
+      C.add{ Name = "HFOV", ControlType = "Knob", ControlUnit = "Float", Min = 20, Max = 120, DefaultValue = 60, PinStyle = "Input", Group = "Camera" }
+      C.add{ Name = "OpticalZoom", ControlType = "Knob", ControlUnit = "Float", Min = 1, Max = 40, DefaultValue = 12, PinStyle = "Input", Group = "Camera" }
+    end,
+
+    pages = {},
+
+    layout = function(L, page, props, ctx)
+      if page == "Pad" then
+        L.padDisplay(ctx)
+        L.gesture(ctx)
+        L.hint(ctx, HINT)
+        L.sideCaption(ctx, "AIM")
+        L.sideButton(ctx, "Home", "HOME")
+        L.sideButton(ctx, "InvertPan", "FLIP PAN")
+        L.sideButton(ctx, "InvertTilt", "FLIP TILT")
+      elseif page == "Setup" then
+        local ix, iy = L.section(ctx, "P T Z  P A D", 48)
+        L.grid({ "Sensitivity", "HFOV", "OpticalZoom" }, ix, iy, 3, 96, 48)
+      end
+    end,
+
+    padColour = function(T)
+      return T.bg
+    end,
+
+    create = function(E)
+      local W, H, T = E.W, E.H, E.T
+      local inset = min(10, floor(min(W, H) * 0.04))
+      local cw, ch = W - 2 * inset, H - 2 * inset      -- the scene card
+      local self = {
+        pan = 0.5, tilt = 0.5,          -- the aim
+        panSpeed = 0, tiltSpeed = 0,
+        down = false, dragging = false,
+        fx = 0, fy = 0,                 -- finger
+        accX = 0, accY = 0,             -- movement before the drag threshold
+        lastT = nil,
+        stall = nil,                    -- timer that zeroes the speeds
+        homing = nil,                   -- { x0, y0, t } while the aim glides home
+        homeAt = -10,
+        camAt = -10, camPending = false, camTimer = nil,
+        camZoom = 0,                    -- zoom position 0..1 read from the camera
+        zooming = false, zoomPollAt = 0,
+        grid = nil,
+      }
+
+      -- ---------- controls ----------
+      local function knob(name, default)
+        local c = E.ctl(name)
+        if c == nil then return default end
+        local v = tonumber(c.Value)
+        if v == nil then return default end
+        return v
+      end
+      local function toggle(name)
+        local c = E.ctl(name)
+        return c ~= nil and c.Boolean == true
+      end
+      local function sensitivity() return clamp(knob("Sensitivity", 1), 0.2, 3) end
+      local function hfov() return clamp(knob("HFOV", 60), 20, 120) end
+      local function opticalZoom() return clamp(knob("OpticalZoom", 12), 1, 40) end
+
+      local function zoomFactor()
+        return 1 + clamp(self.camZoom, 0, 1) * (opticalZoom() - 1)
+      end
+
+      local function panDeg() return (self.pan - 0.5) * PAN_SPAN end
+      local function tiltDeg() return (self.tilt - 0.5) * TILT_SPAN end
+
+      local function gridRaw()
+        if self.grid then return self.grid end
+        local scratch = Svg.new(W, H, { limit = 20000 })
+        Shapes.gridDots(scratch, T, cw, ch, 24)
+        self.grid = '<g transform="translate(' .. Svg.num(inset) .. " " .. Svg.num(inset) .. ')">'
+          .. table.concat(scratch.parts) .. "</g>"
+        return self.grid
+      end
+
+      -- ---------- camera ----------
+      local function cam() return E.camera end
+
+      local function readZoom()
+        local c = cam()
+        if c == nil or type(c.getPosition) ~= "function" then return end
+        pcall(c.getPosition, c, function(p, t, z)
+          if type(z) == "number" and z ~= self.camZoom then
+            self.camZoom = clamp(z, 0, 1)
+            E.invalidate()
+          end
+        end)
+      end
+
+      local function sendAim()
+        local c = cam()
+        self.camAt = E.now()
+        self.camPending = false
+        if c == nil or type(c.gotoPosition) ~= "function" then return end
+        pcall(c.gotoPosition, c, panDeg(), tiltDeg(), nil)
+      end
+
+      -- Absolute positions go out at most every CAM_RATE seconds; the last
+      -- aim of a burst is always sent.
+      local function aimChanged(now)
+        if cam() == nil then return end
+        local wait = CAM_RATE - (now - self.camAt)
+        if wait <= 0 then
+          if self.camTimer then self.camTimer:cancel(); self.camTimer = nil end
+          sendAim()
+        elseif not self.camPending then
+          self.camPending = true
+          self.camTimer = E.after(wait, function()
+            self.camTimer = nil
+            if self.camPending then sendAim() end
+          end)
+        end
+      end
+
+      local function flushAim()
+        if self.camPending then
+          if self.camTimer then self.camTimer:cancel(); self.camTimer = nil end
+          sendAim()
+        end
+      end
+
+      -- ---------- outputs ----------
+      local function outAim()
+        E.out("Pan", self.pan)
+        E.out("Tilt", self.tilt)
+      end
+
+      local function setSpeeds(ps, ts)
+        ps, ts = clamp(ps, -1, 1), clamp(ts, -1, 1)
+        if abs(ps) < 1e-9 then ps = 0 end
+        if abs(ts) < 1e-9 then ts = 0 end
+        self.panSpeed, self.tiltSpeed = ps, ts
+        E.out("PanSpeed", ps)
+        E.out("TiltSpeed", ts)
+        E.out("DirLeft", ps < -LED_ON)
+        E.out("DirRight", ps > LED_ON)
+        E.out("DirUp", ts > LED_ON)
+        E.out("DirDown", ts < -LED_ON)
+      end
+
+      local function cancelStall()
+        if self.stall then self.stall:cancel(); self.stall = nil end
+      end
+
+      local function armStall()
+        cancelStall()
+        self.stall = E.after(STALL, function()
+          self.stall = nil
+          setSpeeds(0, 0)
+          E.invalidate()
+        end)
+      end
+
+      -- Applies a finger movement (pad px) to the aim.
+      local function applyMove(dx, dy, dt)
+        local s = sensitivity()
+        local sx = toggle("InvertPan") and -1 or 1
+        local sy = toggle("InvertTilt") and -1 or 1
+        local dpan = sx * dx / cw * s
+        local dtilt = -sy * dy / ch * s
+        self.pan = clamp(self.pan + dpan, 0, 1)
+        self.tilt = clamp(self.tilt + dtilt, 0, 1)
+        if dt <= 0 then dt = 1 / 30 end
+        setSpeeds(sx * (dx / dt) / (cw * SPEED_REF) * s, -sy * (dy / dt) / (ch * SPEED_REF) * s)
+        armStall()
+      end
+
+      local function goHome(now, pulseOut)
+        self.homeAt = now
+        self.homing = { x0 = self.pan, y0 = self.tilt, t = 0 }
+        if self.pan == 0.5 and self.tilt == 0.5 then self.homing = nil end
+        setSpeeds(0, 0)
+        E.setGesture("HOME")
+        if pulseOut then E.pulse("Home") end
+        local c = cam()
+        if c and type(c.home) == "function" then
+          if self.camTimer then self.camTimer:cancel(); self.camTimer = nil end
+          self.camPending = false
+          self.camAt = now
+          pcall(c.home, c)
+          self.camZoom = 0
+        end
+        if self.homing then E.animate(true) end
+        E.invalidate()
+      end
+
+      -- ---------- touches ----------
+      function self:onTouchStart(x, y, t)
+        self.down, self.dragging = true, false
+        self.fx, self.fy, self.lastT = x, y, t
+        self.accX, self.accY = 0, 0
+        E.invalidate()
+      end
+
+      function self:onTouchMove(x, y, t, dx, dy)
+        local dt = self.lastT and (t - self.lastT) or 0
+        self.fx, self.fy, self.lastT = x, y, t
+        if not self.dragging then
+          -- Below the drag threshold nothing moves (a tap moves nothing);
+          -- the whole movement so far applies once the drag is certain.
+          self.accX, self.accY = self.accX + dx, self.accY + dy
+          if sqrt(self.accX * self.accX + self.accY * self.accY) <= DRAG_START then
+            return
+          end
+          self.dragging = true
+          dx, dy = self.accX, self.accY
+          self.accX, self.accY = 0, 0
+        end
+        applyMove(dx, dy, dt)
+        outAim()
+        aimChanged(t)
+        E.invalidate()
+      end
+
+      function self:onTouchEnd(x, y, t, info)
+        self.down, self.dragging = false, false
+        cancelStall()
+        setSpeeds(0, 0)
+        flushAim()
+        E.invalidate()
+      end
+
+      function self:onTouchResume(x, y, t)
+        -- The same drag goes on: the finger position is re-based so the
+        -- aim does not jump by the distance covered while the lift was pending.
+        self.down, self.dragging = true, true
+        self.fx, self.fy, self.lastT = x, y, t
+        self.accX, self.accY = 0, 0
+        E.invalidate()
+      end
+
+      function self:onGesture(g)
+        if g.type == "double" then goHome(g.t or E.now(), true) end
+      end
+
+      function self:onLock(locked)
+        if locked then
+          self.down, self.dragging = false, false
+          cancelStall()
+          setSpeeds(0, 0)
+          if self.camTimer then self.camTimer:cancel(); self.camTimer = nil end
+          self.camPending = false
+          local c = cam()
+          if c and type(c.stop) == "function" then pcall(c.stop, c) end
+        end
+        E.invalidate()
+      end
+
+      -- ---------- controls ----------
+      function self:onControl(name, index, ctl)
+        local now = E.now()
+        if name == "Home" then
+          -- A Trigger's handler may run with Boolean already false; the
+          -- trailing edge of a pulse just handled does not home twice.
+          if ctl.Boolean or now - self.homeAt >= HOME_GUARD then goHome(now, false) end
+          return
+        end
+        if name == "InvertPan" or name == "InvertTilt" or name == "Sensitivity"
+           or name == "HFOV" or name == "OpticalZoom" then
+          E.invalidate()
+          return
+        end
+        local c = cam()
+        if c == nil then return end
+        if name == "ZoomIn" or name == "ZoomOut" then
+          if type(c.onControl) == "function" then pcall(c.onControl, c, name, index, ctl) end
+          self.zooming = ctl.Boolean and true or false
+          if self.zooming then
+            self.zoomPollAt = now
+            E.animate(true)
+          else
+            E.after(ZOOM_POLL, readZoom)
+          end
+          E.invalidate()
+          return
+        end
+        if type(c.onControl) == "function" then pcall(c.onControl, c, name, index, ctl) end
+      end
+
+      function self:tick(dt)
+        local busy = false
+        if self.homing then
+          local h = self.homing
+          h.t = h.t + dt
+          local k = clamp(h.t / HOME_TIME, 0, 1)
+          k = k * (2 - k)                      -- ease out
+          self.pan = h.x0 + (0.5 - h.x0) * k
+          self.tilt = h.y0 + (0.5 - h.y0) * k
+          if k >= 1 then
+            self.pan, self.tilt = 0.5, 0.5
+            self.homing = nil
+          else
+            busy = true
+          end
+          outAim()
+          E.invalidate()
+        end
+        if self.zooming then
+          busy = true
+          local now = E.now()
+          if now - self.zoomPollAt >= ZOOM_POLL - 0.0005 then
+            self.zoomPollAt = now
+            readZoom()
+          end
+        end
+        if not busy then E.animate(false) end
+      end
+
+      function self:onStart()
+        outAim()
+        setSpeeds(0, 0)
+        readZoom()
+      end
+
+      -- ---------- drawing ----------
+      local function chevron(c, name, x, y, on)
+        Shapes.icon(c, name, x, y, 20, on and T.accent2 or T.line)
+      end
+
+      function self:draw(c)
+        c:rect(inset, inset, cw, ch, { fill = T.panel, stroke = T.line, sw = 1, rx = max(4, floor(inset * 1.2)) })
+        c:raw(gridRaw())
+        -- home mark at the centre of the scene
+        local hx, hy = inset + cw / 2, inset + ch / 2
+        c:line(hx - 6, hy, hx + 6, hy, { stroke = T.muted, sw = 1, opacity = 0.7 })
+        c:line(hx, hy - 6, hx, hy + 6, { stroke = T.muted, sw = 1, opacity = 0.7 })
+        -- the view box: what the camera sees at this aim, HFOV and zoom
+        local ax = inset + self.pan * cw
+        local ay = inset + (1 - self.tilt) * ch
+        local fov = hfov() / zoomFactor()
+        local vw = max(8, fov / PAN_SPAN * cw)
+        local vh = max(6, fov * 9 / 16 / TILT_SPAN * ch)
+        c:rect(ax - vw / 2, ay - vh / 2, vw, vh, { fill = T.accent, opacity = 0.12, rx = 3 })
+        c:rect(ax - vw / 2, ay - vh / 2, vw, vh, { fill = "none", stroke = T.accent, sw = 1.5, rx = 3 })
+        Shapes.crosshair(c, T, ax, ay, W, H)
+        Shapes.dot(c, T, ax, ay, self.down and 7 or 5)
+        -- direction chevrons on the card edges
+        local pad = inset + 14
+        chevron(c, "left", pad, H / 2, self.panSpeed < -LED_ON)
+        chevron(c, "right", W - pad, H / 2, self.panSpeed > LED_ON)
+        chevron(c, "up", W / 2, pad, self.tiltSpeed > LED_ON)
+        chevron(c, "down", W / 2, H - pad, self.tiltSpeed < -LED_ON)
+        -- the finger while dragging
+        if self.down and self.dragging then
+          c:circle(self.fx, self.fy, 4, { fill = T.muted, opacity = 0.6 })
+        end
+        -- readout
+        local txt = sformat("PAN %+d  TILT %+d", floor(panDeg() + 0.5), floor(tiltDeg() + 0.5))
+        if cam() then txt = txt .. sformat("  ZOOM x%.1f", zoomFactor()) end
+        c:textFit(W / 2, inset + 20, cw - 16, txt, { size = 12, fill = T.text, anchor = "middle", weight = "bold" })
+        local flips = (toggle("InvertPan") and "FLIP PAN " or "") .. (toggle("InvertTilt") and "FLIP TILT" or "")
+        if flips ~= "" then
+          c:textFit(W - inset - 8, inset + 36, cw - 16, flips, { size = 10, fill = T.accent2, anchor = "end" })
+        end
+        if E.hint and not self.down then
+          Shapes.hint(c, T, HINT, W, H)
+        end
+      end
+
+      -- Camera View (480 x 270): the Demo camera's scene.
+      function self:drawCamera(c)
+        local cm = cam()
+        if cm and type(cm.drawView) == "function" then
+          cm:drawView(c)
+        else
+          c:rect(0, 0, 480, 270, { fill = T.well })
+          c:text(240, 140, "No camera view", { size = 14, fill = T.muted, anchor = "middle" })
+        end
+      end
+
+      return self
+    end,
+  }
+end
+-- ===== 16_mode_knob.lua =====
+-- Nikita Visual Arts – nikitavisual.art
+-- Touch Pad for Q-SYS: Knob mode
+--
+-- A bounded rotary with a 270 degree sweep (from bottom-left over the top to
+-- bottom-right), a value readout in display units, Min / Max labels and an
+-- optional direct target. A touch on the ring (the track outside the knob
+-- body) sets the value from the touch angle; dragging anywhere then turns
+-- the knob relative to the finger's angular movement with acceleration (a
+-- fast turn moves up to three times as far as a slow one). Nothing wraps:
+-- the position is clamped to 0..1.
+--
+-- Controls: KnobMin / KnobMax (display range), Units (text), KnobValue
+-- (display units, pin Both), KnobPosition (0..1, pin Both), DialTarget
+-- ("CodeName~control", driven position-wise and followed while no finger
+-- is down).
+--
+-- Design time (controls, layout) and the runtime `create(E)` live here. The
+-- body is one do-block so the built chunk gains no top-level locals.
+
+Modes = Modes or {}
+
+do
+  local HINT = "Touch the ring to set, drag to turn"
+  local SWEEP = 270                 -- degrees of travel
+  local START_ANGLE = 225           -- position 0 (bottom-left, canvas angles: 0 = right, 90 = up)
+  local ACCEL_FROM, ACCEL_TO = 180, 720   -- deg/s: gain 1 below, 3 above
+  local GAIN_MAX = 3
+  local ECHO_TIME = 1.0             -- seconds a target echo of our own write is ignored
+  local MAJOR_TICKS, MINOR_PER = 10, 2  -- 11 major ticks, 2 minor ticks between majors
+
+  local floor, abs, sqrt, min, max = math.floor, math.abs, math.sqrt, math.min, math.max
+  local sformat = string.format
+
+  -- Decimals for a display range: wide ranges read as integers.
+  local function decimalsFor(range)
+    range = abs(range)
+    if range >= 100 then return 0 end
+    if range >= 10 then return 1 end
+    return 2
+  end
+
+  local function fmtNumber(v, decimals)
+    if v ~= v then return "0" end
+    local s = sformat("%." .. decimals .. "f", v)
+    if s == "-0" or s == "-0.0" or s == "-0.00" then s = s:sub(2) end
+    return s
+  end
+
+  -- Canvas angle (degrees) of a sweep position 0..1.
+  local function angleOfPos(p)
+    return START_ANGLE - SWEEP * p
+  end
+
+  -- Sweep position of a canvas angle; the 90 degree gap at the bottom snaps
+  -- to the nearest end.
+  local function posOfAngle(a)
+    local b = (START_ANGLE - a) % 360
+    if b <= SWEEP then return b / SWEEP end
+    if b < SWEEP + (360 - SWEEP) / 2 then return 1 end
+    return 0
+  end
+
+  Modes["Knob"] = {
+    id = "knob",
+    pretty = "Knob",
+    hint = HINT,
+
+    controls = function(C, props)
+      C.add{ Name = "KnobMin", ControlType = "Knob", ControlUnit = "Float", Min = -1000, Max = 1000,
+             DefaultValue = 0, PinStyle = "Input", Group = "Knob" }
+      C.add{ Name = "KnobMax", ControlType = "Knob", ControlUnit = "Float", Min = -1000, Max = 1000,
+             DefaultValue = 100, PinStyle = "Input", Group = "Knob" }
+      C.add{ Name = "Units", ControlType = "Text", PinStyle = "Input", Group = "Knob" }
+      C.add{ Name = "KnobValue", ControlType = "Knob", ControlUnit = "Float", Min = -1000, Max = 1000,
+             DefaultValue = 0, PinStyle = "Both", Group = "Knob" }
+      C.add{ Name = "KnobPosition", ControlType = "Knob", ControlUnit = "Float", Min = 0, Max = 1,
+             DefaultValue = 0, PinStyle = "Both", Group = "Knob" }
+      C.add{ Name = "DialTarget", ControlType = "Text", PinStyle = "Input", Group = "Knob" }
+    end,
+
+    pages = {},
+
+    layout = function(L, page, props, ctx)
+      if page == "Pad" then
+        L.padDisplay(ctx)
+        L.gesture(ctx)
+        L.hint(ctx, HINT)
+        L.sideCaption(ctx, "VALUE")
+        L.knob("KnobValue", { ctx.side, ctx.sideY }, { 48, 48 })
+        ctx.sideY = ctx.sideY + 56
+      elseif page == "Setup" then
+        local ix, iy, iw = L.section(ctx, "K N O B", 48 + ctx.G + 48)
+        local cw = floor((iw - 2 * ctx.G) / 3)
+        L.cell("KnobMin", ix, iy, cw, 48, { caption = "MIN" })
+        L.cell("KnobMax", ix + cw + ctx.G, iy, cw, 48, { caption = "MAX" })
+        L.cell("Units", ix + 2 * (cw + ctx.G), iy, cw, 48, { caption = "UNITS" })
+        L.cell("DialTarget", ix, iy + 48 + ctx.G, iw, 48, { caption = "TARGET (CODENAME~CONTROL, DRIVEN POSITION-WISE)" })
+      end
+    end,
+
+    padColour = function(T)
+      return T.bg
+    end,
+
+    create = function(E)
+      local W, H, T = E.W, E.H, E.T
+      local cx, cy = W / 2, H / 2 - (E.hint and 6 or 0)
+      local R = min(W, H) * 0.5 * 0.80          -- outer radius of the track
+      local band = max(12, R * 0.14)            -- track stroke width
+      local Rm = R - band / 2                   -- track centre radius
+      local Rin = Rm - band                     -- knob body radius; the ring is outside it
+      local Rdead = max(10, R * 0.12)           -- no angle inside this radius
+      local valueSize = max(14, floor(Rin * 0.34))
+      local unitSize = max(10, floor(valueSize * 0.5))
+      local labelSize = max(10, floor(min(14, R * 0.08)))
+
+      local self = {
+        p = 0,                 -- sweep position 0..1
+        lo = 0, hi = 100,      -- display range
+        units = "",
+        down = false,
+        lastAngle = nil,       -- canvas angle of the previous report (nil inside the dead centre)
+        lastT = nil,
+        gain = 1,              -- acceleration gain of the last move (drawn while down)
+        static = nil,          -- cached track, ticks and labels
+        staticKey = nil,
+        target = nil,          -- { ctl, name, wrote = { p, t } }
+      }
+
+      -- ---------- value helpers ----------
+      local function range()
+        local r = self.hi - self.lo
+        if abs(r) < 1e-9 then r = 1 end
+        return r
+      end
+      local function valueOf(p) return self.lo + p * range() end
+      local function posOfValue(v)
+        local p = (v - self.lo) / range()
+        return U.clamp(p, 0, 1)
+      end
+      local function decimals() return decimalsFor(range()) end
+      local function readout(v)
+        local s = fmtNumber(v, decimals())
+        if self.units ~= "" then s = s .. " " .. self.units end
+        return s
+      end
+
+      -- ---------- the direct target ----------
+      local function targetWrite(p)
+        local tg = self.target
+        if not tg then return end
+        tg.wrote = { p = p, t = E.now() }
+        pcall(function() tg.ctl.Position = p end)
+      end
+
+      local function targetReport(ctl)
+        local tg = self.target
+        if not tg or ctl ~= tg.ctl then return end
+        if self.down then return end                     -- a resting finger owns the knob
+        local ok, p = pcall(function() return ctl.Position end)
+        if not ok or type(p) ~= "number" then return end
+        local w = tg.wrote
+        if w and abs(w.p - p) < 1e-6 and E.now() - w.t < ECHO_TIME then return end
+        p = U.clamp(p, 0, 1)
+        if abs(p - self.p) < 1e-9 then return end
+        self.p = p
+        E.out("KnobPosition", self.p)
+        E.out("KnobValue", valueOf(self.p))
+        E.invalidate()
+      end
+
+      local function unbindTarget()
+        local tg = self.target
+        if tg then
+          pcall(function() tg.ctl.EventHandler = nil end)
+          self.target = nil
+        end
+      end
+
+      local function bindTarget(spec)
+        unbindTarget()
+        spec = U.trim(spec)
+        if spec == "" then return end
+        local code, name = spec:match("^(.-)%s*~%s*(.+)$")
+        if not code or code == "" then
+          E.status("Knob target: use CodeName~control", "warn")
+          return
+        end
+        local comp = (type(Q) == "table" and type(Q.component) == "function") and Q.component(code) or nil
+        if not comp then
+          E.status("Knob target: no component named " .. code, "warn")
+          return
+        end
+        local ok, ctl = pcall(function() return comp[name] end)
+        if not ok or ctl == nil then
+          E.status("Knob target: " .. code .. " has no control " .. name, "warn")
+          return
+        end
+        local okp, p = pcall(function() return ctl.Position end)
+        if not okp or type(p) ~= "number" then
+          E.status("Knob target: " .. spec .. " has no position", "warn")
+          return
+        end
+        local tg = { ctl = ctl, name = spec }
+        self.target = tg
+        local handler = function(c) targetReport(c) end
+        if type(Q) == "table" and type(Q.guard) == "function" then handler = Q.guard("knob target", handler) end
+        pcall(function() ctl.EventHandler = handler end)
+        -- Start from the target's level.
+        self.p = U.clamp(p, 0, 1)
+        E.out("KnobPosition", self.p)
+        E.out("KnobValue", valueOf(self.p))
+        E.status("Knob target OK: " .. spec, "ok")
+        E.invalidate()
+      end
+
+      -- ---------- position changes ----------
+      local function setPos(p, fromTouch)
+        p = U.clamp(p, 0, 1)
+        if p ~= p then p = 0 end
+        if abs(p - self.p) < 1e-12 then return false end
+        self.p = p
+        E.out("KnobPosition", self.p)
+        E.out("KnobValue", valueOf(self.p))
+        targetWrite(self.p)
+        E.invalidate()
+        return true
+      end
+
+      local function rangeChanged()
+        self.static = nil
+        E.out("KnobValue", valueOf(self.p))
+        E.invalidate()
+      end
+
+      local function readInputs()
+        local lo = E.ctl("KnobMin")
+        local hi = E.ctl("KnobMax")
+        local un = E.ctl("Units")
+        if lo and type(lo.Value) == "number" then self.lo = lo.Value end
+        if hi and type(hi.Value) == "number" then self.hi = hi.Value end
+        if un then self.units = U.trim(un.String) end
+      end
+
+      -- ---------- geometry ----------
+      local function angleAt(x, y)
+        local dx, dy = x - cx, y - cy
+        local d = sqrt(dx * dx + dy * dy)
+        if d < Rdead then return nil, d end
+        return U.angleDeg(dx, dy), d
+      end
+
+      -- ---------- touch ----------
+      function self:onTouchStart(x, y, t)
+        self.down = true
+        self.gain = 1
+        local a, d = angleAt(x, y)
+        self.lastAngle, self.lastT = a, t
+        if a and d >= Rin then
+          setPos(posOfAngle(a), true)          -- a touch on the ring sets
+        end
+        E.invalidate()
+      end
+
+      function self:onTouchMove(x, y, t, dx, dy)
+        local a = angleAt(x, y)
+        if a == nil then
+          self.lastAngle = nil                 -- the dead centre anchors nothing
+          self.lastT = t
+          return
+        end
+        local prev = self.lastAngle
+        self.lastAngle = a
+        if prev == nil then
+          self.lastT = t
+          return
+        end
+        local delta = U.normAngle(prev - a)    -- clockwise turn = positive
+        local dt = t - (self.lastT or t)
+        self.lastT = t
+        if dt < 0.005 then dt = 0.005 end
+        local speed = abs(delta) / dt
+        local gain = 1 + (GAIN_MAX - 1) * U.clamp((speed - ACCEL_FROM) / (ACCEL_TO - ACCEL_FROM), 0, 1)
+        self.gain = gain
+        if delta ~= 0 then
+          setPos(self.p + delta / SWEEP * gain, true)
+        end
+      end
+
+      function self:onTouchEnd(x, y, t, info)
+        self.down = false
+        self.lastAngle, self.lastT = nil, nil
+        self.gain = 1
+        E.invalidate()
+      end
+
+      function self:onTouchResume(x, y, t)
+        self.down = true
+        self.lastAngle, self.lastT = angleAt(x, y), t
+        E.invalidate()
+      end
+
+      function self:onLock(locked)
+        if locked then
+          self.down = false
+          self.lastAngle = nil
+        end
+        E.invalidate()
+      end
+
+      -- ---------- pins ----------
+      function self:onControl(name, index, ctl)
+        if name == "KnobValue" then
+          local v = tonumber(ctl.Value)
+          if v then setPos(posOfValue(v), false) end
+        elseif name == "KnobPosition" then
+          local v = tonumber(ctl.Value)
+          if v then setPos(v, false) end
+        elseif name == "KnobMin" or name == "KnobMax" or name == "Units" then
+          readInputs()
+          rangeChanged()
+        elseif name == "DialTarget" then
+          bindTarget(ctl.String)
+        end
+      end
+
+      function self:onStart()
+        readInputs()
+        E.out("KnobPosition", self.p)
+        E.out("KnobValue", valueOf(self.p))
+        local tg = E.ctl("DialTarget")
+        if tg and type(tg.String) == "string" and U.trim(tg.String) ~= "" then
+          bindTarget(tg.String)
+        end
+      end
+
+      -- ---------- drawing ----------
+      -- Track, ticks and the Min / Max labels only change with the range:
+      -- drawn once into a scratch canvas and replayed as one raw element.
+      local function staticRaw()
+        local key = tostring(self.lo) .. "|" .. tostring(self.hi) .. "|" .. self.units
+        if self.static and self.staticKey == key then return self.static end
+        local s = Svg.new(W, H, { limit = 20000 })
+        s:arc(cx, cy, Rm, START_ANGLE, START_ANGLE - SWEEP, { stroke = T.well, sw = band, cap = "round" })
+        s:arc(cx, cy, Rm, START_ANGLE, START_ANGLE - SWEEP, { stroke = T.line, sw = 1, opacity = 0.6 })
+        local n = MAJOR_TICKS * (MINOR_PER + 1)
+        local r0, r1 = R + 4, R + 10
+        for i = 0, n do
+          local a = angleOfPos(i / n)
+          local major = (i % (MINOR_PER + 1)) == 0
+          local x0, y0 = Svg.polar(cx, cy, r0, a)
+          local x1, y1 = Svg.polar(cx, cy, major and (r1 + 4) or r1, a)
+          s:line(x0, y0, x1, y1, { stroke = major and T.muted or T.line, sw = major and 2 or 1, cap = "round" })
+        end
+        local d = decimals()
+        local lx, ly = Svg.polar(cx, cy, R + 4, angleOfPos(0))
+        local hx, hy = Svg.polar(cx, cy, R + 4, angleOfPos(1))
+        s:text(lx - 4, ly + labelSize + 6, fmtNumber(self.lo, d), { size = labelSize, fill = T.muted, anchor = "end" })
+        s:text(hx + 4, hy + labelSize + 6, fmtNumber(self.hi, d), { size = labelSize, fill = T.muted, anchor = "start" })
+        s.parts[1] = s.parts[1] or ""
+        self.static = table.concat(s.parts)
+        self.staticKey = key
+        return self.static
+      end
+
+      function self:draw(c)
+        c:raw(staticRaw())
+        local a = angleOfPos(self.p)
+        -- value fill along the track
+        if self.p > 0.0005 then
+          c:arc(cx, cy, Rm, START_ANGLE, a, { stroke = T.accent, sw = band - 4, cap = "round",
+                                               opacity = self.down and 1 or 0.9 })
+        end
+        -- knob body
+        c:circle(cx, cy, Rin, { fill = T.panel, stroke = self.down and T.accent or T.line, sw = self.down and 2 or 1 })
+        -- pointer: a line from the body's edge inward and a dot at the rim
+        local px0, py0 = Svg.polar(cx, cy, Rin * 0.62, a)
+        local px1, py1 = Svg.polar(cx, cy, Rin - 6, a)
+        c:line(px0, py0, px1, py1, { stroke = self.down and T.accent2 or T.accent, sw = 3, cap = "round" })
+        local dx, dy = Svg.polar(cx, cy, Rm, a)
+        if self.down then
+          Shapes.dot(c, T, dx, dy, band * 0.45)
+        else
+          c:circle(dx, dy, band * 0.35, { fill = T.accent2, stroke = T.onAccent, sw = 1 })
+        end
+        -- readout
+        local v = valueOf(self.p)
+        c:textFit(cx, cy + valueSize * 0.36, Rin * 1.5, fmtNumber(v, decimals()),
+                  { size = valueSize, fill = T.text, anchor = "middle", weight = "bold" })
+        local sub = self.units
+        if self.down and self.gain > 1.05 then
+          sub = sformat("x%.1f", self.gain) .. (sub ~= "" and ("  " .. sub) or "")
+        end
+        if sub ~= "" then
+          c:textFit(cx, cy + valueSize * 0.36 + unitSize + 4, Rin * 1.5, sub,
+                    { size = unitSize, fill = T.muted, anchor = "middle" })
+        end
+        if E.hint and not self.down then
+          Shapes.hint(c, T, HINT, W, H)
+        end
+      end
+
+      -- white-box helpers for tests
+      self.readout = readout
+      self.valueOf = valueOf
+      self.geometry = { cx = cx, cy = cy, R = R, Rm = Rm, Rin = Rin, Rdead = Rdead, band = band }
+      self.angleOfPos = angleOfPos
+      self.posOfAngle = posOfAngle
+
+      return self
+    end,
+  }
+end
+-- ===== 17_mode_fader.lua =====
+-- Nikita Visual Arts – nikitavisual.art
+-- Touch Pad for Q-SYS: Fader mode
+--
+-- A linear touch fader, vertical or horizontal (the Orientation property).
+-- The whole pad is the fader: a touch anywhere across the slot works. The
+-- value readout shows display units from FaderMin / FaderMax (defaults -100
+-- and 10) and Units (default "dB").
+--
+-- Options: GrabMode "Jump" sets the value where the finger lands and follows
+-- it; "Relative" leaves the value where it was and moves it by the finger's
+-- travel along the slot. Taper "Linear" maps the travel straight onto the
+-- range; "Audio" uses a piecewise curve that puts 0 dB at 75 % of the travel
+-- for a -100..10 range (the lower half of the travel covers the quiet end).
+-- SnapCenter snaps a touch-driven position to the centre value (the middle
+-- of the range) within 3 % of the travel. DialTarget ("CodeName~control")
+-- drives a control position-wise and follows it while no finger is down.
+--
+-- Outputs: FaderPosition (0..1, pin Both), FaderValue (display units, pin
+-- Both) and the common set (Touching, X, Y, the pulses, Gesture...).
+-- Draws the slot, the fill, the cap, scale ticks with labels and the value.
+--
+-- Design time (controls, layout) and the runtime `create(E)` live here. The
+-- body is one do-block so the built chunk gains no top-level locals.
+
+Modes = Modes or {}
+
+do
+  local HINT = "Touch or drag the fader"
+  local ECHO_TIME = 1.0             -- seconds a target echo of our own write is ignored
+  local SNAP = 0.03                 -- SnapCenter window as a fraction of the travel
+  local MAJOR_TICKS, MINOR_PER = 10, 2  -- 11 major ticks, 2 minor ticks between majors
+  -- Audio taper: travel position -> normalised range position, piecewise
+  -- linear. For -100..10 the knees read -60, -40, -20, 0 and +10 dB.
+  local AUDIO_CURVE = {
+    { 0, 0 }, { 0.1, 40 / 110 }, { 0.25, 60 / 110 }, { 0.5, 80 / 110 }, { 0.75, 100 / 110 }, { 1, 1 },
+  }
+
+  local floor, abs, min, max, ceil = math.floor, math.abs, math.min, math.max, math.ceil
+  local sformat = string.format
+
+  -- Decimals for a display range: wide ranges read as integers.
+  local function decimalsFor(range)
+    range = abs(range)
+    if range >= 200 then return 0 end
+    if range >= 20 then return 1 end
+    return 2
+  end
+
+  local function fmtNumber(v, decimals)
+    if v ~= v then return "0" end
+    local s = sformat("%." .. decimals .. "f", v)
+    if s == "-0" or s == "-0.0" or s == "-0.00" then s = s:sub(2) end
+    return s
+  end
+
+  -- Travel position 0..1 -> normalised range position 0..1 (audio taper).
+  local function audioForward(p)
+    if p <= 0 then return 0 end
+    for i = 2, #AUDIO_CURVE do
+      local a, b = AUDIO_CURVE[i - 1], AUDIO_CURVE[i]
+      if p <= b[1] then
+        return a[2] + (b[2] - a[2]) * (p - a[1]) / (b[1] - a[1])
+      end
+    end
+    return 1
+  end
+
+  -- Normalised range position -> travel position (inverse of audioForward).
+  local function audioInverse(n)
+    if n <= 0 then return 0 end
+    for i = 2, #AUDIO_CURVE do
+      local a, b = AUDIO_CURVE[i - 1], AUDIO_CURVE[i]
+      if n <= b[2] then
+        return a[1] + (b[1] - a[1]) * (n - a[2]) / (b[2] - a[2])
+      end
+    end
+    return 1
+  end
+
+  Modes["Fader"] = {
+    id = "fader",
+    pretty = "Fader",
+    hint = HINT,
+
+    controls = function(C, props)
+      C.add{ Name = "FaderMin", ControlType = "Knob", ControlUnit = "Float", Min = -1000, Max = 1000,
+             DefaultValue = -100, PinStyle = "Input", Group = "Fader" }
+      C.add{ Name = "FaderMax", ControlType = "Knob", ControlUnit = "Float", Min = -1000, Max = 1000,
+             DefaultValue = 10, PinStyle = "Input", Group = "Fader" }
+      C.add{ Name = "Units", ControlType = "Text", DefaultValue = "dB", PinStyle = "Input", Group = "Fader" }
+      C.add{ Name = "FaderValue", ControlType = "Knob", ControlUnit = "Float", Min = -1000, Max = 1000,
+             DefaultValue = -100, PinStyle = "Both", Group = "Fader" }
+      C.add{ Name = "FaderPosition", ControlType = "Knob", ControlUnit = "Float", Min = 0, Max = 1,
+             DefaultValue = 0, PinStyle = "Both", Group = "Fader" }
+      C.add{ Name = "GrabMode", ControlType = "Text", DefaultValue = "Jump", PinStyle = "Input", Group = "Fader",
+             Choices = { "Jump", "Relative" } }
+      C.add{ Name = "Taper", ControlType = "Text", DefaultValue = "Linear", PinStyle = "Input", Group = "Fader",
+             Choices = { "Linear", "Audio" } }
+      C.add{ Name = "SnapCenter", ControlType = "Button", ButtonType = "Toggle", PinStyle = "Input", Group = "Fader" }
+      C.add{ Name = "DialTarget", ControlType = "Text", PinStyle = "Input", Group = "Fader" }
+    end,
+
+    pages = {},
+
+    layout = function(L, page, props, ctx)
+      if page == "Pad" then
+        L.padDisplay(ctx)
+        L.gesture(ctx)
+        L.hint(ctx, HINT)
+        L.sideCaption(ctx, "VALUE")
+        L.fader("FaderValue", { ctx.side, ctx.sideY }, { 48, 120 })
+        ctx.sideY = ctx.sideY + 128
+        L.sideCaption(ctx, "OPTIONS")
+        L.sideButton(ctx, "SnapCenter", "SNAP CENTRE")
+      elseif page == "Setup" then
+        local ix, iy, iw = L.section(ctx, "F A D E R", 3 * 48 + 2 * ctx.G)
+        local cw = floor((iw - 2 * ctx.G) / 3)
+        L.cell("FaderMin", ix, iy, cw, 48, { caption = "MIN" })
+        L.cell("FaderMax", ix + cw + ctx.G, iy, cw, 48, { caption = "MAX" })
+        L.cell("Units", ix + 2 * (cw + ctx.G), iy, cw, 48, { caption = "UNITS" })
+        local y2 = iy + 48 + ctx.G
+        L.cell("GrabMode", ix, y2, cw, 48, { caption = "GRAB (JUMP / RELATIVE)" })
+        L.cell("Taper", ix + cw + ctx.G, y2, cw, 48, { caption = "TAPER (LINEAR / AUDIO)" })
+        L.cell("SnapCenter", ix + 2 * (cw + ctx.G), y2, cw, 48, { caption = "SNAP CENTRE", legend = "SNAP" })
+        L.cell("DialTarget", ix, y2 + 48 + ctx.G, iw, 48,
+               { caption = "TARGET (CODENAME~CONTROL, DRIVEN POSITION-WISE)" })
+      end
+    end,
+
+    padColour = function(T)
+      return T.bg
+    end,
+
+    create = function(E)
+      local W, H, T = E.W, E.H, E.T
+      local props = E.props or {}
+      local vertical = tostring(props["Orientation"] or "Vertical") ~= "Horizontal"
+      local short = min(W, H)
+      local valueSize = U.clamp(floor(short * 0.11), 14, 40)
+      local labelSize = U.clamp(floor(short * 0.045), 9, 13)
+      local readH = valueSize + 12                  -- the readout band at the top
+      local bottom = E.hint and 22 or 10            -- room for the hint line
+
+      -- ---------- geometry ----------
+      -- Vertical: travel from y0 (position 0, bottom) up to y1 (position 1).
+      -- Horizontal: travel from x0 (position 0, left) to x1 (position 1).
+      local g = { vertical = vertical }
+      if vertical then
+        g.capW = U.clamp(floor(W * 0.36), 32, 120)
+        g.capH = U.clamp(floor(g.capW * 0.5), 18, 56)
+        g.slot = U.clamp(floor(g.capW * 0.22), 8, 28)
+        g.cx = W / 2
+        g.y1 = readH + 10 + g.capH / 2
+        g.y0 = H - bottom - 8 - g.capH / 2
+        if g.y0 - g.y1 < 40 then                    -- a tiny pad: a slim cap
+          g.capH = 14
+          g.y1 = readH + 4 + 7
+          g.y0 = H - bottom - 4 - 7
+        end
+        g.len = max(1, g.y0 - g.y1)
+        g.cy = (g.y0 + g.y1) / 2
+        g.x0, g.x1 = g.cx, g.cx
+      else
+        g.capH = U.clamp(floor(H * 0.36), 32, 120)  -- across the slot
+        g.capW = U.clamp(floor(g.capH * 0.5), 18, 56)  -- along the slot
+        g.slot = U.clamp(floor(g.capH * 0.22), 8, 28)
+        local top, bot = readH + 10, H - bottom
+        if bot - top < g.capH + 8 then g.capH = max(14, bot - top - 8) end
+        local needed = g.capH + 16 + labelSize
+        g.cy = top + g.capH / 2 + max(0, bot - top - needed) / 2
+        g.x0 = g.capW / 2 + 12
+        g.x1 = W - g.capW / 2 - 12
+        g.len = max(1, g.x1 - g.x0)
+        g.cx = (g.x0 + g.x1) / 2
+        g.y0, g.y1 = g.cy, g.cy
+      end
+
+      local self = {
+        p = 0,                 -- travel position 0..1
+        raw = 0,               -- unsnapped position of the current touch
+        lo = -100, hi = 10,    -- display range
+        units = "dB",
+        relative = false,      -- GrabMode
+        audio = false,         -- Taper
+        snap = false,          -- SnapCenter
+        down = false,
+        lx = nil, ly = nil,    -- last finger position (relative moves)
+        static = nil,          -- cached slot, ticks and labels
+        staticKey = nil,
+        target = nil,          -- { ctl, name, wrote = { p, t } }
+      }
+
+      -- ---------- value helpers ----------
+      local function range()
+        local r = self.hi - self.lo
+        if abs(r) < 1e-9 then r = 1 end
+        return r
+      end
+      local function normOfPos(p)
+        if self.audio then return audioForward(p) end
+        return p
+      end
+      local function posOfNorm(n)
+        if self.audio then return audioInverse(n) end
+        return n
+      end
+      local function valueOf(p) return self.lo + normOfPos(U.clamp(p, 0, 1)) * range() end
+      local function posOfValue(v)
+        local n = (v - self.lo) / range()
+        return posOfNorm(U.clamp(n, 0, 1))
+      end
+      local function decimals() return decimalsFor(range()) end
+      local function readout(v)
+        local s = fmtNumber(v, decimals())
+        if self.units ~= "" then s = s .. " " .. self.units end
+        return s
+      end
+      local function centrePos() return posOfValue((self.lo + self.hi) / 2) end
+      local function snapped(p)
+        if not self.snap then return p end
+        local c = centrePos()
+        if abs(p - c) <= SNAP then return c end
+        return p
+      end
+
+      -- ---------- the direct target ----------
+      local function targetWrite(p)
+        local tg = self.target
+        if not tg then return end
+        tg.wrote = { p = p, t = E.now() }
+        pcall(function() tg.ctl.Position = p end)
+      end
+
+      local function targetReport(ctl)
+        local tg = self.target
+        if not tg or ctl ~= tg.ctl then return end
+        if self.down then return end                     -- a resting finger owns the fader
+        local ok, p = pcall(function() return ctl.Position end)
+        if not ok or type(p) ~= "number" then return end
+        local w = tg.wrote
+        if w and abs(w.p - p) < 1e-6 and E.now() - w.t < ECHO_TIME then return end
+        p = U.clamp(p, 0, 1)
+        if abs(p - self.p) < 1e-9 then return end
+        self.p = p
+        E.out("FaderPosition", self.p)
+        E.out("FaderValue", valueOf(self.p))
+        E.invalidate()
+      end
+
+      local function unbindTarget()
+        local tg = self.target
+        if tg then
+          pcall(function() tg.ctl.EventHandler = nil end)
+          self.target = nil
+        end
+      end
+
+      local function bindTarget(spec)
+        unbindTarget()
+        spec = U.trim(spec)
+        if spec == "" then return end
+        local code, name = spec:match("^(.-)%s*~%s*(.+)$")
+        if not code or code == "" then
+          E.status("Fader target: use CodeName~control", "warn")
+          return
+        end
+        local comp = (type(Q) == "table" and type(Q.component) == "function") and Q.component(code) or nil
+        if not comp then
+          E.status("Fader target: no component named " .. code, "warn")
+          return
+        end
+        local ok, ctl = pcall(function() return comp[name] end)
+        if not ok or ctl == nil then
+          E.status("Fader target: " .. code .. " has no control " .. name, "warn")
+          return
+        end
+        local okp, p = pcall(function() return ctl.Position end)
+        if not okp or type(p) ~= "number" then
+          E.status("Fader target: " .. spec .. " has no position", "warn")
+          return
+        end
+        local tg = { ctl = ctl, name = spec }
+        self.target = tg
+        local handler = function(c) targetReport(c) end
+        if type(Q) == "table" and type(Q.guard) == "function" then handler = Q.guard("fader target", handler) end
+        pcall(function() ctl.EventHandler = handler end)
+        -- Start from the target's level.
+        self.p = U.clamp(p, 0, 1)
+        E.out("FaderPosition", self.p)
+        E.out("FaderValue", valueOf(self.p))
+        E.status("Fader target OK: " .. spec, "ok")
+        E.invalidate()
+      end
+
+      -- ---------- position changes ----------
+      local function setPos(p)
+        p = U.clamp(p, 0, 1)
+        if p ~= p then p = 0 end
+        if abs(p - self.p) < 1e-12 then return false end
+        self.p = p
+        E.out("FaderPosition", self.p)
+        E.out("FaderValue", valueOf(self.p))
+        targetWrite(self.p)
+        E.invalidate()
+        return true
+      end
+
+      local function rangeChanged()
+        self.static = nil
+        E.out("FaderValue", valueOf(self.p))
+        E.invalidate()
+      end
+
+      local function readInputs()
+        local lo = E.ctl("FaderMin")
+        local hi = E.ctl("FaderMax")
+        local un = E.ctl("Units")
+        local gm = E.ctl("GrabMode")
+        local tp = E.ctl("Taper")
+        local sn = E.ctl("SnapCenter")
+        if lo and type(lo.Value) == "number" then self.lo = lo.Value end
+        if hi and type(hi.Value) == "number" then self.hi = hi.Value end
+        if un and type(un.String) == "string" then self.units = U.trim(un.String) end
+        if gm and type(gm.String) == "string" then self.relative = U.lower(U.trim(gm.String)) == "relative" end
+        if tp and type(tp.String) == "string" then self.audio = U.lower(U.trim(tp.String)) == "audio" end
+        if sn then self.snap = sn.Boolean and true or false end
+      end
+
+      -- travel position of a pad point
+      local function posAt(x, y)
+        if vertical then return U.clamp((g.y0 - y) / g.len, 0, 1) end
+        return U.clamp((x - g.x0) / g.len, 0, 1)
+      end
+      -- travel delta between two pad points
+      local function deltaOf(x, y, lx, ly)
+        if vertical then return (ly - y) / g.len end
+        return (x - lx) / g.len
+      end
+
+      -- ---------- touch ----------
+      function self:onTouchStart(x, y, t)
+        self.down = true
+        self.lx, self.ly = x, y
+        if self.relative then
+          self.raw = self.p
+        else
+          self.raw = posAt(x, y)                 -- Jump: the value lands under the finger
+          setPos(snapped(self.raw))
+        end
+        E.invalidate()
+      end
+
+      function self:onTouchMove(x, y, t, dx, dy)
+        if self.relative then
+          local lx, ly = self.lx or x, self.ly or y
+          self.lx, self.ly = x, y
+          self.raw = U.clamp(self.raw + deltaOf(x, y, lx, ly), 0, 1)
+        else
+          self.lx, self.ly = x, y
+          self.raw = posAt(x, y)
+        end
+        setPos(snapped(self.raw))
+      end
+
+      function self:onTouchEnd(x, y, t, info)
+        self.down = false
+        self.lx, self.ly = nil, nil
+        E.invalidate()
+      end
+
+      function self:onTouchResume(x, y, t)
+        self.down = true
+        self.lx, self.ly = x, y                  -- re-anchor: no jump on a resumed drag
+        self.raw = self.p
+        E.invalidate()
+      end
+
+      function self:onLock(locked)
+        if locked then
+          self.down = false
+          self.lx, self.ly = nil, nil
+        end
+        E.invalidate()
+      end
+
+      -- ---------- pins ----------
+      function self:onControl(name, index, ctl)
+        if name == "FaderValue" then
+          local v = tonumber(ctl.Value)
+          if v then setPos(posOfValue(v)) end
+        elseif name == "FaderPosition" then
+          local v = tonumber(ctl.Value)
+          if v then setPos(v) end
+        elseif name == "FaderMin" or name == "FaderMax" or name == "Units" or name == "Taper" then
+          readInputs()
+          rangeChanged()
+        elseif name == "GrabMode" or name == "SnapCenter" then
+          readInputs()
+        elseif name == "DialTarget" then
+          bindTarget(ctl.String)
+        end
+      end
+
+      function self:onStart()
+        readInputs()
+        E.out("FaderPosition", self.p)
+        E.out("FaderValue", valueOf(self.p))
+        local tg = E.ctl("DialTarget")
+        if tg and type(tg.String) == "string" and U.trim(tg.String) ~= "" then
+          bindTarget(tg.String)
+        end
+      end
+
+      -- ---------- drawing ----------
+      -- Slot, ticks and labels only change with the range, the units and the
+      -- taper: drawn once into a scratch canvas and replayed as one raw
+      -- element.
+      local function staticRaw()
+        local key = tostring(self.lo) .. "|" .. tostring(self.hi) .. "|" .. self.units .. "|" .. tostring(self.audio)
+        if self.static and self.staticKey == key then return self.static end
+        local s = Svg.new(W, H, { limit = 20000 })
+        local n = MAJOR_TICKS * (MINOR_PER + 1)
+        local d = max(0, decimals() - 1)
+        local slot = g.slot
+        if vertical then
+          s:rect(g.cx - slot / 2, g.y1 - slot / 2, slot, g.len + slot,
+                 { fill = T.well, stroke = T.line, sw = 1, rx = slot / 2 })
+          -- ticks on both sides of the cap's lane, labels on the left
+          local room = g.cx - g.capW / 2 - 18
+          local every = U.clamp(ceil(labelSize * 1.5 / (g.len / MAJOR_TICKS)), 1, MAJOR_TICKS)
+          local xl = g.cx - g.capW / 2 - 6
+          local xr = g.cx + g.capW / 2 + 6
+          for i = 0, n do
+            local y = g.y0 - (i / n) * g.len
+            local major = (i % (MINOR_PER + 1)) == 0
+            local tl = major and 10 or 5
+            local col = major and T.muted or T.line
+            s:line(xl - tl, y, xl, y, { stroke = col, sw = major and 2 or 1, cap = "round" })
+            s:line(xr, y, xr + tl, y, { stroke = col, sw = major and 2 or 1, cap = "round" })
+            if major and room >= 28 then
+              local m = i // (MINOR_PER + 1)
+              if m % every == 0 or m == MAJOR_TICKS then
+                s:text(xl - 14, y + labelSize * 0.36, fmtNumber(valueOf(i / n), d),
+                       { size = labelSize, fill = T.muted, anchor = "end" })
+              end
+            end
+          end
+        else
+          s:rect(g.x0 - slot / 2, g.cy - slot / 2, g.len + slot, slot,
+                 { fill = T.well, stroke = T.line, sw = 1, rx = slot / 2 })
+          local every = U.clamp(ceil(labelSize * 2.8 / (g.len / MAJOR_TICKS)), 1, MAJOR_TICKS)
+          local yb = g.cy + g.capH / 2 + 6
+          local yt = g.cy - g.capH / 2 - 6
+          local room = H - bottom - yb - 14
+          for i = 0, n do
+            local x = g.x0 + (i / n) * g.len
+            local major = (i % (MINOR_PER + 1)) == 0
+            local tl = major and 10 or 5
+            local col = major and T.muted or T.line
+            s:line(x, yb, x, yb + tl, { stroke = col, sw = major and 2 or 1, cap = "round" })
+            s:line(x, yt - tl, x, yt, { stroke = col, sw = major and 2 or 1, cap = "round" })
+            if major and room >= labelSize then
+              local m = i // (MINOR_PER + 1)
+              if m % every == 0 or m == MAJOR_TICKS then
+                s:text(x, yb + 12 + labelSize, fmtNumber(valueOf(i / n), d),
+                       { size = labelSize, fill = T.muted, anchor = "middle" })
+              end
+            end
+          end
+        end
+        s.parts[1] = s.parts[1] or ""
+        self.static = table.concat(s.parts)
+        self.staticKey = key
+        return self.static
+      end
+
+      function self:draw(c)
+        c:raw(staticRaw())
+        local p = self.p
+        local cw, ch, slot = g.capW, g.capH, g.slot
+        local stroke = self.down and T.accent or T.line
+        local sw = self.down and 2 or 1
+        if vertical then
+          local yc = g.y0 - p * g.len
+          if p > 0.001 then
+            c:rect(g.cx - slot / 2 + 2, yc, slot - 4, g.y0 - yc + slot / 2 - 2,
+                   { fill = T.accent, opacity = 0.9, rx = (slot - 4) / 2 })
+          end
+          if self.down then
+            c:rect(g.cx - cw / 2 - 4, yc - ch / 2 - 4, cw + 8, ch + 8, { fill = T.accent, opacity = 0.25, rx = 8 })
+          end
+          c:rect(g.cx - cw / 2, yc - ch / 2, cw, ch, { fill = T.panel, stroke = stroke, sw = sw, rx = 6 })
+          c:line(g.cx - cw / 2 + 6, yc, g.cx + cw / 2 - 6, yc, { stroke = T.accent2, sw = 3, cap = "round" })
+        else
+          local xc = g.x0 + p * g.len
+          if p > 0.001 then
+            c:rect(g.x0 - slot / 2 + 2, g.cy - slot / 2 + 2, xc - g.x0 + slot / 2 - 2, slot - 4,
+                   { fill = T.accent, opacity = 0.9, rx = (slot - 4) / 2 })
+          end
+          if self.down then
+            c:rect(xc - cw / 2 - 4, g.cy - ch / 2 - 4, cw + 8, ch + 8, { fill = T.accent, opacity = 0.25, rx = 8 })
+          end
+          c:rect(xc - cw / 2, g.cy - ch / 2, cw, ch, { fill = T.panel, stroke = stroke, sw = sw, rx = 6 })
+          c:line(xc, g.cy - ch / 2 + 6, xc, g.cy + ch / 2 - 6, { stroke = T.accent2, sw = 3, cap = "round" })
+        end
+        -- readout
+        c:textFit(W / 2, 6 + valueSize * 0.9, W - 16, readout(valueOf(p)),
+                  { size = valueSize, fill = T.text, anchor = "middle", weight = "bold" })
+        if E.hint and not self.down then
+          Shapes.hint(c, T, HINT, W, H)
+        end
+      end
+
+      -- white-box helpers for tests
+      self.readout = readout
+      self.valueOf = valueOf
+      self.posOfValue = posOfValue
+      self.geometry = g
+
+      return self
+    end,
+  }
+end
+-- ===== 20_mode_zones.lua =====
+-- Nikita Visual Arts – nikitavisual.art
+-- Touch Pad for Q-SYS: Zone Select mode
+--
+-- A set of named zones (a room plan, a seating map, a row of displays) drawn
+-- on the pad. Tap toggles a zone; a drag that starts on a zone paints the
+-- opposite of that zone's state across every zone it crosses; a closed lasso
+-- drawn on empty space selects the zones whose centres it encloses; a long
+-- press solos a zone; a double tap on empty space clears everything.
+-- Exclusive turns the set into a radio group (one zone at a time).
+-- Edit mode: drag a zone to move it, its bottom-right corner to resize it,
+-- empty space to redraw the last touched zone; it switches off after 5 min
+-- untouched and prints the layout. The layout lives in ZoneLayout as a JSON
+-- list of {x, y, w, h} in 0..1 pad units; blank means the Columns grid.
+--
+-- Design time (controls, pages, layout) and the runtime `create(E)` live here.
+
+Modes = Modes or {}
+
+do
+local HINT = "Tap, drag or circle zones"
+local HINT_EDIT = "Edit: drag to move, corner to resize"
+local MAX_ZONES = 32
+local MIN_SIZE = 0.04           -- smallest zone side, pad units
+local DRAG_START = 12           -- px: the engine's tap / drag boundary
+local LASSO_MAX = 160           -- points kept on a lasso trail
+local LASSO_TEST_MAX = 64       -- points used for the geometry tests
+local LASSO_CLOSE = 0.10        -- end within this fraction of the diagonal from the start
+local LASSO_MIN_PTS = 6
+local LASSO_AREA = 0.02         -- of the pad area
+local COMMIT_DELAY = 1.5        -- an inferred lift stays retractable this long (spec 5.3)
+local EDIT_TIMEOUT = 300        -- s: edit mode switches off after this long untouched
+local TRIGGER_DEBOUNCE = 0.5    -- s: a trigger's trailing edge does not act twice
+local PAINT_STEP = 8            -- px between samples along a painting move
+local PAINT_MAX = 16            -- samples per move at most
+
+-- Zones property at design time (props[name] = {Value}) or at run time (E.props[name] = value).
+local function zoneCount(props)
+  local p = props and props["Zones"]
+  if type(p) == "table" then p = p.Value end
+  local v = math.floor((tonumber(p) or 8) + 0.5)
+  if v < 1 then v = 1 elseif v > MAX_ZONES then v = MAX_ZONES end
+  return v
+end
+
+Modes["Zone Select"] = {
+  id = "zones",
+  pretty = "Zone Select",
+  hint = HINT,
+
+  controls = function(C, props)
+    local n = zoneCount(props)
+    C.add{ Name = "ZoneName", Count = n, ControlType = "Text", PinStyle = "Input", Group = "Zones" }
+    C.add{ Name = "ZoneSelected", Count = n, ControlType = "Button", ButtonType = "Toggle", PinStyle = "Both", Group = "Zones" }
+    C.add{ Name = "SelectAll", ControlType = "Button", ButtonType = "Trigger", PinStyle = "Input", Group = "Zones", Legend = "ALL" }
+    C.add{ Name = "ClearAll", ControlType = "Button", ButtonType = "Trigger", PinStyle = "Input", Group = "Zones", Legend = "NONE" }
+    C.add{ Name = "SelectedList", ControlType = "Text", PinStyle = "Output", Group = "Zones" }
+    C.add{ Name = "Edit", ControlType = "Button", ButtonType = "Toggle", PinStyle = "Input", Group = "Zones", Legend = "EDIT" }
+    C.add{ Name = "ShowBackground", ControlType = "Button", ButtonType = "Toggle", PinStyle = "Input", Group = "Zones",
+           DefaultValue = true, Legend = "BACKGROUND" }
+    C.add{ Name = "ZoneLayout", ControlType = "Text", PinStyle = "Both", Group = "Zones" }
+    C.add{ Name = "Exclusive", ControlType = "Button", ButtonType = "Toggle", PinStyle = "Input", Group = "Zones", Legend = "EXCLUSIVE" }
+    C.add{ Name = "Columns", ControlType = "Knob", ControlUnit = "Integer", Min = 1, Max = 8, DefaultValue = 4,
+           PinStyle = "Input", Group = "Zones" }
+  end,
+
+  -- pages: nil, so the framework adds the Names page (spec section 4).
+
+  layout = function(L, page, props, ctx)
+    if page == "Pad" then
+      L.padDisplay(ctx)
+      L.gesture(ctx)
+      L.hint(ctx, HINT)
+      L.sideCaption(ctx, "ZONES")
+      L.sideButton(ctx, "SelectAll", "ALL")
+      L.sideButton(ctx, "ClearAll", "NONE")
+      L.sideCaption(ctx, "OPTIONS")
+      L.sideButton(ctx, "Exclusive", "EXCLUSIVE")
+      L.sideButton(ctx, "ShowBackground", "BACKGROUND")
+      L.sideCaption(ctx, "LAYOUT")
+      L.sideButton(ctx, "Edit", "EDIT")
+      L.sideCaption(ctx, "SELECTED")
+      L.readout("SelectedList", { ctx.side, ctx.sideY }, { ctx.sideW, 48 }, { fontSize = 9 })
+      ctx.sideY = ctx.sideY + 56
+    elseif page == "Setup" then
+      local ix, iy, iw = L.section(ctx, "Z O N E S", 150)
+      L.caption("COLUMNS", { ix, iy }, { 56, 10 })
+      L.knob("Columns", { ix + 12, iy + 12 }, { 32, 32 }, { color = Nikita.Purple })
+      L.label("Columns of the default grid, used while\nZone Layout is blank.", { ix + 64, iy + 12 }, { iw - 64, 28 })
+      L.caption("ZONE LAYOUT: JSON LIST OF {x, y, w, h} IN 0..1 PAD UNITS", { ix, iy + 52 }, { iw, 10 }, "Left")
+      L.text("ZoneLayout", { ix, iy + 64 }, { iw, 56 }, { fontSize = 9 })
+      L.label("Blank = the grid. Edit mode writes the layout here when a zone changes.", { ix, iy + 126 }, { iw, 14 })
+    elseif page == "Names" then
+      L.grid(L.keys("ZoneName"), ctx.x, ctx.y, 4, 176, 40)
+    end
+  end,
+
+  padColour = function(T)
+    return T.bg
+  end,
+
+  create = function(E)
+    local W, H, T = E.W, E.H, E.T
+    local DIAG = math.sqrt(W * W + H * H)
+    local N = zoneCount(E.props)
+    local FAMILY = E.props["Font"]
+    local inset = math.min(10, math.floor(math.min(W, H) * 0.04))
+    local self = {
+      zones = {},        -- [i] = { x, y, w, h } in 0..1 pad units
+      names = {},        -- [i] = ZoneName string (trimmed)
+      sel = {},          -- [i] = boolean
+      custom = false,    -- a ZoneLayout is in force (Columns no longer applies)
+      cols = 4,
+      edit = false, exclusive = false, background = true,
+      last = nil,        -- last touched zone (edit target)
+      touch = nil,       -- live touch record
+      parked = nil,      -- touch record of an inferred lift that may be resumed
+      pending = nil,     -- { touch, handle }: a lasso waiting for its commit
+      editTimer = nil, editDirty = false,
+      cache = {},        -- [i] = { key, svg } rendered tile fragments
+      grid = nil,        -- cached dotted grid
+      actAt = -1,        -- last trigger action time (debounce)
+    }
+
+    -- ---------- helpers ----------
+    local function labelOf(i)
+      local n = self.names[i]
+      if n == nil or n == "" then return "Zone " .. i end
+      return n
+    end
+
+    local function ctlBool(name, index)
+      local c = E.ctl(name, index)
+      return c ~= nil and c.Boolean == true
+    end
+
+    local function gridZones()
+      local cols = math.min(self.cols, N)
+      local rows = math.ceil(N / cols)
+      local m, g = 0.03, 0.02
+      local mb = m + (E.hint and (20 / H) or 0)
+      local w = (1 - 2 * m - (cols - 1) * g) / cols
+      local h = (1 - m - mb - (rows - 1) * g) / rows
+      for i = 1, N do
+        local c, r = (i - 1) % cols, (i - 1) // cols
+        self.zones[i] = { x = m + c * (w + g), y = m + r * (h + g), w = w, h = h }
+      end
+    end
+
+    -- Applies a ZoneLayout text; blank restores the grid. Returns false on bad JSON.
+    local function applyLayout(text)
+      text = U.trim(tostring(text or ""))
+      if text == "" then
+        self.custom = false
+        gridZones()
+        return true
+      end
+      local list = E.json.decode(text)
+      if type(list) ~= "table" then return false end
+      gridZones()
+      local n = 0
+      for i = 1, N do
+        local z = list[i]
+        if type(z) == "table" then
+          local x, y, w, h = tonumber(z.x), tonumber(z.y), tonumber(z.w), tonumber(z.h)
+          if x and y and w and h then
+            w, h = U.clamp(w, MIN_SIZE, 1), U.clamp(h, MIN_SIZE, 1)
+            x, y = U.clamp(x, 0, 1 - w), U.clamp(y, 0, 1 - h)
+            self.zones[i] = { x = x, y = y, w = w, h = h }
+            n = n + 1
+          end
+        end
+      end
+      self.custom = n > 0
+      return true
+    end
+
+    local function layoutJson()
+      local list = {}
+      for i = 1, N do
+        local z = self.zones[i]
+        list[i] = { x = U.round(z.x, 3), y = U.round(z.y, 3), w = U.round(z.w, 3), h = U.round(z.h, 3) }
+      end
+      return E.json.encode(list)
+    end
+
+    local function inZone(i, x, y)
+      local z = self.zones[i]
+      local zx, zy = z.x * W, z.y * H
+      return x >= zx and x <= zx + z.w * W and y >= zy and y <= zy + z.h * H
+    end
+
+    -- Topmost zone under a pad point, or nil. In edit mode the picked zone
+    -- is on top (it is also drawn last).
+    local function zoneAt(x, y)
+      if self.edit and self.last and inZone(self.last, x, y) then return self.last end
+      for i = N, 1, -1 do
+        if inZone(i, x, y) then return i end
+      end
+      return nil
+    end
+
+    local function handleSize(w, h)
+      return U.clamp(math.min(w, h) * 0.3, 14, 32)
+    end
+
+    local function cornerHit(i, x, y)
+      local z = self.zones[i]
+      local w, h = z.w * W, z.h * H
+      local hs = handleSize(w, h)
+      return x >= z.x * W + w - hs and y >= z.y * H + h - hs
+    end
+
+    -- ---------- selection ----------
+    local function publish()
+      local parts, k = {}, 0
+      for i = 1, N do
+        if self.sel[i] then
+          k = k + 1
+          parts[k] = labelOf(i)
+        end
+      end
+      E.out("SelectedList", table.concat(parts, ", "))
+    end
+
+    local function setZone(i, on)
+      on = on and true or false
+      if self.sel[i] == on then return false end
+      self.sel[i] = on
+      E.out("ZoneSelected", on, i)
+      return true
+    end
+
+    local function clearOthers(keep)
+      for i = 1, N do
+        if i ~= keep then setZone(i, false) end
+      end
+    end
+
+    local function selectOnly(i)
+      clearOthers(i)
+      setZone(i, true)
+    end
+
+    local function toggle(i)
+      local on = not self.sel[i]
+      if on and self.exclusive then clearOthers(i) end
+      setZone(i, on)
+      publish()
+      E.setGesture(labelOf(i) .. (on and " ON" or " OFF"))
+      E.invalidate()
+    end
+
+    local function clearAll(text)
+      for i = 1, N do setZone(i, false) end
+      publish()
+      E.setGesture(text or "ALL CLEARED")
+      E.invalidate()
+    end
+
+    local function selectAll()
+      if self.exclusive then
+        E.setGesture("EXCLUSIVE: ONE ZONE AT A TIME")
+        return
+      end
+      for i = 1, N do setZone(i, true) end
+      publish()
+      E.setGesture("ALL SELECTED")
+      E.invalidate()
+    end
+
+    local function setExclusive(on)
+      self.exclusive = on and true or false
+      if self.exclusive then
+        local keep = nil
+        for i = 1, N do
+          if self.sel[i] then
+            if keep then setZone(i, false) else keep = i end
+          end
+        end
+        publish()
+      end
+      E.invalidate()
+    end
+
+    -- A trigger acts on its rising edge; a handler that runs with the value
+    -- already false acts too unless it just did.
+    local function fired(ctl)
+      local now = E.now()
+      if ctl.Boolean or now - self.actAt > TRIGGER_DEBOUNCE then
+        self.actAt = now
+        return true
+      end
+      return false
+    end
+
+    -- ---------- edit mode ----------
+    local function armEdit()
+      if self.editTimer then self.editTimer:cancel() end
+      self.editTimer = E.after(EDIT_TIMEOUT, function()
+        self.editTimer = nil
+        if not self.edit then return end
+        E.out("Edit", false)
+        self.setEdit(false, "EDIT OFF: 5 MIN UNTOUCHED")
+      end)
+    end
+
+    function self.setEdit(on, why)
+      on = on and true or false
+      if self.edit == on then return end
+      self.edit = on
+      self.touch = nil
+      self.parked = nil
+      if on then
+        self.editDirty = false
+        armEdit()
+        E.setGesture("EDIT ON")
+      else
+        if self.editTimer then
+          self.editTimer:cancel()
+          self.editTimer = nil
+        end
+        local js = layoutJson()
+        if self.editDirty then
+          self.custom = true
+          E.out("ZoneLayout", js)
+        end
+        E.log("Zone layout: " .. js)
+        E.setGesture(why or "EDIT OFF")
+      end
+      E.invalidate()
+    end
+
+    -- ---------- lasso ----------
+    local function addPoint(tc, x, y)
+      if tc.n >= LASSO_MAX then return end
+      if U.dist(tc.lx, tc.ly, x, y) < math.max(4, DIAG * 0.008) then return end
+      tc.n = tc.n + 1
+      tc.pts[2 * tc.n - 1], tc.pts[2 * tc.n] = x, y
+      tc.lx, tc.ly = x, y
+    end
+
+    -- Closed path (end near the start, at least 6 points, area over 2 % of
+    -- the pad): selects the zones whose centres it encloses.
+    local function commitLasso(tc)
+      local pts, n = tc.pts, tc.n
+      if n < LASSO_MIN_PTS then return false end
+      if U.dist(pts[1], pts[2], pts[2 * n - 1], pts[2 * n]) > LASSO_CLOSE * DIAG then return false end
+      local poly = pts
+      if n > LASSO_TEST_MAX then
+        -- Decimate for the geometry tests; the first point is kept.
+        poly = {}
+        local step = n / LASSO_TEST_MAX
+        for k = 0, LASSO_TEST_MAX - 1 do
+          local i = math.floor(k * step) + 1
+          poly[2 * k + 1], poly[2 * k + 2] = pts[2 * i - 1], pts[2 * i]
+        end
+      end
+      if U.polyArea(poly) < LASSO_AREA * W * H then return false end
+      local hits = 0
+      for i = 1, N do
+        local z = self.zones[i]
+        if U.pointInPoly((z.x + z.w / 2) * W, (z.y + z.h / 2) * H, poly) then
+          hits = hits + 1
+          if self.exclusive then
+            if hits == 1 then selectOnly(i) end
+          else
+            setZone(i, true)
+          end
+        end
+      end
+      publish()
+      E.setGesture("LASSO: " .. hits .. (hits == 1 and " ZONE" or " ZONES"))
+      E.invalidate()
+      return true
+    end
+
+    local function flushPending()
+      local p = self.pending
+      if not p then return end
+      self.pending = nil
+      if p.handle then p.handle:cancel() end
+      commitLasso(p.touch)
+    end
+
+    -- ---------- painting ----------
+    local function paintAt(tc, x, y)
+      local i = zoneAt(x, y)
+      if not i then return end
+      if self.exclusive then
+        if not self.sel[i] then
+          selectOnly(i)
+          tc.changed = true
+          tc.count = 1
+        end
+        return
+      end
+      if tc.painted[i] then return end
+      tc.painted[i] = true
+      if setZone(i, tc.target) then
+        tc.changed = true
+        tc.count = tc.count + 1
+      end
+    end
+
+    local function paintSegment(tc, x, y)
+      local d = U.dist(tc.px, tc.py, x, y)
+      local steps = math.min(PAINT_MAX, math.max(1, math.ceil(d / PAINT_STEP)))
+      for s = 1, steps do
+        local f = s / steps
+        paintAt(tc, tc.px + (x - tc.px) * f, tc.py + (y - tc.py) * f)
+      end
+    end
+
+    -- ---------- edit geometry ----------
+    local function editMove(tc, x, y)
+      local z, z0 = self.zones[tc.zone], tc.z0
+      if tc.kind == "move" then
+        z.x = U.clamp(z0.x + (x - tc.x0) / W, 0, 1 - z.w)
+        z.y = U.clamp(z0.y + (y - tc.y0) / H, 0, 1 - z.h)
+      elseif tc.kind == "resize" then
+        z.w = U.clamp(z0.w + (x - tc.x0) / W, MIN_SIZE, 1 - z.x)
+        z.h = U.clamp(z0.h + (y - tc.y0) / H, MIN_SIZE, 1 - z.y)
+      elseif tc.kind == "redraw" then
+        local x0, x1 = math.min(tc.x0, x) / W, math.max(tc.x0, x) / W
+        local y0, y1 = math.min(tc.y0, y) / H, math.max(tc.y0, y) / H
+        z.w = U.clamp(x1 - x0, MIN_SIZE, 1)
+        z.h = U.clamp(y1 - y0, MIN_SIZE, 1)
+        z.x = U.clamp(x0, 0, 1 - z.w)
+        z.y = U.clamp(y0, 0, 1 - z.h)
+      else
+        return
+      end
+      tc.changed = true
+    end
+
+    local EDIT_VERB = { move = "MOVED ", resize = "RESIZED ", redraw = "REDREW " }
+
+    -- ---------- touch events ----------
+    function self:onTouchStart(x, y, t)
+      self.parked = nil
+      flushPending()
+      local i = zoneAt(x, y)
+      local tc = { x0 = x, y0 = y, px = x, py = y, zone = i, dragging = false, kind = "none",
+                   painted = {}, changed = false, count = 0 }
+      if self.edit then
+        if i then
+          self.last = i
+          tc.kind = cornerHit(i, x, y) and "resize" or "move"
+        elseif self.last then
+          tc.zone = self.last
+          tc.kind = "redraw"
+        end
+        if tc.zone then
+          local z = self.zones[tc.zone]
+          tc.z0 = { x = z.x, y = z.y, w = z.w, h = z.h }
+        end
+      elseif i then
+        tc.kind = "paint"
+      else
+        tc.kind = "lasso"
+        tc.pts, tc.n, tc.lx, tc.ly = { x, y }, 1, x, y
+      end
+      self.touch = tc
+      E.invalidate()
+    end
+
+    function self:onTouchMove(x, y, t, dx, dy)
+      local tc = self.touch
+      if not tc then return end
+      if not tc.dragging and U.dist(tc.x0, tc.y0, x, y) >= DRAG_START then
+        tc.dragging = true
+        if tc.kind == "paint" then
+          tc.target = not self.sel[tc.zone]
+          paintAt(tc, tc.x0, tc.y0)
+        end
+      end
+      if tc.kind == "lasso" then
+        addPoint(tc, x, y)
+      elseif tc.dragging then
+        if tc.kind == "paint" then
+          paintSegment(tc, x, y)
+        else
+          editMove(tc, x, y)
+        end
+      end
+      tc.px, tc.py = x, y
+      E.invalidate()
+    end
+
+    function self:onTouchEnd(x, y, t, info)
+      local tc = self.touch
+      self.touch = nil
+      if not tc then return end
+      if info.aborted then
+        E.invalidate()
+        return
+      end
+      if tc.kind == "lasso" then
+        if tc.dragging then
+          addPoint(tc, x, y)
+          if info.inferred then
+            self.parked = tc
+            self.pending = { touch = tc }
+            self.pending.handle = E.after(COMMIT_DELAY, function()
+              local p = self.pending
+              self.pending = nil
+              self.parked = nil
+              if p then
+                if not commitLasso(p.touch) then E.invalidate() end
+              end
+            end)
+          else
+            commitLasso(tc)
+          end
+        end
+      elseif tc.kind == "paint" then
+        if tc.changed then
+          publish()
+          if self.exclusive then
+            E.setGesture(labelOf(zoneAt(x, y) or tc.zone) .. " ON")
+          else
+            E.setGesture("PAINTED " .. tc.count .. (tc.target and " ON" or " OFF"))
+          end
+        end
+        if info.inferred and tc.dragging then self.parked = tc end
+      elseif self.edit then
+        if tc.changed then
+          self.editDirty = true
+          self.custom = true
+          E.out("ZoneLayout", layoutJson())
+          E.setGesture((EDIT_VERB[tc.kind] or "") .. labelOf(tc.zone))
+        end
+        if info.inferred and tc.dragging then self.parked = tc end
+        armEdit()
+      end
+      E.invalidate()
+    end
+
+    -- An inferred lift taken back: the same drag goes on.
+    function self:onTouchResume(x, y, t)
+      local tc = self.parked
+      self.parked = nil
+      local p = self.pending
+      if p then
+        self.pending = nil
+        if p.handle then p.handle:cancel() end
+        tc = tc or p.touch
+      end
+      if tc then
+        self.touch = tc
+        if tc.kind == "lasso" then addPoint(tc, x, y) end
+      end
+      E.invalidate()
+    end
+
+    function self:onGesture(g)
+      local i = zoneAt(g.x, g.y)
+      if g.type == "tap" then
+        if self.edit then
+          if i then
+            self.last = i
+            E.setGesture(labelOf(i) .. " PICKED")
+            E.invalidate()
+          end
+          armEdit()
+        elseif i then
+          toggle(i)
+        end
+      elseif g.type == "double" then
+        if self.edit then return end
+        if i then
+          -- The two taps toggled twice; a double tap on a zone toggles it once.
+          toggle(i)
+        else
+          clearAll("DOUBLE TAP: ALL CLEARED")
+        end
+      elseif g.type == "long" then
+        if self.edit or not i then return end
+        selectOnly(i)
+        publish()
+        E.setGesture("SOLO " .. labelOf(i))
+        E.invalidate()
+      end
+    end
+
+    function self:onLock(locked)
+      if locked then
+        self.touch = nil
+        self.parked = nil
+        local p = self.pending
+        self.pending = nil
+        if p and p.handle then p.handle:cancel() end
+      end
+      E.invalidate()
+    end
+
+    -- ---------- control pins ----------
+    function self:onControl(name, index, ctl)
+      if name == "ZoneSelected" then
+        if index < 1 or index > N then return end
+        local on = ctl.Boolean and true or false
+        if on and self.exclusive then clearOthers(index) end
+        self.sel[index] = on
+        publish()
+      elseif name == "ZoneName" then
+        if index < 1 or index > N then return end
+        self.names[index] = U.trim(tostring(ctl.String or ""))
+        publish()
+      elseif name == "SelectAll" then
+        if fired(ctl) then selectAll() end
+        return
+      elseif name == "ClearAll" then
+        if fired(ctl) then clearAll("ALL CLEARED") end
+        return
+      elseif name == "Edit" then
+        self.setEdit(ctl.Boolean)
+        return
+      elseif name == "ShowBackground" then
+        self.background = ctl.Boolean and true or false
+      elseif name == "Exclusive" then
+        setExclusive(ctl.Boolean)
+        return
+      elseif name == "ZoneLayout" then
+        if not applyLayout(ctl.String) then
+          E.status("Zone Layout: not a JSON list of {x, y, w, h}", "warn")
+        end
+      elseif name == "Columns" then
+        self.cols = U.clamp(math.floor((tonumber(ctl.Value) or 4) + 0.5), 1, 8)
+        if not self.custom then gridZones() end
+      else
+        return
+      end
+      E.invalidate()
+    end
+
+    -- ---------- drawing ----------
+    local function gridRaw()
+      if self.grid then return self.grid end
+      local scratch = Svg.new(W, H, { limit = 20000, family = FAMILY })
+      Shapes.gridDots(scratch, T, W - 2 * inset, H - 2 * inset, 24)
+      self.grid = '<g transform="translate(' .. Svg.num(inset) .. " " .. Svg.num(inset) .. ')">'
+        .. table.concat(scratch.parts) .. "</g>"
+      return self.grid
+    end
+
+    -- A zone tile is rendered once per (state, geometry, name) and replayed.
+    local function tileFrag(i)
+      local z = self.zones[i]
+      local on = self.sel[i] and true or false
+      local mode = self.edit and ((self.last == i) and "e" or "E") or "-"
+      local key = (on and "1" or "0") .. mode .. z.x .. "," .. z.y .. "," .. z.w .. "," .. z.h .. "|" .. labelOf(i)
+      local e = self.cache[i]
+      if e and e.key == key then return e.svg end
+      local x, y, w, h = z.x * W, z.y * H, z.w * W, z.h * H
+      local s = Svg.new(W, H, { limit = 6000, family = FAMILY })
+      local size = U.clamp(math.floor(math.min(h * 0.38, w * 0.18)), 9, 16)
+      local picked = self.edit and self.last == i
+      Shapes.tile(s, T, x, y, w, h, labelOf(i),
+        { on = on, radius = math.min(10, h / 4), size = size, picked = picked,
+          accent = picked and T.accent2 or nil })
+      if self.edit then
+        local hs = handleSize(w, h)
+        s:rect(x + w - hs, y + h - hs, hs - 2, hs - 2,
+          { fill = picked and T.accent2 or T.muted, opacity = 0.85, rx = 2 })
+        s:text(x + w - hs / 2 - 1, y + h - hs / 2 + 3, tostring(i),
+          { size = 9, fill = T.onAccent, anchor = "middle", weight = "bold" })
+      end
+      local svg = table.concat(s.parts)
+      self.cache[i] = { key = key, svg = svg }
+      return svg
+    end
+
+    function self:draw(c)
+      if self.background then
+        c:rect(inset, inset, W - 2 * inset, H - 2 * inset,
+          { fill = T.panel, stroke = T.line, sw = 1, rx = math.max(4, math.floor(inset * 1.2)) })
+        c:raw(gridRaw())
+      end
+      local top = self.edit and self.last or nil
+      for i = 1, N do
+        if i ~= top then c:raw(tileFrag(i)) end
+      end
+      if top then c:raw(tileFrag(top)) end
+      local tc = self.touch
+      local pendingTrail = false
+      if not tc and self.pending then
+        tc = self.pending.touch
+        pendingTrail = true
+      end
+      if tc and tc.kind == "lasso" and tc.n >= 2 then
+        c:polyline(tc.pts, { stroke = T.accent, sw = 2, opacity = 0.9, cap = "round",
+                             dash = pendingTrail and "6 5" or nil })
+        c:circle(tc.pts[1], tc.pts[2], 5, { fill = T.accent, opacity = 0.8 })
+      end
+      if self.edit then
+        c:text(W - 10, 18, "EDIT", { size = 12, fill = T.accent2, anchor = "end", weight = "bold" })
+      end
+      if E.hint and not self.touch then
+        Shapes.hint(c, T, self.edit and HINT_EDIT or HINT, W, H)
+      end
+    end
+
+    -- ---------- start-up state ----------
+    for i = 1, N do
+      local nm = E.ctl("ZoneName", i)
+      self.names[i] = nm and U.trim(tostring(nm.String or "")) or ""
+      self.sel[i] = ctlBool("ZoneSelected", i)
+    end
+    local colsCtl = E.ctl("Columns")
+    self.cols = U.clamp(math.floor((colsCtl and tonumber(colsCtl.Value) or 4) + 0.5), 1, 8)
+    self.background = ctlBool("ShowBackground")
+    self.exclusive = ctlBool("Exclusive")
+    local layoutCtl = E.ctl("ZoneLayout")
+    if not applyLayout(layoutCtl and layoutCtl.String or "") then gridZones() end
+
+    function self:onStart()
+      if self.exclusive then setExclusive(true) end
+      publish()
+      if ctlBool("Edit") then self.setEdit(true) end
+    end
+
+    return self
+  end,
+}
+end
+-- ===== 21_mode_dragdrop.lua =====
+-- Nikita Visual Arts – nikitavisual.art
+-- Touch Pad for Q-SYS: Drag & Drop mode
+--
+-- Sources on the left, screens (destinations) on the right. Drag a source
+-- tile onto a screen to route it, or tap a source and then a screen. A
+-- double tap on a source (two taps on the same tile) sends it to every
+-- screen; with AllowCalls on (the default) screens whose name carries a call
+-- word (teams, zoom, webex, codec, call) are left alone so a running call is
+-- not hijacked, with it off the broadcast reaches every screen. Lists page
+-- when their tiles would drop under 56 px (and never show more than 12
+-- sources or 16 screens on a page); dropping a source on a list's arrows
+-- turns that page and keeps the source picked. A picked source is put down
+-- after 8 s. Tile icons follow whole words in the names (Shapes.iconFor);
+-- SourceActive off dims a source. Route n is read and written: a value written
+-- from outside updates the drawing and pulses Routed n only when it changed.
+--
+-- Pins (spec 3.11): SourceName n, SourceActive n (in), DestName n (in),
+-- Route n (both), Routed n, RouteName n (out), ClearRoutes, TapOnly, AllowCalls (in).
+
+Modes = Modes or {}
+
+do
+  local floor, ceil, min, max = math.floor, math.ceil, math.min, math.max
+
+  local HINT_DRAG = "Drag a source to a screen"
+  local HINT_TAP = "Tap a source, then a screen"
+  local HINT_PICKED = "Now tap a screen"
+  local HINT_CARRY = "Drop on a screen"
+  local HINT_NO_SOURCE = "Pick a source first"
+  local TEXT_CLEARED = "All cleared"
+  local MAX_SRC_PAGE, MAX_DST_PAGE = 12, 16
+  local MIN_TILE, TILE_GAP, ARROW_H, MAX_TILE_H = 56, 6, 28, 96
+  local TILE_PAD = 8                     -- Shapes.tile's inner padding
+  local PUT_DOWN = 8                     -- seconds a picked source stays picked
+  local DOUBLE_TIME = 0.4                -- second tap on the same tile within this = double
+  local FLASH = 0.8                      -- seconds a freshly routed screen glows
+  local NAME_IN_TEXT = 40                -- characters of a name used in the Gesture text
+  local CALL_WORDS = { teams = true, zoom = true, webex = true, codec = true, call = true }
+
+  local function countOf(props, name, default)
+    local p = props and props[name]
+    if type(p) == "table" then p = p.Value end
+    local v = tonumber(p) or default
+    v = floor(v + 0.5)
+    if v < 1 then v = 1 elseif v > 64 then v = 64 end
+    return v
+  end
+
+  -- Rows of "n", a name box and (for sources) a SIGNAL toggle, filled column
+  -- by column. Returns the y below the last row.
+  local function nameRows(L, base, n, x, y, w, cols, withSignal)
+    local G = L.G
+    local colW = floor((w - (cols - 1) * G) / cols)
+    local rows = ceil(n / cols)
+    for i = 1, n do
+      local col, row = (i - 1) // rows, (i - 1) % rows
+      local cx, cy = x + col * (colW + G), y + row * 32
+      L.caption(tostring(i), { cx, cy + 7 }, { 24, 10 }, "Right")
+      local tw = colW - 28
+      if withSignal then tw = tw - 64 - G end
+      L.text(L.key(base, i), { cx + 28, cy + 2 }, { tw, 22 })
+      if withSignal then
+        L.toggle(L.key("SourceActive", i), "SIGNAL", { cx + 28 + tw + G, cy + 2 }, { 64, 22 })
+      end
+    end
+    return y + rows * 32
+  end
+
+  Modes["Drag & Drop"] = {
+    id = "dragdrop",
+    pretty = "Drag & Drop",
+    hint = HINT_DRAG,
+
+    controls = function(C, props)
+      local nS = countOf(props, "Sources", 4)
+      local nD = countOf(props, "Destinations", 2)
+      C.add{ Name = "SourceName", ControlType = "Text", Count = nS, PinStyle = "Input", Group = "Sources" }
+      C.add{ Name = "SourceActive", ControlType = "Button", ButtonType = "Toggle", Count = nS,
+             PinStyle = "Input", Group = "Sources", DefaultValue = true }
+      C.add{ Name = "DestName", ControlType = "Text", Count = nD, PinStyle = "Input", Group = "Routing" }
+      C.add{ Name = "Route", ControlType = "Knob", ControlUnit = "Integer", Min = 0, Max = nS, DefaultValue = 0,
+             Count = nD, PinStyle = "Both", Group = "Routing" }
+      C.add{ Name = "Routed", ControlType = "Button", ButtonType = "Trigger", Count = nD, PinStyle = "Output",
+             Group = "Routing" }
+      C.add{ Name = "RouteName", ControlType = "Text", Count = nD, PinStyle = "Output", Group = "Routing" }
+      C.add{ Name = "ClearRoutes", ControlType = "Button", ButtonType = "Trigger", PinStyle = "Input", Group = "Routing" }
+      C.add{ Name = "TapOnly", ControlType = "Button", ButtonType = "Toggle", PinStyle = "Input", Group = "Routing" }
+      C.add{ Name = "AllowCalls", ControlType = "Button", ButtonType = "Toggle", PinStyle = "Input", Group = "Routing",
+             DefaultValue = true }
+    end,
+
+    -- Names (or Sources / Destinations above 16) hold the name boxes; the Pad
+    -- page gets the routing buttons on the side; Setup explains the options.
+    layout = function(L, page, props, ctx)
+      local nS = countOf(props, "Sources", 4)
+      local nD = countOf(props, "Destinations", 2)
+      if page == "Pad" then
+        L.padDisplay(ctx)
+        L.gesture(ctx)
+        L.hint(ctx, HINT_DRAG)
+        L.sideCaption(ctx, "ROUTING")
+        L.sideButton(ctx, "ClearRoutes", "CLEAR ROUTES")
+        L.sideButton(ctx, "TapOnly", "TAP ONLY")
+        L.sideButton(ctx, "AllowCalls", "ALLOW CALLS")
+      elseif page == "Setup" then
+        local ix, iy, iw = L.section(ctx, "R O U T I N G", 72)
+        L.toggle("TapOnly", "TAP ONLY", { ix, iy }, { 100, 24 })
+        L.toggle("AllowCalls", "ALLOW CALLS", { ix + 108, iy }, { 100, 24 })
+        L.label("Tap Only: no drags; tap a source, then a screen.\nAllow Calls: a double tap sends a source to every screen\nexcept Teams / Zoom / Webex / codec / call screens.",
+                { ix, iy + 30 }, { iw, 42 })
+      elseif page == "Names" then
+        local rowsS = ceil(nS / 2)
+        local ix, iy, iw = L.section(ctx, "S O U R C E S", rowsS * 32)
+        nameRows(L, "SourceName", nS, ix, iy, iw, 2, true)
+        local rowsD = ceil(nD / 2)
+        ix, iy, iw = L.section(ctx, "D E S T I N A T I O N S", rowsD * 32)
+        nameRows(L, "DestName", nD, ix, iy, iw, 2, false)
+      elseif page == "Sources" then
+        local rows = ceil(nS / 3)
+        local ix, iy, iw = L.section(ctx, "S O U R C E  N A M E S  A N D  S I G N A L", rows * 32)
+        nameRows(L, "SourceName", nS, ix, iy, iw, 3, true)
+      elseif page == "Destinations" then
+        local rows = ceil(nD / 4)
+        local ix, iy, iw = L.section(ctx, "D E S T I N A T I O N  N A M E S", rows * 32)
+        nameRows(L, "DestName", nD, ix, iy, iw, 4, false)
+      end
+    end,
+
+    padColour = function(T)
+      return T.bg
+    end,
+
+    create = function(E)
+      local W, H, T = E.W, E.H, E.T
+
+      local function countCtls(name, propName, default)
+        local list = E.ctls(name)
+        if type(list) == "table" and #list > 0 then return #list end
+        return countOf(E.props, propName, default)
+      end
+      local nS = countCtls("SourceName", "Sources", 4)
+      local nD = countCtls("DestName", "Destinations", 2)
+
+      -- ---------- state ----------
+      local src, dst = {}, {}          -- raw names ("" = unnamed)
+      local iconS, iconD = {}, {}      -- icon names
+      local active, routes, callD = {}, {}, {}
+      local fit = { S = {}, D = {} }   -- fitted labels: fit[kind][i][key] = text
+      local tapOnly, allowCalls = false, true
+      local picked = nil               -- picked source index
+      local timer = nil                -- put-down timer handle
+      local carry = nil                -- { i, x, y, dragging }
+      local down = nil                 -- hit at touch start
+      local hover = nil                -- screen under a carried source
+      local lastTap = nil              -- { kind, i, t } for the same-tile double tap
+      local touchT0 = 0
+      local lastDrop = nil             -- an inferred drop that a resume takes back
+      local lastClear = nil
+      local flash = nil                -- { j, at }
+      local lastText = nil             -- the last Gesture text this mode set
+      local hintText = HINT_DRAG
+      local self = {}
+
+      -- ---------- names ----------
+      local function displayName(kind, i)
+        local s = (kind == "S") and src[i] or dst[i]
+        if s ~= nil and s ~= "" then return s end
+        return ((kind == "S") and "Source " or "Screen ") .. i
+      end
+
+      local function isCall(name)
+        local words = U.wordsOf(name)
+        for k = 1, #words do
+          if CALL_WORDS[words[k]] then return true end
+        end
+        return false
+      end
+
+      local function shortName(kind, i)
+        return U.truncateChars(displayName(kind, i), NAME_IN_TEXT)
+      end
+
+      local function say(text)
+        lastText = text
+        E.setGesture(text)
+      end
+
+      local function idleHint()
+        return tapOnly and HINT_TAP or HINT_DRAG
+      end
+
+      local function setName(kind, i, s)
+        s = tostring(s or "")
+        if kind == "S" then
+          src[i] = s
+          iconS[i] = Shapes.iconFor(displayName("S", i), "source")
+          fit.S[i] = {}
+          for j = 1, nD do
+            if routes[j] == i then E.out("RouteName", displayName("S", i), j) end
+          end
+        else
+          dst[i] = s
+          iconD[i] = Shapes.iconFor(displayName("D", i), "dest")
+          callD[i] = isCall(s)
+          fit.D[i] = {}
+        end
+      end
+
+      -- Fitted label cache per name, tile width and font size.
+      local function fittedLabel(kind, i, maxW, size)
+        local per = fit[kind][i]
+        if not per then per = {}; fit[kind][i] = per end
+        local key = floor(maxW * 4) * 100 + size
+        local hit = per[key]
+        if hit then return hit end
+        local text = Font.fit(displayName(kind, i), size, max(maxW, 0))
+        per[key] = text
+        return text
+      end
+
+      -- ---------- geometry and paging ----------
+      local showHint = E.hint and true or false
+      local margin = U.clamp(floor(min(W, H) * 0.03), 6, 14)
+      local capH = (H >= 200) and 16 or 0
+      local hintH = showHint and 16 or 0
+      local stacked = H > W * 1.25
+      local areaS, areaD
+      if stacked then
+        local ah = (H - 3 * margin - 2 * capH - hintH) / 2
+        areaS = { x = margin, y = margin + capH, w = W - 2 * margin, h = ah }
+        areaD = { x = margin, y = 2 * margin + 2 * capH + ah, w = W - 2 * margin, h = ah }
+      else
+        local aw = (W - 3 * margin) / 2
+        local ah = H - 2 * margin - capH - hintH
+        areaS = { x = margin, y = margin + capH, w = aw, h = ah }
+        areaD = { x = 2 * margin + aw, y = margin + capH, w = aw, h = ah }
+      end
+
+      local function planList(area, n, limit)
+        local maxCols = max(1, floor((area.w + TILE_GAP) / (MIN_TILE + TILE_GAP)))
+        local maxRows = max(1, floor((area.h + TILE_GAP) / (MIN_TILE + TILE_GAP)))
+        local plan = { area = area, n = n, page = 1, tiles = {} }
+        if n > maxCols * maxRows or n > limit then
+          local rows = max(1, floor((area.h - ARROW_H) / (MIN_TILE + TILE_GAP)))
+          local cap = min(limit, maxCols * rows)
+          plan.pages = U.evenPages(n, cap)
+          plan.arrows = true
+          plan.gridH = max(area.h - ARROW_H - TILE_GAP, 8)
+          plan.rowsAvail = rows
+        else
+          plan.pages = { n }
+          plan.arrows = false
+          plan.gridH = area.h
+          plan.rowsAvail = maxRows
+        end
+        if #plan.pages == 0 then plan.pages = { n } end
+        plan.first = {}
+        local acc = 1
+        for p = 1, #plan.pages do
+          plan.first[p] = acc
+          acc = acc + plan.pages[p]
+        end
+        return plan
+      end
+      local plans = { S = planList(areaS, nS, MAX_SRC_PAGE), D = planList(areaD, nD, MAX_DST_PAGE) }
+
+      -- Tile rectangles of one page: as few columns as the rows allow, so
+      -- tiles are wide and their labels readable.
+      local function tilesOf(plan, page)
+        local cached = plan.tiles[page]
+        if cached then return cached end
+        local k = plan.pages[page] or 0
+        local rows = max(1, min(k, plan.rowsAvail))
+        local cols = max(1, ceil(k / rows))
+        rows = max(1, ceil(k / cols))
+        local area = plan.area
+        local tw = (area.w - (cols - 1) * TILE_GAP) / cols
+        local th = min(MAX_TILE_H, (plan.gridH - (rows - 1) * TILE_GAP) / rows)
+        if th < 8 then th = 8 end
+        local list = {}
+        local first = plan.first[page] or 1
+        for idx = 1, k do
+          local r, cidx = (idx - 1) // cols, (idx - 1) % cols
+          list[idx] = { i = first + idx - 1, x = area.x + cidx * (tw + TILE_GAP), y = area.y + r * (th + TILE_GAP),
+                        w = tw, h = th }
+        end
+        plan.tiles[page] = list
+        return list
+      end
+
+      local function hitList(plan, kind, x, y)
+        local a = plan.area
+        if x < a.x or x > a.x + a.w or y < a.y or y > a.y + a.h then return nil end
+        local tiles = tilesOf(plan, plan.page)
+        for idx = 1, #tiles do
+          local tl = tiles[idx]
+          if x >= tl.x and x <= tl.x + tl.w and y >= tl.y and y <= tl.y + tl.h then
+            return { kind = kind, i = tl.i, tile = tl }
+          end
+        end
+        if plan.arrows and y >= a.y + a.h - ARROW_H then
+          return { kind = kind, arrow = (x < a.x + a.w / 2) and -1 or 1 }
+        end
+        return { kind = kind }
+      end
+
+      local function hitTest(x, y)
+        return hitList(plans.S, "S", x, y) or hitList(plans.D, "D", x, y)
+      end
+
+      local function turnPage(kind, dir)
+        local plan = plans[kind]
+        local p = U.clamp(plan.page + dir, 1, #plan.pages)
+        if p == plan.page then return false end
+        plan.page = p
+        return true
+      end
+
+      -- ---------- picking and routing ----------
+      local function armTimer()
+        if timer then timer:cancel() end
+        timer = E.after(PUT_DOWN, function()
+          timer = nil
+          if picked ~= nil and carry == nil then
+            picked = nil
+            hintText = idleHint()
+            say(hintText)
+            E.invalidate()
+          end
+        end)
+      end
+
+      local function putDown()
+        if timer then timer:cancel(); timer = nil end
+        picked = nil
+        hintText = idleHint()
+      end
+
+      local function pick(i)
+        picked = i
+        armTimer()
+        hintText = HINT_PICKED
+        say(HINT_PICKED)
+      end
+
+      local function clampRoute(v)
+        v = floor((tonumber(v) or 0) + 0.5)
+        if v < 0 then v = 0 elseif v > nS then v = nS end
+        return v
+      end
+
+      local function writeRoute(j, i)
+        routes[j] = i
+        E.out("Route", i, j)
+        E.out("RouteName", (i > 0) and displayName("S", i) or "", j)
+      end
+
+      local function startFlash(j)
+        flash = { j = j, at = E.now() }
+        E.after(FLASH + 0.05, function() E.invalidate() end)
+      end
+
+      local function route(j, i, inferred)
+        local prev = routes[j]
+        writeRoute(j, i)
+        E.pulse("Routed", j)
+        startFlash(j)
+        say(shortName("S", i) .. " -> " .. shortName("D", j))
+        if inferred then
+          lastDrop = { i = i, j = j, prev = prev }
+        else
+          lastDrop = nil
+        end
+      end
+
+      local function broadcast(i)
+        local n = 0
+        for j = 1, nD do
+          if not (allowCalls and callD[j]) then
+            writeRoute(j, i)
+            E.pulse("Routed", j)
+            n = n + 1
+          end
+        end
+        putDown()
+        if n > 0 then
+          flash = { j = 0, at = E.now() }
+          E.after(FLASH + 0.05, function() E.invalidate() end)
+          say(shortName("S", i) .. " -> all screens")
+        else
+          say(idleHint())
+        end
+      end
+
+      local function clearAll()
+        for j = 1, nD do
+          if routes[j] ~= 0 then
+            writeRoute(j, 0)
+            E.pulse("Routed", j)
+          end
+        end
+        putDown()
+        carry, hover = nil, nil
+        say(TEXT_CLEARED)
+        E.invalidate()
+      end
+
+      -- ---------- touch ----------
+      function self:onTouchStart(x, y, t)
+        touchT0 = t
+        lastDrop = nil
+        down = hitTest(x, y)
+        hover = nil
+        carry = nil
+        if down and down.kind == "S" and down.i and not tapOnly then
+          carry = { i = down.i, x = x, y = y, dragging = false }
+        end
+        E.invalidate()
+      end
+
+      function self:onTouchMove(x, y, t, dx, dy)
+        if carry then
+          carry.x, carry.y = x, y
+          if not carry.dragging then
+            carry.dragging = true
+            if timer then timer:cancel(); timer = nil end
+            picked = carry.i
+            hintText = HINT_CARRY
+            say(HINT_CARRY)
+          end
+          local h = hitTest(x, y)
+          hover = (h and h.kind == "D" and h.i) or nil
+        end
+        E.invalidate()
+      end
+
+      function self:onTouchEnd(x, y, t, info)
+        local c = carry
+        carry, hover, down = nil, nil, nil
+        if info and info.aborted then
+          if c and c.dragging then putDown() end
+          E.invalidate()
+          return
+        end
+        if c and c.dragging then
+          local h = hitTest(x, y)
+          if h and h.kind == "D" and h.i then
+            putDown()
+            route(h.i, c.i, info and info.inferred)
+          elseif h and h.arrow then
+            local prevPage = plans[h.kind].page
+            turnPage(h.kind, h.arrow)
+            pick(c.i)
+            if info and info.inferred then
+              lastDrop = { i = c.i, pageKind = h.kind, prevPage = prevPage }
+            end
+          else
+            putDown()
+            say(idleHint())
+            if info and info.inferred then lastDrop = { i = c.i } end
+          end
+        end
+        E.invalidate()
+      end
+
+      -- An inferred lift taken back: the drop (or page turn) is undone and
+      -- the source is carried again. A Routed pulse already sent stays sent.
+      function self:onTouchResume(x, y, t)
+        local d = lastDrop
+        lastDrop = nil
+        if not d then return end
+        if d.j then
+          writeRoute(d.j, d.prev)
+          flash = nil
+        elseif d.pageKind then
+          plans[d.pageKind].page = d.prevPage
+        end
+        if timer then timer:cancel(); timer = nil end
+        picked = d.i
+        carry = { i = d.i, x = x, y = y, dragging = true }
+        local h = hitTest(x, y)
+        hover = (h and h.kind == "D" and h.i) or nil
+        hintText = HINT_CARRY
+        say(HINT_CARRY)
+        E.invalidate()
+      end
+
+      local function onTap(h, t)
+        if not h then lastTap = nil; return end
+        if h.kind == "S" and h.i then
+          local i = h.i
+          if lastTap and lastTap.kind == "S" and lastTap.i == i and (touchT0 - lastTap.t) <= DOUBLE_TIME then
+            lastTap = nil
+            broadcast(i)
+          else
+            lastTap = { kind = "S", i = i, t = t }
+            if picked == i then
+              putDown()
+              say(idleHint())
+            else
+              pick(i)
+            end
+          end
+        elseif h.kind == "D" and h.i then
+          lastTap = { kind = "D", i = h.i, t = t }
+          if picked then
+            route(h.i, picked, false)
+            armTimer()
+          else
+            say(HINT_NO_SOURCE)
+          end
+        elseif h.arrow then
+          lastTap = nil
+          turnPage(h.kind, h.arrow)
+          if picked then
+            armTimer()
+            say(HINT_PICKED)
+          else
+            local plan = plans[h.kind]
+            say(((h.kind == "S") and "Sources page " or "Screens page ") .. plan.page .. " of " .. #plan.pages)
+          end
+        else
+          lastTap = nil
+        end
+        E.invalidate()
+      end
+
+      function self:onGesture(g)
+        if g.type == "tap" then
+          onTap(hitTest(g.x, g.y), g.t)
+        elseif g.type == "double" then
+          -- The engine's "DOUBLE TAP" text follows the second tap: keep ours.
+          if lastText then E.setGesture(lastText) end
+        elseif g.type == "swipe" then
+          -- A fast drag-drop is also a swipe to the engine: keep the route text.
+          if lastText then E.setGesture(lastText) end
+          if (g.dir == "left" or g.dir == "right") and down == nil and lastDrop == nil then
+            local h = hitTest(g.x, g.y)
+            if h and (h.kind == "S" or h.kind == "D") and not (h.kind == "S" and picked ~= nil and not tapOnly) then
+              if turnPage(h.kind, (g.dir == "left") and 1 or -1) then E.invalidate() end
+            end
+          end
+        end
+      end
+
+      function self:onLock(locked)
+        if locked then
+          carry, hover, down = nil, nil, nil
+          putDown()
+        end
+        E.invalidate()
+      end
+
+      -- ---------- pins ----------
+      function self:onControl(name, index, ctl)
+        if name == "SourceName" then
+          setName("S", index, ctl.String)
+        elseif name == "DestName" then
+          setName("D", index, ctl.String)
+        elseif name == "SourceActive" then
+          active[index] = ctl.Boolean and true or false
+        elseif name == "Route" then
+          local v = clampRoute(ctl.Value)
+          if v ~= routes[index] then
+            routes[index] = v
+            E.out("RouteName", (v > 0) and displayName("S", v) or "", index)
+            E.pulse("Routed", index)
+          end
+        elseif name == "ClearRoutes" then
+          local now = E.now()
+          if (not ctl.Boolean) and lastClear and (now - lastClear) < 1 then return end
+          lastClear = now
+          clearAll()
+        elseif name == "TapOnly" then
+          tapOnly = ctl.Boolean and true or false
+          if tapOnly and carry then carry, hover = nil, nil end
+          if picked == nil then
+            hintText = idleHint()
+            say(hintText)
+          end
+        elseif name == "AllowCalls" then
+          allowCalls = ctl.Boolean and true or false
+        end
+        E.invalidate()
+      end
+
+      function self:onStart()
+        for i = 1, nS do
+          local c = E.ctl("SourceName", i)
+          local a = E.ctl("SourceActive", i)
+          active[i] = (a == nil) or (a.Boolean and true or false)
+          setName("S", i, c and c.String or "")
+        end
+        for j = 1, nD do
+          routes[j] = 0
+          local c = E.ctl("DestName", j)
+          setName("D", j, c and c.String or "")
+          local r = E.ctl("Route", j)
+          routes[j] = clampRoute(r and r.Value or 0)
+          E.out("RouteName", (routes[j] > 0) and displayName("S", routes[j]) or "", j)
+        end
+        local to = E.ctl("TapOnly")
+        tapOnly = (to ~= nil) and (to.Boolean and true or false) or false
+        local ac = E.ctl("AllowCalls")
+        allowCalls = (ac == nil) or (ac.Boolean and true or false)
+        hintText = idleHint()
+        if tapOnly then say(hintText) end
+      end
+
+      -- ---------- drawing ----------
+      local function sizeFor(h)
+        if h >= 64 then return 14 elseif h >= 44 then return 12 end
+        return 10
+      end
+
+      local function drawList(c, plan, kind, now)
+        local tiles = tilesOf(plan, plan.page)
+        for idx = 1, #tiles do
+          local tl = tiles[idx]
+          local i = tl.i
+          local size = sizeFor(tl.h)
+          local iconW = min(24, tl.h * 0.6) + 6
+          local maxW = tl.w - 2 * TILE_PAD - iconW
+          local o = { size = size, radius = min(8, tl.h / 4) }
+          if kind == "S" then
+            o.icon = iconS[i]
+            o.picked = (picked == i)
+            o.dim = not active[i]
+            if down and down.kind == "S" and down.i == i and not o.picked then o.stroke = T.accent end
+          else
+            o.icon = iconD[i]
+            local r = routes[i]
+            o.on = r > 0
+            if r > 0 and tl.h >= 56 then o.sub = fittedLabel("S", r, maxW, 11) end
+            if hover == i then o.picked = true end
+            if flash and (flash.j == i or (flash.j == 0 and r > 0)) and (now - flash.at) < FLASH then
+              o.accent = T.accent2
+            end
+          end
+          Shapes.tile(c, T, tl.x, tl.y, tl.w, tl.h, fittedLabel(kind, i, maxW, size), o)
+        end
+        if plan.arrows then
+          local a = plan.area
+          Shapes.arrowBar(c, T, a.x, a.y + a.h - ARROW_H, a.w, ARROW_H, plan.page > 1, plan.page < #plan.pages,
+            plan.page .. " / " .. #plan.pages)
+        end
+      end
+
+      function self:draw(c)
+        local now = E.now()
+        if capH > 0 then
+          c:text(areaS.x + 2, areaS.y - 5, "SOURCES", { size = 10, fill = T.muted, weight = "bold", spacing = 1 })
+          c:text(areaD.x + 2, areaD.y - 5, "SCREENS", { size = 10, fill = T.muted, weight = "bold", spacing = 1 })
+        end
+        drawList(c, plans.S, "S", now)
+        drawList(c, plans.D, "D", now)
+        if carry and carry.dragging then
+          local gw = U.clamp(areaS.w * 0.8, 72, 180)
+          local gh = 36
+          local gx = U.clamp(carry.x - gw / 2, 0, W - gw)
+          local gy = U.clamp(carry.y - gh - 12, 0, H - gh)
+          local i = carry.i
+          local iconW = min(24, gh * 0.6) + 6
+          c:group({ opacity = 0.92 }, function(g)
+            Shapes.tile(g, T, gx, gy, gw, gh, fittedLabel("S", i, gw - 2 * TILE_PAD - iconW, 12),
+              { on = true, icon = iconS[i], size = 12, radius = 8 })
+          end)
+        end
+        if showHint then
+          Shapes.hint(c, T, hintText, W, H)
+        end
+      end
+
+      -- ---------- probes for tests and debugging (no engine use) ----------
+      function self:tileCentre(kind, i)
+        local plan = plans[kind]
+        local tiles = tilesOf(plan, plan.page)
+        for idx = 1, #tiles do
+          local tl = tiles[idx]
+          if tl.i == i then return tl.x + tl.w / 2, tl.y + tl.h / 2, tl.w, tl.h end
+        end
+        return nil
+      end
+      function self:arrowCentre(kind, dir)
+        local plan = plans[kind]
+        if not plan.arrows then return nil end
+        local a = plan.area
+        return a.x + a.w * ((dir < 0) and 0.25 or 0.75), a.y + a.h - ARROW_H / 2
+      end
+      function self:pageInfo(kind)
+        local plan = plans[kind]
+        return plan.page, #plan.pages, table.concat(plan.pages, ",")
+      end
+      function self:pickedSource() return picked end
+      function self:isCarrying() return carry ~= nil and carry.dragging end
+
+      return self
+    end,
+  }
+end
+-- ===== 23_mode_pattern.lua =====
+-- Nikita Visual Arts – nikitavisual.art
+-- Touch Pad for Q-SYS: Pattern Lock mode
+--
+-- A dot grid (3x3 by default, up to 5x5 through the GridSize control). The
+-- finger joins dots; a lift checks the drawn pattern against the secret in
+-- `Pattern` ("1-5-9-6" or "1596", dots numbered left to right, top to
+-- bottom). Unlocked / Failed pulse the result, LastPattern carries the drawn
+-- pattern, Learn stores the next drawn pattern as the secret, Locked goes on
+-- after MaxTries failures for LockoutSeconds (and can be driven both ways
+-- from its pin). Masked hides the trail; AutoSubmit checks as soon as the
+-- drawn pattern is as long as the secret.
+--
+-- Design time (controls, pages, layout) and the runtime `create(E)` live here.
+
+Modes = Modes or {}
+
+do
+  local HINT = "Draw your pattern"
+  local HINT_EMPTY = "Set a pattern first"
+  local FEEDBACK_TIME = 0.8     -- green or red feedback after a check
+  local HIT = 0.22              -- hit radius as a fraction of the dot spacing
+  local RESUME_WAIT = 1.6       -- the engine can take an inferred lift back for 1.5 s
+  local MAX_DOTS = 25           -- 5 x 5
+  local MAX_PATTERN_CHARS = 200 -- only this much of the Pattern text is parsed
+  local GRID_MIN, GRID_MAX, GRID_DEFAULT = 3, 5, 3
+  local TRIES_MIN, TRIES_MAX, TRIES_DEFAULT = 1, 10, 5
+  local LOCK_MIN, LOCK_MAX, LOCK_DEFAULT = 10, 3600, 60
+
+  local floor, ceil, min, max, abs, sqrt = math.floor, math.ceil, math.min, math.max, math.abs, math.sqrt
+
+  -- "1-5-9-6", "1 5 9 6", "1,5,9,6" or "1596" -> { 1, 5, 9, 6 }; dots above
+  -- maxDot and repeats are dropped; the dash form is the only unambiguous
+  -- one for grids larger than 3 x 3.
+  local function parsePattern(s, maxDot)
+    s = tostring(s or "")
+    if #s > MAX_PATTERN_CHARS then s = s:sub(1, MAX_PATTERN_CHARS) end
+    local out, seen = {}, {}
+    local function push(n)
+      if n and n >= 1 and n <= maxDot and not seen[n] and #out < MAX_DOTS then
+        seen[n] = true
+        out[#out + 1] = n
+      end
+    end
+    if s:find("[^%d]") then
+      for tok in s:gmatch("%d+") do
+        if #tok <= 3 then push(tonumber(tok)) end
+      end
+    else
+      for i = 1, #s do push(tonumber(s:sub(i, i))) end
+    end
+    return out
+  end
+
+  local function patternString(path)
+    local parts = {}
+    for i = 1, #path do parts[i] = tostring(path[i]) end
+    return table.concat(parts, "-")
+  end
+
+  local function samePath(a, b)
+    if #a ~= #b or #a == 0 then return false end
+    for i = 1, #a do
+      if a[i] ~= b[i] then return false end
+    end
+    return true
+  end
+
+  local function gcd(a, b)
+    a, b = abs(a), abs(b)
+    for _ = 1, 8 do
+      if b == 0 then return a end
+      a, b = b, a % b
+    end
+    return a
+  end
+
+  local function clampInt(v, lo, hi, default)
+    v = tonumber(v)
+    if v == nil or v ~= v then return default end
+    v = floor(v + 0.5)
+    if v < lo then v = lo end
+    if v > hi then v = hi end
+    return v
+  end
+
+  Modes["Pattern Lock"] = {
+    id = "pattern",
+    pretty = "Pattern Lock",
+    hint = HINT,
+
+    controls = function(C, props)
+      C.add{ Name = "GridSize", ControlType = "Knob", ControlUnit = "Integer", Min = GRID_MIN, Max = GRID_MAX,
+             DefaultValue = GRID_DEFAULT, PinStyle = "Input" }
+      C.add{ Name = "Pattern", ControlType = "Text", PinStyle = "Input" }
+      C.add{ Name = "Unlocked", ControlType = "Button", ButtonType = "Trigger", PinStyle = "Output" }
+      C.add{ Name = "Failed", ControlType = "Button", ButtonType = "Trigger", PinStyle = "Output" }
+      C.add{ Name = "Locked", ControlType = "Button", ButtonType = "Toggle", PinStyle = "Both" }
+      C.add{ Name = "MaxTries", ControlType = "Knob", ControlUnit = "Integer", Min = TRIES_MIN, Max = TRIES_MAX,
+             DefaultValue = TRIES_DEFAULT, PinStyle = "Input" }
+      C.add{ Name = "LockoutSeconds", ControlType = "Knob", ControlUnit = "Integer", Min = LOCK_MIN, Max = LOCK_MAX,
+             DefaultValue = LOCK_DEFAULT, PinStyle = "Input" }
+      C.add{ Name = "LastPattern", ControlType = "Indicator", IndicatorType = "Text", PinStyle = "Output" }
+      C.add{ Name = "Learn", ControlType = "Button", ButtonType = "Toggle", PinStyle = "Input" }
+      C.add{ Name = "Masked", ControlType = "Button", ButtonType = "Toggle", PinStyle = "Input" }
+      C.add{ Name = "AutoSubmit", ControlType = "Button", ButtonType = "Toggle", PinStyle = "Input" }
+    end,
+
+    pages = {},
+
+    layout = function(L, page, props, ctx)
+      if page == "Pad" then
+        L.padDisplay(ctx)
+        L.gesture(ctx)
+        L.hint(ctx, HINT)
+        L.sideCaption(ctx, "PATTERN")
+        L.sideButton(ctx, "Learn", "LEARN")
+        L.sideButton(ctx, "Locked", "LOCKED")
+        L.sideButton(ctx, "Masked", "MASKED")
+        L.sideButton(ctx, "AutoSubmit", "AUTO SUBMIT")
+      elseif page == "Setup" then
+        local ix, iy, iw = L.section(ctx, "P A T T E R N  L O C K", 160)
+        L.caption("PATTERN: DOTS LEFT TO RIGHT, TOP TO BOTTOM (1-5-9-6 OR 1596)", { ix, iy }, { iw, 10 }, "Left")
+        L.text("Pattern", { ix, iy + 12 }, { iw - 92, 22 })
+        L.toggle("Learn", "LEARN", { ix + iw - 84, iy + 12 }, { 84, 22 })
+        local cellW = floor((iw - 2 * L.G) / 3)
+        L.grid({ "GridSize", "MaxTries", "LockoutSeconds" }, ix, iy + 42, 3, cellW, 48)
+        L.caption("LAST PATTERN", { ix, iy + 98 }, { iw, 10 }, "Left")
+        L.readout("LastPattern", { ix, iy + 110 }, { iw - 184, 22 })
+        L.toggle("Masked", "MASKED", { ix + iw - 176, iy + 110 }, { 84, 22 })
+        L.toggle("AutoSubmit", "AUTO SUBMIT", { ix + iw - 84, iy + 110 }, { 84, 22 })
+        L.label("Learn: the next drawn pattern becomes the secret. Masked hides the trail.", { ix, iy + 138 }, { iw, 14 })
+      end
+    end,
+
+    padColour = function(T)
+      return T.bg
+    end,
+
+    create = function(E)
+      local W, H, T = E.W, E.H, E.T
+      local side = min(W, H)
+      local textSize = max(10, min(15, floor(side * 0.035)))
+
+      local self = {
+        n = GRID_DEFAULT,
+        dots = {},            -- dots[k] = { x, y, row, col }
+        spacing = 1, r = 8,
+        secret = {},
+        path = {}, seen = {}, -- the pattern being drawn
+        active = false,       -- a finger is drawing
+        submitted = false,    -- AutoSubmit checked this touch already
+        fx = nil, fy = nil,   -- finger position for the rubber-band segment
+        pending = nil,        -- delayed check after an inferred lift
+        feedback = nil,       -- { kind = "ok"|"fail", text = ... }
+        fbTimer = nil,
+        tries = 0,
+        lockedUntil = nil, lockTimer = nil, shownRemaining = nil,
+        learn = false, masked = false, auto = false,
+      }
+
+      local function ctlBool(name)
+        local c = E.ctl(name)
+        return c ~= nil and c.Boolean == true
+      end
+      local function ctlString(name)
+        local c = E.ctl(name)
+        return c and tostring(c.String or "") or ""
+      end
+      local function ctlInt(name, lo, hi, default)
+        local c = E.ctl(name)
+        return clampInt(c and c.Value, lo, hi, default)
+      end
+
+      local function buildGrid(n)
+        self.n = n
+        local margin = side * 0.14
+        local span = side - 2 * margin
+        local spacing = span / (n - 1)
+        local ox, oy = (W - span) / 2, (H - span) / 2
+        local dots = {}
+        for row = 0, n - 1 do
+          for col = 0, n - 1 do
+            dots[row * n + col + 1] = { x = ox + col * spacing, y = oy + row * spacing, row = row, col = col }
+          end
+        end
+        self.dots, self.spacing = dots, spacing
+        self.r = max(5, min(18, spacing * 0.11))
+      end
+
+      local function clearPath()
+        self.path, self.seen = {}, {}
+        self.active, self.submitted = false, false
+        self.fx, self.fy = nil, nil
+      end
+
+      local function cancelPending()
+        if self.pending then
+          self.pending:cancel()
+          self.pending = nil
+        end
+      end
+
+      local function cancelFeedback()
+        if self.fbTimer then
+          self.fbTimer:cancel()
+          self.fbTimer = nil
+        end
+        self.feedback = nil
+      end
+
+      local function setFeedback(kind, text)
+        cancelFeedback()
+        self.feedback = { kind = kind, text = text }
+        self.fbTimer = E.after(FEEDBACK_TIME, function()
+          self.fbTimer, self.feedback = nil, nil
+          if not self.active then clearPath() end
+          E.invalidate()
+        end)
+      end
+
+      local function isLocked()
+        return self.lockedUntil ~= nil
+      end
+
+      local function remaining()
+        if not self.lockedUntil then return 0 end
+        return max(0, ceil(self.lockedUntil - E.now()))
+      end
+
+      local function unlock(fromPin)
+        if self.lockTimer then
+          self.lockTimer:cancel()
+          self.lockTimer = nil
+        end
+        local was = self.lockedUntil ~= nil
+        self.lockedUntil, self.shownRemaining = nil, nil
+        self.tries = 0
+        if not fromPin then E.out("Locked", false) end
+        E.animate(false)
+        if was then E.setGesture("UNLOCKED PAD") end
+        E.invalidate()
+      end
+
+      local function lock(fromPin)
+        local secs = ctlInt("LockoutSeconds", LOCK_MIN, LOCK_MAX, LOCK_DEFAULT)
+        if self.lockTimer then self.lockTimer:cancel() end
+        cancelPending()
+        clearPath()
+        self.tries = 0
+        self.lockedUntil = E.now() + secs
+        self.shownRemaining = nil
+        if not fromPin then E.out("Locked", true) end
+        self.lockTimer = E.after(secs, function()
+          self.lockTimer = nil
+          unlock(false)
+        end)
+        E.animate(true)
+        E.setGesture("LOCKED " .. secs .. " S")
+        E.invalidate()
+      end
+
+      -- Adds dot k and, before it, every grid dot lying exactly on the
+      -- segment from the previous dot (a skipped middle dot).
+      local function addDot(k)
+        local seen, path = self.seen, self.path
+        if seen[k] or #path >= MAX_DOTS then return end
+        local last = path[#path]
+        if last then
+          local a, b = self.dots[last], self.dots[k]
+          local dr, dc = b.row - a.row, b.col - a.col
+          local g = gcd(dr, dc)
+          if g > 1 then
+            local sr, sc = dr // g, dc // g
+            for i = 1, g - 1 do
+              local m = (a.row + sr * i) * self.n + (a.col + sc * i) + 1
+              if not seen[m] and #path < MAX_DOTS then
+                seen[m] = true
+                path[#path + 1] = m
+              end
+            end
+          end
+        end
+        if #path < MAX_DOTS then
+          seen[k] = true
+          path[#path + 1] = k
+        end
+      end
+
+      local function nearestDot(x, y)
+        local best, bestD = nil, HIT * self.spacing
+        local dots = self.dots
+        for k = 1, self.n * self.n do
+          local d = dots[k]
+          local dist = sqrt((d.x - x) * (d.x - x) + (d.y - y) * (d.y - y))
+          if dist <= bestD then best, bestD = k, dist end
+        end
+        return best
+      end
+
+      local function submit()
+        cancelPending()
+        self.active = false
+        self.fx, self.fy = nil, nil
+        local path = self.path
+        if #path == 0 then
+          E.invalidate()
+          return
+        end
+        local str = patternString(path)
+        E.out("LastPattern", str)
+        if self.learn then
+          self.secret = parsePattern(str, self.n * self.n)
+          E.out("Pattern", str)
+          self.learn = false
+          E.out("Learn", false)
+          self.tries = 0
+          setFeedback("ok", "Pattern stored")
+          E.setGesture("PATTERN STORED")
+        elseif samePath(path, self.secret) then
+          self.tries = 0
+          E.pulse("Unlocked")
+          setFeedback("ok", "Unlocked")
+          E.setGesture("UNLOCKED")
+        else
+          self.tries = self.tries + 1
+          E.pulse("Failed")
+          E.setGesture("FAILED")
+          local maxTries = ctlInt("MaxTries", TRIES_MIN, TRIES_MAX, TRIES_DEFAULT)
+          if self.tries >= maxTries then
+            lock(false)
+          else
+            setFeedback("fail", "Try " .. self.tries .. " of " .. maxTries)
+          end
+        end
+        E.invalidate()
+      end
+
+      local function addNear(x, y)
+        local k = nearestDot(x, y)
+        if k and not self.seen[k] then
+          addDot(k)
+          if self.auto and not self.submitted and #self.secret > 0 and #self.path >= #self.secret then
+            self.submitted = true
+            submit()
+          end
+        end
+      end
+
+      local function readSecret()
+        self.secret = parsePattern(ctlString("Pattern"), self.n * self.n)
+      end
+
+      function self:onStart()
+        buildGrid(ctlInt("GridSize", GRID_MIN, GRID_MAX, GRID_DEFAULT))
+        readSecret()
+        self.learn = ctlBool("Learn")
+        self.masked = ctlBool("Masked")
+        self.auto = ctlBool("AutoSubmit")
+        if ctlBool("Locked") then lock(true) end
+        E.invalidate()
+      end
+
+      function self:onTouchStart(x, y, t)
+        if isLocked() then return end
+        if self.pending then submit() end
+        cancelFeedback()
+        clearPath()
+        self.active = true
+        self.fx, self.fy = x, y
+        addNear(x, y)
+        E.invalidate()
+      end
+
+      function self:onTouchMove(x, y, t, dx, dy)
+        if not self.active then return end
+        self.fx, self.fy = x, y
+        addNear(x, y)
+        E.invalidate()
+      end
+
+      function self:onTouchEnd(x, y, t, info)
+        if not self.active then return end
+        info = info or {}
+        if info.aborted then
+          clearPath()
+          E.invalidate()
+          return
+        end
+        addNear(x, y)
+        if self.submitted or not self.active then
+          self.active = false
+          self.fx, self.fy = nil, nil
+          E.invalidate()
+          return
+        end
+        self.fx, self.fy = nil, nil
+        if info.inferred and not info.tap then
+          -- The engine may take this lift back (a resting finger sends nothing
+          -- in Designer): check once the resume window is over.
+          cancelPending()
+          self.pending = E.after(RESUME_WAIT, function()
+            self.pending = nil
+            submit()
+          end)
+          E.invalidate()
+        else
+          submit()
+        end
+      end
+
+      function self:onTouchResume(x, y, t)
+        if isLocked() or not self.pending then return end
+        cancelPending()
+        self.active = true
+        self.fx, self.fy = x, y
+        addNear(x, y)
+        E.invalidate()
+      end
+
+      function self:onLock(locked)
+        if locked then
+          cancelPending()
+          clearPath()
+        end
+        E.invalidate()
+      end
+
+      function self:onControl(name, index, ctl)
+        if name == "Pattern" then
+          readSecret()
+        elseif name == "GridSize" then
+          buildGrid(clampInt(ctl.Value, GRID_MIN, GRID_MAX, GRID_DEFAULT))
+          cancelPending()
+          clearPath()
+          readSecret()
+        elseif name == "Locked" then
+          if ctl.Boolean then
+            if not isLocked() then lock(true) end
+          elseif isLocked() then
+            unlock(true)
+          end
+        elseif name == "Learn" then
+          self.learn = ctl.Boolean == true
+        elseif name == "Masked" then
+          self.masked = ctl.Boolean == true
+        elseif name == "AutoSubmit" then
+          self.auto = ctl.Boolean == true
+        else
+          return
+        end
+        E.invalidate()
+      end
+
+      function self:tick(dt)
+        if not self.lockedUntil then
+          E.animate(false)
+          return
+        end
+        if E.now() >= self.lockedUntil then
+          unlock(false)
+          return
+        end
+        local rem = remaining()
+        if rem ~= self.shownRemaining then
+          self.shownRemaining = rem
+          E.invalidate()
+        end
+      end
+
+      function self:draw(c)
+        local locked = isLocked()
+        local fb = self.feedback
+        local colour = self.learn and T.accent2 or T.accent
+        if fb then colour = (fb.kind == "ok") and T.ok or T.danger end
+        local dots, n, r = self.dots, self.n, self.r
+        local path, seen = self.path, self.seen
+        local showTrail = not self.masked and not locked
+        local dim = locked and 0.35 or 1
+
+        -- the trail under the dots, plus the rubber band to the finger
+        if showTrail and #path > 0 then
+          local pts = {}
+          for i = 1, #path do
+            local d = dots[path[i]]
+            pts[#pts + 1] = d.x
+            pts[#pts + 1] = d.y
+          end
+          if self.active and self.fx then
+            pts[#pts + 1] = self.fx
+            pts[#pts + 1] = self.fy
+          end
+          if #pts >= 4 then
+            c:polyline(pts, { stroke = colour, sw = max(3, self.spacing * 0.06), cap = "round", join = "round", opacity = 0.85 })
+          end
+        end
+
+        -- the dots
+        for k = 1, n * n do
+          local d = dots[k]
+          if showTrail and seen[k] then
+            c:circle(d.x, d.y, r * 1.9, { fill = colour, opacity = 0.22 })
+            c:circle(d.x, d.y, r, { fill = colour, stroke = T.onAccent, sw = 1 })
+          else
+            c:circle(d.x, d.y, r, { fill = T.well, stroke = T.line, sw = 1.5, opacity = dim })
+          end
+        end
+
+        -- masked entry: one small dot per joined dot, like a hidden PIN
+        if self.masked and not locked and #path > 0 then
+          local step = 12
+          local x0 = W / 2 - (#path - 1) * step / 2
+          for i = 1, #path do
+            c:circle(x0 + (i - 1) * step, textSize + 10, 4, { fill = colour })
+          end
+        end
+
+        -- the top line: feedback, learn prompt, tries, or the lockout
+        local topY = textSize + 14
+        if locked then
+          c:rect(0, 0, W, H, { fill = T.bg, opacity = 0.55 })
+          local s = max(24, min(72, side * 0.18))
+          Shapes.icon(c, "lock", W / 2, H / 2 - s * 0.35, s, T.muted)
+          c:text(W / 2, H / 2 + s * 0.5 + textSize, "Locked", { size = textSize + 2, fill = T.text, anchor = "middle", weight = "bold" })
+          c:textFit(W / 2, H / 2 + s * 0.5 + textSize * 2.4, W - 16, "Try again in " .. remaining() .. " s",
+                    { size = textSize, fill = T.muted, anchor = "middle" })
+        elseif fb then
+          c:textFit(W / 2, topY, W - 16, fb.text, { size = textSize + 1, fill = colour, anchor = "middle", weight = "bold" })
+        elseif self.learn then
+          c:textFit(W / 2, topY, W - 16, "Draw the new pattern", { size = textSize, fill = T.accent2, anchor = "middle", weight = "bold" })
+        elseif self.tries > 0 and not self.active then
+          local maxTries = ctlInt("MaxTries", TRIES_MIN, TRIES_MAX, TRIES_DEFAULT)
+          c:textFit(W / 2, topY, W - 16, "Try " .. self.tries .. " of " .. maxTries, { size = textSize, fill = T.muted, anchor = "middle" })
+        end
+
+        if E.hint and not self.active and not locked and not fb and not self.pending then
+          local hint = HINT
+          if #self.secret == 0 and not self.learn then hint = HINT_EMPTY end
+          Shapes.hint(c, T, hint, W, H)
+        end
+      end
+
+      return self
+    end,
+  }
+end
+-- ===== 24_mode_keypad.lua =====
+-- Nikita Visual Arts – nikitavisual.art
+-- Touch Pad for Q-SYS: Keypad mode
+--
+-- A numeric keypad drawn by the pad (digits 0-9, clear, enter) for PIN entry
+-- on a lobby or lectern. Accepted codes live in `Pin` (several separated by
+-- commas); every key press updates `Entry`; a code is checked on Enter or,
+-- with `AutoSubmit`, as soon as the entry equals a code or reaches the length
+-- of the longest code. `MaxTries` failures lock the keypad (`Locked` on) for
+-- `LockoutSeconds`; `Locked` is a pin both ways (a script locks or clears).
+-- `Learn` stores the next entered code (ended by Enter) into `Pin`. `Masked`
+-- shows dots instead of digits on the pad. A swipe left deletes a digit.
+--
+-- The whole body sits in a `do` block: the built plugin is one chunk with a
+-- 200-local limit, so only Modes["Keypad"] is defined at the top level.
+
+Modes = Modes or {}
+
+do
+  local HINT = "Tap a key, swipe left to delete"
+  -- 3 x 4 keys, row by row; "C" clears, "E" enters.
+  local KEYS = { "1", "2", "3", "4", "5", "6", "7", "8", "9", "C", "0", "E" }
+  local MAX_CODES, MAX_CODE_LEN, MAX_ENTRY, MAX_PIN_TEXT = 32, 16, 16, 1024
+  local FLASH, FEEDBACK = 0.15, 0.8
+  local MIN_LOCKOUT, MAX_LOCKOUT, MIN_TRIES, MAX_TRIES = 10, 3600, 1, 10
+
+  -- "1234, 5678" -> { "1234", "5678" }: trimmed, digits only, bounded.
+  local function parseCodes(text)
+    local out = {}
+    text = tostring(text or "")
+    if #text > MAX_PIN_TEXT then text = string.sub(text, 1, MAX_PIN_TEXT) end
+    local parts = U.split(text, ",")
+    for i = 1, math.min(#parts, MAX_CODES) do
+      local code = U.trim(parts[i])
+      if code ~= "" and #code <= MAX_CODE_LEN and not string.find(code, "[^%d]") then
+        out[#out + 1] = code
+      end
+    end
+    return out
+  end
+
+  Modes["Keypad"] = {
+    id = "keypad",
+    pretty = "Keypad",
+    hint = HINT,
+
+    controls = function(C, props)
+      C.add({ Name = "Pin", ControlType = "Text", PinStyle = "Input", DefaultValue = "1234" })
+      C.add({ Name = "Entry", ControlType = "Text", PinStyle = "Output" })
+      C.add({ Name = "Masked", ControlType = "Button", ButtonType = "Toggle", PinStyle = "Input", DefaultValue = true })
+      C.add({ Name = "AutoSubmit", ControlType = "Button", ButtonType = "Toggle", PinStyle = "Input", DefaultValue = true })
+      C.add({ Name = "Learn", ControlType = "Button", ButtonType = "Toggle", PinStyle = "Input" })
+      C.add({ Name = "Accepted", ControlType = "Button", ButtonType = "Trigger", PinStyle = "Output" })
+      C.add({ Name = "Rejected", ControlType = "Button", ButtonType = "Trigger", PinStyle = "Output" })
+      C.add({ Name = "Locked", ControlType = "Button", ButtonType = "Toggle", PinStyle = "Both" })
+      C.add({ Name = "MaxTries", ControlType = "Knob", ControlUnit = "Integer", Min = MIN_TRIES, Max = MAX_TRIES,
+              DefaultValue = 5, PinStyle = "Input" })
+      C.add({ Name = "LockoutSeconds", ControlType = "Knob", ControlUnit = "Integer", Min = MIN_LOCKOUT,
+              Max = MAX_LOCKOUT, DefaultValue = 60, PinStyle = "Input" })
+    end,
+
+    pages = {},
+
+    layout = function(L, page, props, ctx)
+      if page == "Pad" then
+        L.padDisplay(ctx)
+        L.gesture(ctx)
+        L.hint(ctx, HINT)
+        L.sideCaption(ctx, "KEYPAD")
+        L.sideButton(ctx, "Masked", "MASKED")
+        L.sideButton(ctx, "AutoSubmit", "AUTO SUBMIT")
+        L.sideButton(ctx, "Learn", "LEARN CODE")
+        L.sideButton(ctx, "Locked", "LOCKED")
+        L.sideCaption(ctx, "PAD")
+        L.sideButton(ctx, "Lock", "LOCK")
+      elseif page == "Setup" then
+        local ix, iy, iw = L.section(ctx, "K E Y P A D", 142)
+        L.caption("ACCEPTED CODES (DIGITS, COMMA SEPARATED)", { ix, iy }, { iw, 10 }, "Left")
+        L.text("Pin", { ix, iy + 12 }, { iw, 22 })
+        local cellW = math.floor((iw - 2 * L.G) / 3)
+        L.grid({ "MaxTries", "LockoutSeconds", "AutoSubmit" }, ix, iy + 42, 3, cellW, 44)
+        L.label("Lockout after Max Tries failures for Lockout Seconds; a script clears it early through Locked.\nLearn stores the next code ended by Enter into Pin.",
+                { ix, iy + 94 }, { iw, 40 })
+      end
+    end,
+
+    padColour = function(T)
+      return T.bg
+    end,
+
+    create = function(E)
+      local W, H, T = E.W, E.H, E.T
+      local self = {
+        codes = {},            -- accepted codes (strings of digits)
+        entry = "",            -- digits typed since the last submit or clear
+        tries = 0,             -- failures since the last success or unlock
+        locked = false, lockUntil = 0, lockTimer = nil,
+        flash = nil, flashHandle = nil,         -- key index highlighted after a tap
+        feedback = nil, feedbackText = "", feedbackHandle = nil,  -- "ok" | "bad"
+        downKey = nil, downX = 0, downY = 0,    -- key under a resting finger
+        masked = true, auto = true, learn = false,
+        keys = {},             -- { x, y, w, h, label } per key, computed once
+      }
+
+      -- ---------- geometry (computed once) ----------
+      local m = U.clamp(math.floor(math.min(W, H) * 0.04), 4, 12)
+      local g = U.clamp(math.floor(math.min(W, H) * 0.02), 3, 10)
+      local hintH = E.hint and 18 or 0
+      local dispH = U.clamp(math.floor(H * 0.16), 34, 72)
+      local gridY = m + dispH + g
+      local gridH = H - gridY - m - hintH
+      local keyW = (W - 2 * m - 2 * g) / 3
+      local keyH = (gridH - 3 * g) / 4
+      for i = 1, #KEYS do
+        local col, row = (i - 1) % 3, math.floor((i - 1) / 3)
+        self.keys[i] = { x = m + col * (keyW + g), y = gridY + row * (keyH + g), w = keyW, h = keyH, label = KEYS[i] }
+      end
+      local keyRadius = U.clamp(math.floor(math.min(keyW, keyH) * 0.16), 3, 14)
+      local digitSize = U.clamp(math.floor(math.min(keyH * 0.5, keyW * 0.45)), 10, 44)
+
+      local function hitKey(x, y)
+        for i = 1, #self.keys do
+          local k = self.keys[i]
+          if x >= k.x and x <= k.x + k.w and y >= k.y and y <= k.y + k.h then return i end
+        end
+        return nil
+      end
+
+      -- Centre of the key with this label (white-box helper for the tests).
+      function self:keyCenter(label)
+        for i = 1, #self.keys do
+          local k = self.keys[i]
+          if k.label == label then return k.x + k.w / 2, k.y + k.h / 2 end
+        end
+        return nil
+      end
+
+      -- ---------- control readers ----------
+      local function ctlBool(name, default)
+        local c = E.ctl(name)
+        if c == nil then return default end
+        return c.Boolean and true or false
+      end
+      local function ctlInt(name, default, lo, hi)
+        local c = E.ctl(name)
+        local v = c and tonumber(c.Value) or default
+        return U.clamp(math.floor(v + 0.5), lo, hi)
+      end
+      local function ctlStr(name)
+        local c = E.ctl(name)
+        return c and tostring(c.String or "") or ""
+      end
+
+      local function longestCode()
+        local n = 0
+        for i = 1, #self.codes do
+          if #self.codes[i] > n then n = #self.codes[i] end
+        end
+        return n
+      end
+
+      local function matches(entry)
+        for i = 1, #self.codes do
+          if self.codes[i] == entry then return true end
+        end
+        return false
+      end
+
+      -- ---------- timed visuals ----------
+      local function clearFlash()
+        if self.flashHandle then self.flashHandle:cancel() end
+        self.flash, self.flashHandle = nil, nil
+      end
+      local function flashKey(i)
+        clearFlash()
+        self.flash = i
+        self.flashHandle = E.after(FLASH, function()
+          self.flash, self.flashHandle = nil, nil
+          E.invalidate()
+        end)
+      end
+      local function clearFeedback()
+        if self.feedbackHandle then self.feedbackHandle:cancel() end
+        self.feedback, self.feedbackText, self.feedbackHandle = nil, "", nil
+      end
+      local function showFeedback(kind, text)
+        clearFeedback()
+        self.feedback, self.feedbackText = kind, text
+        self.feedbackHandle = E.after(FEEDBACK, function()
+          self.feedback, self.feedbackText, self.feedbackHandle = nil, "", nil
+          E.invalidate()
+        end)
+      end
+
+      -- ---------- lockout ----------
+      local function stopLockTimer()
+        if self.lockTimer then self.lockTimer:cancel() end
+        self.lockTimer = nil
+      end
+
+      local function unlock(write)
+        stopLockTimer()
+        self.locked, self.lockUntil, self.tries, self.entry = false, 0, 0, ""
+        clearFeedback()
+        if write then E.out("Locked", false) end
+        E.setGesture("UNLOCKED")
+        E.invalidate()
+      end
+
+      local function lock(seconds)
+        stopLockTimer()
+        clearFlash()
+        clearFeedback()
+        self.locked = true
+        self.lockUntil = E.now() + seconds
+        self.entry, self.downKey = "", nil
+        E.out("Locked", true)
+        E.setGesture("LOCKED")
+        -- One tick per second redraws the countdown and ends the lockout.
+        self.lockTimer = E.every(1, function()
+          if E.now() >= self.lockUntil - 1e-6 then
+            unlock(true)
+          else
+            E.invalidate()
+          end
+        end)
+        E.invalidate()
+      end
+
+      -- ---------- entry and submit ----------
+      local function setEntry(s)
+        self.entry = s
+        E.out("Entry", s)
+      end
+
+      local function submit()
+        if self.locked then return end
+        local entry = self.entry
+        if entry == "" then return end
+        self.entry = ""                           -- the Entry pin keeps the last code for scripts
+        if self.learn then
+          self.learn = false
+          self.codes = { entry }
+          E.out("Pin", entry)
+          E.out("Learn", false)
+          showFeedback("ok", "Code stored")
+          E.setGesture("CODE STORED")
+          return
+        end
+        if matches(entry) then
+          self.tries = 0
+          E.pulse("Accepted")
+          showFeedback("ok", "Accepted")
+          E.setGesture("ACCEPTED")
+          return
+        end
+        self.tries = self.tries + 1
+        E.pulse("Rejected")
+        E.setGesture("REJECTED")
+        if self.tries >= ctlInt("MaxTries", 5, MIN_TRIES, MAX_TRIES) then
+          lock(ctlInt("LockoutSeconds", 60, MIN_LOCKOUT, MAX_LOCKOUT))
+        else
+          showFeedback("bad", "Try again")
+        end
+      end
+
+      -- AutoSubmit: a match submits at once; otherwise the entry is checked
+      -- when it is as long as the longest code (so it can only be rejected).
+      local function autoCheck()
+        if not self.auto or self.learn or #self.codes == 0 then return end
+        if matches(self.entry) or #self.entry >= longestCode() then submit() end
+      end
+
+      local function pressKey(i)
+        if self.locked then return end
+        flashKey(i)
+        if self.feedback then clearFeedback() end   -- typing again ends the last verdict's display
+        local label = KEYS[i]
+        if label == "C" then
+          setEntry("")
+          E.setGesture("CLEAR")
+        elseif label == "E" then
+          E.setGesture("ENTER")
+          submit()
+        else
+          if #self.entry < MAX_ENTRY then setEntry(self.entry .. label) end
+          E.setGesture("KEY " .. label)
+          autoCheck()
+        end
+        E.invalidate()
+      end
+
+      local function backspace()
+        if self.locked or self.entry == "" then return end
+        setEntry(string.sub(self.entry, 1, #self.entry - 1))
+        E.setGesture("DELETE")
+        E.invalidate()
+      end
+
+      -- ---------- engine hooks ----------
+      function self:onStart()
+        self.codes = parseCodes(ctlStr("Pin"))
+        self.masked = ctlBool("Masked", true)
+        self.auto = ctlBool("AutoSubmit", true)
+        self.learn = ctlBool("Learn", false)
+        if ctlBool("Locked", false) then lock(ctlInt("LockoutSeconds", 60, MIN_LOCKOUT, MAX_LOCKOUT)) end
+        E.invalidate()
+      end
+
+      function self:onTouchStart(x, y, t)
+        self.downX, self.downY = x, y
+        self.downKey = (not self.locked) and hitKey(x, y) or nil
+        E.invalidate()
+      end
+
+      function self:onTouchMove(x, y, t, dx, dy)
+        if self.downKey and U.dist(x, y, self.downX, self.downY) > 12 then
+          self.downKey = nil                      -- a drag is not a key press
+          E.invalidate()
+        end
+      end
+
+      function self:onTouchEnd(x, y, t, info)
+        if self.downKey then
+          self.downKey = nil
+          E.invalidate()
+        end
+      end
+
+      function self:onGesture(gst)
+        if gst.type == "tap" then
+          local i = hitKey(gst.x, gst.y)
+          if i then pressKey(i) end
+        elseif gst.type == "swipe" and gst.dir == "left" then
+          backspace()
+        end
+      end
+
+      function self:onLock(locked)
+        self.downKey = nil
+        E.invalidate()
+      end
+
+      function self:onControl(name, index, ctl)
+        if name == "Pin" then
+          self.codes = parseCodes(ctl.String)
+        elseif name == "Locked" then
+          if ctl.Boolean then
+            if not self.locked then lock(ctlInt("LockoutSeconds", 60, MIN_LOCKOUT, MAX_LOCKOUT)) end
+          elseif self.locked then
+            unlock(false)
+          end
+        elseif name == "Masked" then
+          self.masked = ctl.Boolean and true or false
+        elseif name == "AutoSubmit" then
+          self.auto = ctl.Boolean and true or false
+        elseif name == "Learn" then
+          self.learn = ctl.Boolean and true or false
+          if self.learn then self.entry = "" end
+        end
+        E.invalidate()
+      end
+
+      -- ---------- drawing ----------
+      local function drawEntry(c, bx, by, bw, bh)
+        local cx, cy = bx + bw / 2, by + bh / 2
+        if self.locked then
+          local remaining = math.max(0, math.ceil(self.lockUntil - E.now() - 1e-6))
+          local s = U.clamp(math.floor(bh * 0.5), 14, 28)
+          Shapes.icon(c, "lock", bx + 12 + s / 2, cy, s, T.danger)
+          c:textFit(bx + 20 + s, cy - 2, bw - 32 - s, "Locked", { size = U.clamp(math.floor(bh * 0.3), 11, 18), fill = T.danger, weight = "bold" })
+          c:textFit(bx + 20 + s, cy + 13, bw - 32 - s, "Try again in " .. remaining .. " s", { size = 11, fill = T.muted })
+          return
+        end
+        if self.feedback then
+          local colour = (self.feedback == "ok") and T.ok or T.danger
+          local icon = (self.feedback == "ok") and "check" or "cross"
+          local s = U.clamp(math.floor(bh * 0.5), 14, 28)
+          local tw = Font.width(self.feedbackText, 18, "bold")
+          local x0 = cx - (tw + s + 8) / 2
+          Shapes.icon(c, icon, x0 + s / 2, cy, s, colour)
+          c:textFit(x0 + s + 8, cy + 6, bw - 24 - s, self.feedbackText, { size = 18, fill = colour, weight = "bold" })
+          return
+        end
+        local n = #self.entry
+        if n == 0 then
+          local text = "Enter code"
+          if self.learn then text = "New code, then Enter"
+          elseif #self.codes == 0 then text = "No code set" end
+          c:textFit(cx, cy + 5, bw - 24, text, { size = 14, fill = T.muted, anchor = "middle" })
+        elseif self.masked then
+          local r = U.clamp(math.floor(bh * 0.12), 3, 7)
+          local step = math.min(2.6 * r, (bw - 16) / n)
+          local x0 = cx - step * (n - 1) / 2
+          for i = 1, n do
+            c:circle(x0 + (i - 1) * step, cy, r, { fill = T.text })
+          end
+        else
+          c:textFit(cx, cy + math.floor(bh * 0.18), bw - 24, self.entry,
+            { size = U.clamp(math.floor(bh * 0.5), 12, 36), fill = T.text, anchor = "middle", weight = "bold" })
+        end
+        if self.learn and n > 0 then
+          c:textFit(bx + bw - 8, by + 12, bw / 2, "Learn", { size = 10, fill = T.accent2, anchor = "end" })
+        elseif self.tries > 0 then
+          c:textFit(bx + bw - 8, by + 12, bw / 2,
+            "Attempt " .. self.tries .. " of " .. ctlInt("MaxTries", 5, MIN_TRIES, MAX_TRIES),
+            { size = 10, fill = T.danger, anchor = "end" })
+        end
+      end
+
+      local function drawKeys(c)
+        for i = 1, #self.keys do
+          local k = self.keys[i]
+          local fill, stroke, text = T.panel, T.line, T.text
+          if self.flash == i then
+            fill, stroke, text = T.accent, T.accent, T.onAccent
+          elseif self.downKey == i then
+            fill, stroke = Svg.lighten(T.panel, 0.12), T.accent
+          end
+          c:rect(k.x + 0.5, k.y + 0.5, k.w - 1, k.h - 1, { fill = fill, stroke = stroke, sw = 1, rx = keyRadius })
+          local cx, cy = k.x + k.w / 2, k.y + k.h / 2
+          if k.label == "C" then
+            Shapes.icon(c, "cross", cx, cy, digitSize * 0.9, (self.flash == i) and T.onAccent or T.danger)
+          elseif k.label == "E" then
+            Shapes.icon(c, "check", cx, cy, digitSize * 0.9, (self.flash == i) and T.onAccent or T.ok)
+          else
+            c:text(cx, cy + digitSize * 0.35, k.label, { size = digitSize, fill = text, anchor = "middle" })
+          end
+        end
+      end
+
+      function self:draw(c)
+        local bx, by, bw, bh = m, m, W - 2 * m, dispH
+        local stroke = T.line
+        if self.locked or self.feedback == "bad" then stroke = T.danger
+        elseif self.feedback == "ok" then stroke = T.ok
+        elseif self.learn then stroke = T.accent2 end
+        c:rect(bx + 0.5, by + 0.5, bw - 1, bh - 1, { fill = T.well, stroke = stroke, sw = 1, rx = math.min(10, keyRadius + 2) })
+        drawEntry(c, bx, by, bw, bh)
+        if self.locked then
+          c:group({ opacity = 0.35 }, function(gc) drawKeys(gc) end)
+        else
+          drawKeys(c)
+        end
+        if E.hint and not self.locked then
+          Shapes.hint(c, T, HINT, W, H)
+        end
+      end
+
+      return self
+    end,
+  }
+end
 -- ===== 30_camera.lua =====
 -- Nikita Visual Arts – nikitavisual.art
 -- Touch Pad for Q-SYS: camera drivers (Demo, Q-SYS Camera, VISCA over IP)
@@ -2239,11 +6732,15 @@ do
           if v > 0 then want.up = true elseif v < 0 then want.down = true end
         end
       end
-      local k = knobScale(E, "MaxSpeed", 0.5)
-      if h ~= 0 or v ~= 0 then
-        speedPos("panspeed", abs(ps) * k)
-        speedPos("tiltspeed", abs(ts) * k)
+      if h == 0 and v == 0 then
+        -- a stop: every held direction goes false three times
+        release(3)
+        restoreSpeeds()
+        return
       end
+      local k = knobScale(E, "MaxSpeed", 0.5)
+      speedPos("panspeed", abs(ps) * k)
+      speedPos("tiltspeed", abs(ts) * k)
       -- release what is no longer wanted before pressing anything new
       for i = 1, #DIR_KEYS do
         local dk = DIR_KEYS[i]
@@ -2251,11 +6748,6 @@ do
           setBool(self.ctl[dk], false)
           self.pressed[dk] = nil
         end
-      end
-      if h == 0 and v == 0 then
-        release(3)
-        restoreSpeeds()
-        return
       end
       for i = 1, #DIR_KEYS do
         local dk = DIR_KEYS[i]
@@ -2271,7 +6763,8 @@ do
       s = clamp(num(s, 0), -1, 1)
       local dir = sign(s)
       if dir ~= 0 then speedPos("zoomspeed", abs(s) * knobScale(E, "ZoomSpeed", 0.5)) end
-      if self.zoomDir ~= dir then
+      if dir ~= 0 and self.zoomDir ~= dir then
+        -- the old direction is released before the new one is pressed
         if self.zoomDir > 0 then setBool(self.ctl.zoomin, false)
         elseif self.zoomDir < 0 then setBool(self.ctl.zoomout, false) end
       end
@@ -2373,6 +6866,7 @@ do
         if vals[3] then text = text .. sformat(" %.4f", vals[3]) end
       end
       pcall(function() c.String = text end)
+      self.posTemplate = text       -- a later write without zoom keeps the zoom just sent
       return true
     end
 
@@ -2850,26 +7344,37 @@ local function themeOf(props)
   return THEMES[name] or THEMES["Nikita"], name
 end
 
--- Colour to put under the pad on the UCI, as "r,g,b" or a note.
+-- Colour to put under the pad on the UCI, as "r,g,b" or a note: the theme's
+-- background for Solid, its panel colour for Panel (a Custom background is
+-- lightened by the same 6 % the runtime uses), none for Transparent.
 local function padColourNote(props)
   local background = prop(props, "Background", "Solid")
   if background == "Transparent" then
     return "Pad colour: none (Transparent: the page art shows through)"
   end
   local T, name = themeOf(props)
-  local rgb = T.padRGB
-  if name == "Custom" then
-    local r, g, b = U.hexToRgb(prop(props, "Background Color", ""))
-    if r then rgb = { r, g, b } end
+  local custom = (name == "Custom") and prop(props, "Background Color", "") or ""
+  local hex
+  if background == "Panel" then
+    hex = U.isHex(custom) and Svg.lighten(custom, 0.06) or T.panel
+  elseif U.isHex(custom) then
+    hex = custom
   end
-  return string.format("Pad colour: %d,%d,%d", rgb[1], rgb[2], rgb[3])
+  local r, g, b = U.hexToRgb(hex)
+  if not r then r, g, b = T.padRGB[1], T.padRGB[2], T.padRGB[3] end
+  return string.format("Pad colour: %d,%d,%d", r, g, b)
 end
 Framework.padColourNote = padColourNote
 
 -- Picker size and placement for a pad (spec 13.3, measured on the Gesture
--- Pad design): picker width = ceil(1.91 P), height = P + 24, pad top-left =
--- picker top-left + (round(0.04 width), 12), with P the longer pad side. The
--- cover box is the picker rectangle grown by 2 px on each side.
+-- Pad design). The picker's touch square has side P = the longer pad side:
+-- picker width = ceil(1.91 P), height = P + 24, and the pad sits at the
+-- square's top-left, at picker top-left + (round(0.04 width), 12), whatever
+-- the pad's shape. A wide pad leaves the rest of the square free below it
+-- (`free = "below"`, freeW x freeH), a tall pad to its right (`free =
+-- "right"`); the engine ignores touches there, and other controls must not
+-- cover that area. The cover box is the picker rectangle grown by 2 px on
+-- each side.
 function Framework.pickerGeometry(padW, padH)
   local P = math.max(padW, padH)
   local w = math.ceil(1.91 * P)
@@ -2879,6 +7384,13 @@ function Framework.pickerGeometry(padW, padH)
   local g = { w = w, h = h, dx = dx, dy = dy, side = P, coverW = w + 4, coverH = h + 4 }
   g.xMin, g.xMax = dx + 1, 1280 - w + dx
   g.yMin, g.yMax = dy, 800 - h + dy
+  if padW > padH then
+    g.free, g.freeW, g.freeH = "below", padW, P - padH
+  elseif padH > padW then
+    g.free, g.freeW, g.freeH = "right", P - padW, padH
+  else
+    g.free, g.freeW, g.freeH = nil, 0, 0
+  end
   return g
 end
 
@@ -2890,7 +7402,13 @@ function Framework.pickerText(padW, padH)
   else
     fit = "Wider than a 1280 x 800 page: use a smaller pad or a larger page."
   end
-  return string.format("Picker on the UCI: %d x %d px. Pad top-left = picker top-left + (%d, %d).\nCover box: %d x %d px, 2 px outside the picker. %s", g.w, g.h, g.dx, g.dy, g.coverW, g.coverH, fit)
+  local text = string.format("Picker on the UCI: %d x %d px. Pad top-left = picker top-left + (%d, %d).\nCover box: %d x %d px, 2 px outside the picker. %s", g.w, g.h, g.dx, g.dy, g.coverW, g.coverH, fit)
+  if g.free then
+    text = text .. string.format("\nThe %d x %d touch square extends %s the pad by %d px: keep that area free of other controls.",
+                                 g.side, g.side, (g.free == "below") and "below" or "to the right of",
+                                 (g.free == "below") and g.freeH or g.freeW)
+  end
+  return text
 end
 
 -- ---------------------------------------------------------------- GetColor / GetPrettyName
@@ -4643,8 +9161,15 @@ if Controls then (function()
     out("Gesture", string.upper(tostring(text or "")))
   end
 
-  -- ---------- geometry and calibration (spec 5.2, 13.1) ----------
-  local DEFAULT_CAL = EMULATING and { 0, 0, 4 / 7, 1 } or { 0, 0, 1, 1 }
+  -- ---------- geometry and calibration (spec 5.2, 13.1, 13.3) ----------
+  -- The picker's touch square has the side of the pad's longer side and the
+  -- pad sits at its top-left: a wide pad covers the top of the square, a
+  -- tall pad its left, and the rest of the square is outside the pad.
+  -- Designer draws the surface as a wider rectangle whose left 4/7 is the
+  -- square. A square pad gives {0, 0, 1, 1} and {0, 0, 4/7, 1}.
+  local SIDE = max(W, H)
+  local DEFAULT_CAL = EMULATING and { 0, 1 - H / SIDE, (4 / 7) * W / SIDE, H / SIDE }
+                               or { 0, 1 - H / SIDE, W / SIDE, H / SIDE }
   local cal = { P = nil, D = nil }
 
   -- Only the first CAL_LINES lines of the first CAL_CHARS characters are
@@ -5618,7 +10143,10 @@ if Controls then (function()
   pcall(function() Controls.PickerLayout.String = Framework.pickerText(W, H) end)
   protect("calibration", function() parseCalibration(Controls.Calibration.String) end)
   S.locked = Controls.Lock.Boolean and true or false
-  if Controls.PanelTouch.Boolean then S.panelWired, S.panelDown = true, true end
+  -- Panel Touch counts as wired only once an edge is observed after arming
+  -- (onPanelTouch): a toggle left true at start with nothing wired to it
+  -- would otherwise hold every touch down for ever. Until that first edge
+  -- lifts are inferred from silence as if the control were unwired.
   out("Touching", false)
   out("X", 0)
   out("Y", 0)
