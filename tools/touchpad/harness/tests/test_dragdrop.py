@@ -545,3 +545,176 @@ def test_dragdrop_budget_with_64_names_of_120_characters():
     assert b["frames"] >= 30
     assert b["max_frame"] < 60000 and b["max_handler"] < 120000
     assert len(icon(q)) < 40000
+
+
+def cold_stats(q):
+    cnt, spent, cap = q.run("return TouchPad.inst:coldStats()")
+    return int(cnt), int(spent), int(cap)
+
+
+def warm(q, frames=40):
+    """Lets the follow-up frames fill every placeholder tile."""
+    for _ in range(frames):
+        q.advance(0.05)
+
+
+def test_dragdrop_budget_on_wide_pads_with_120_character_names():
+    # a 1600 px pad fits ~100 characters of a name on a tile: the per-frame
+    # cold budget scales with the tile width, so the frame stays under 60,000
+    for (n_src, n_dst, w, h, turns) in ((12, 16, 1600, 1200, 0), (12, 16, 1200, 800, 0), (64, 64, 1600, 1200, 3)):
+        q = boot(n_src, n_dst, props={"Pad Width": w, "Pad Height": h})
+        name_all(q, n_src, n_dst)
+        q.advance(0.1)
+        cnt, spent, cap = cold_stats(q)
+        assert 1 <= cnt <= 6 and spent <= cap
+        if w == 1600:
+            assert cnt <= 3                                     # 779 px tiles: three per frame
+        warm(q)
+        svg = icon(q)
+        assert svg.count("...") >= n_src if n_src <= 12 else svg.count("...") >= 12   # every visible tile filled
+        for _ in range(turns):
+            q.tap(*arrow(q, "D", 1), panel_touch=True)
+            q.tap(*arrow(q, "S", 1), panel_touch=True)
+            q.advance(0.05)
+            assert q.budget()["max_frame"] < 60000
+            warm(q)
+        b = q.budget()
+        assert b["max_frame"] < 60000 and b["max_handler"] < 120000
+        assert b["max_frame"] < 50000, b["max_frame"]              # margin, not just the limit
+    # ... and a 500 px pad still renders six tiles of a cold page in one frame
+    q = boot(64, 64)
+    name_all(q, 64, 64)
+    q.advance(0.1)
+    cnt, spent, cap = cold_stats(q)
+    assert cnt >= 6
+    warm(q)
+    assert q.budget()["max_frame"] < 60000
+
+
+def test_dragdrop_quick_drop_on_a_later_page_keeps_that_page():
+    q = boot(20, 40)
+    q.tap(*arrow(q, "D", 1), panel_touch=True)
+    assert page_info(q, "D")[0] == 2
+    # a drop in 0.3 s is also a swipe to the engine; the page must not turn
+    drag_to(q, 3, centre(q, "D", 16), seconds=0.3)
+    assert q.pin("Route", 16)["Value"] == 3
+    assert q.pin("Gesture")["String"] == "SOURCE 3 -> SCREEN 16"
+    assert q.pulses("SwipeRight") == 1
+    assert page_info(q, "D")[0] == 2
+    drag_to(q, 4, centre(q, "D", 17), seconds=0.3)
+    assert q.pin("Route", 17)["Value"] == 4 and page_info(q, "D")[0] == 2
+    # a quick drop on the arrows turns the page once, not twice
+    _, n_pages, _ = page_info(q, "D")
+    assert n_pages >= 3
+    drag_to(q, 5, arrow(q, "D", 1), seconds=0.3)
+    assert page_info(q, "D")[0] == 3 and picked(q) == 5
+    # the same with inferred lifts (no Panel Touch wiring)
+    q2 = boot(20, 40)
+    q2.tap(*arrow(q2, "D", 1))
+    sx, sy = centre(q2, "S", 3)
+    dx, dy = centre(q2, "D", 16)
+    q2.drag([(sx + (dx - sx) * k / 8, sy + (dy - sy) * k / 8) for k in range(9)], seconds=0.3)
+    assert q2.pin("Route", 16)["Value"] == 3 and page_info(q2, "D")[0] == 2
+    # a quick swipe that drops nothing still pages the list it ran over
+    q2.swipe(480, 250, 270, 250, seconds=0.2)
+    assert page_info(q2, "D")[0] == 3
+
+
+def test_dragdrop_jittery_tap_on_the_picked_source_puts_it_down():
+    q = boot(3, 2)
+    sx, sy = centre(q, "S", 3)
+    q.tap(sx, sy, panel_touch=True)
+    assert picked(q) == 3
+    q.advance(0.6)
+    q.touch([(sx, sy), (sx + 2, sy + 1)], panel_touch=True, lift=False)   # a real finger moves a little
+    assert q.run("return TouchPad.inst:isCarrying()") is False
+    assert q.pin("Gesture")["String"] == "NOW TAP A SCREEN"
+    assert 'opacity="0.92"' not in icon(q)                          # no ghost flashes
+    q.lift()
+    assert picked(q) is None and routes(q, 2) == [0, 0]
+    assert q.pin("Gesture")["String"] == "DRAG A SOURCE TO A SCREEN"
+    # a jittery tap on a source picks it, a jittery tap on a screen routes it
+    q.advance(0.6)
+    q.touch([(sx, sy), (sx - 3, sy + 2)], panel_touch=True)
+    assert picked(q) == 3
+    dx, dy = centre(q, "D", 2)
+    q.touch([(dx, dy), (dx + 2, dy - 2)], panel_touch=True)
+    assert routes(q, 2) == [0, 3]
+    # ... and a press that moves past the drag threshold carries
+    q.touch([(sx, sy), (sx + 6, sy), (sx + 20, sy + 4)], panel_touch=True, lift=False)
+    assert q.run("return TouchPad.inst:isCarrying()") is True
+    assert q.pin("Gesture")["String"] == "DROP ON A SCREEN" and 'opacity="0.92"' in icon(q)
+    q.lift()
+
+
+def test_dragdrop_tap_only_during_a_drag_puts_the_source_down():
+    q = boot(3, 2)
+    sx, sy = centre(q, "S", 1)
+    q.set_pin("PanelTouch", True)
+    q.touch([(sx, sy), (sx + 40, sy + 10), (sx + 80, sy + 20)], lift=False)
+    assert picked(q) == 1 and q.run("return TouchPad.inst:isCarrying()") is True
+    q.set_pin("TapOnly", True)
+    q.set_pin("PanelTouch", False)
+    q.advance(0.5)
+    assert picked(q) is None and q.run("return TouchPad.inst:isCarrying()") is False
+    assert q.pin("Gesture")["String"] == "TAP A SOURCE, THEN A SCREEN"
+    assert "Tap a source, then a screen" in icon(q) and "Drop on a screen" not in icon(q)
+    assert routes(q, 2) == [0, 0]
+    q.advance(10)
+    assert picked(q) is None
+    # a drag cut short by the lock leaves the idle hint behind too
+    q.set_pin("TapOnly", False)
+    q.set_pin("PanelTouch", True)
+    q.touch([(sx, sy), (sx + 40, sy + 10), (sx + 80, sy + 20)], lift=False)
+    q.set_pin("Lock", True)
+    q.set_pin("PanelTouch", False)
+    q.set_pin("Lock", False)
+    q.advance(0.5)
+    assert picked(q) is None
+    assert "Drag a source to a screen" in icon(q) and "Drop on a screen" not in icon(q)
+
+
+def test_dragdrop_broadcast_flash_skips_the_call_screens_it_skipped():
+    q = boot(2, 3)
+    q.set_pin("DestName", "Teams Room", 2)
+    q.set_pin("Route", 2, 2)
+    q.reset_pulses()
+    accent2 = q.run("return TouchPad.E.T.accent2")
+    sx, sy = centre(q, "S", 1)
+    q.double_tap(sx, sy, gap=0.15, panel_touch=True)
+    assert routes(q, 3) == [1, 2, 1] and q.pulses("Routed", 2) == 0
+    svg = icon(q)
+    assert svg.count('fill="%s"' % accent2) == 2                     # screens 1 and 3 glow, not the Teams Room
+    assert svg.index('fill="%s"' % accent2) > svg.index(">Screen 1<") - 400
+    q.advance(1.0)
+    assert 'fill="%s"' % accent2 not in icon(q)                      # the glow is over
+    # with AllowCalls off every screen glows
+    q.set_pin("AllowCalls", False)
+    q.double_tap(sx, sy, gap=0.15, panel_touch=True)
+    assert routes(q, 3) == [1, 1, 1]
+    assert icon(q).count('fill="%s"' % accent2) == 3
+
+
+def test_dragdrop_put_down_timer_waits_for_a_resting_finger():
+    q = boot(3, 2)
+    s1, s2 = centre(q, "S", 1), centre(q, "S", 2)
+    q.tap(*s1, panel_touch=True)
+    assert picked(q) == 1
+    q.advance(7.5)                                                   # the timer is due in ~0.15 s
+    q.touch([s2], panel_touch=True, hold=0.55, lift=False)           # a slow press: no tap, no drag
+    assert picked(q) == 1                                            # not put down under the finger
+    q.lift()
+    q.advance(0.6)
+    assert picked(q) is None                                         # ... but right after it lifts
+    assert q.pin("Gesture")["String"] == "DRAG A SOURCE TO A SCREEN"
+    assert 'stroke-width="3"' not in icon(q)
+    # a routing tap at that moment keeps the source and restarts the 8 s
+    q.tap(*s1, panel_touch=True)
+    q.advance(7.5)
+    dx, dy = centre(q, "D", 1)
+    q.tap(dx, dy, panel_touch=True)
+    assert routes(q, 2) == [1, 0] and picked(q) == 1
+    q.advance(7)
+    assert picked(q) == 1
+    q.advance(1.5)
+    assert picked(q) is None

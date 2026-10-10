@@ -35,6 +35,11 @@ do
   local DOUBLE_TIME = 0.4                -- second tap on the same tile within this = double
   local FLASH = 0.8                      -- seconds a freshly routed screen glows
   local NAME_IN_TEXT = 40                -- characters of a name used in the Gesture text
+  local COLD_CHARS = 560                 -- cold-tile cost units spent per frame (about 45 VM instructions each)
+  local COLD_TILE_COST = 60              -- a cold tile's fixed cost in those units (box, icon, truncation)
+  local WARM_DELAY = 0.03                -- seconds until the follow-up frame
+  local DRAG_START = 12                  -- px a press moves before it carries (the engine's drag threshold)
+  local HOLD_POLL = 0.5                  -- the put-down timer waits this long while a finger rests on a tile
   local CALL_WORDS = { teams = true, zoom = true, webex = true, codec = true, call = true }
 
   local function countOf(props, name, default)
@@ -149,22 +154,51 @@ do
       local tapOnly, allowCalls = false, true
       local picked = nil               -- picked source index
       local timer = nil                -- put-down timer handle
-      local carry = nil                -- { i, x, y, dragging }
+      local carry = nil                -- { i, x, y, x0, y0, dragging }
       local down = nil                 -- hit at touch start
+      local endedCarry = false         -- the touch that just ended dropped a source (route or page turn)
+      local swipeKind = nil            -- the list the touch that just ended started in
       local hover = nil                -- screen under a carried source
       local lastTap = nil              -- { kind, i, t } for the same-tile double tap
       local touchT0 = 0
       local lastDrop = nil             -- an inferred drop that a resume takes back
       local lastClear = nil
-      local flash = nil                -- { j, at }
+      local flash = nil                -- { j, at } or, for a broadcast, { set = {[j] = true}, at }
       local lastText = nil             -- the last Gesture text this mode set
       local hintText = HINT_DRAG
       local self = {}
 
       -- ---------- names ----------
+      -- Names and signal flags are read from their controls on first use (a
+      -- 64 x 64 start-up touches only the visible page) and kept in sync by
+      -- onControl. nameRev counts changes so cached tiles that show a name
+      -- (a screen's routed source) notice a rename.
+      local nameRev = { S = {}, D = {} }
+
+      local function rawName(kind, i)
+        local list = (kind == "S") and src or dst
+        local s = list[i]
+        if s == nil then
+          local c = E.ctl((kind == "S") and "SourceName" or "DestName", i)
+          s = tostring((c and c.String) or "")
+          list[i] = s
+        end
+        return s
+      end
+
+      local function isActive(i)
+        local a = active[i]
+        if a == nil then
+          local c = E.ctl("SourceActive", i)
+          a = (c == nil) or (c.Boolean and true or false)
+          active[i] = a
+        end
+        return a
+      end
+
       local function displayName(kind, i)
-        local s = (kind == "S") and src[i] or dst[i]
-        if s ~= nil and s ~= "" then return s end
+        local s = rawName(kind, i)
+        if s ~= "" then return s end
         return ((kind == "S") and "Source " or "Screen ") .. i
       end
 
@@ -195,6 +229,7 @@ do
       local tileCache = { S = {}, D = {} }   -- tileCache[kind][i] = { key, raw }
       local function setName(kind, i, s)
         s = tostring(s or "")
+        nameRev[kind][i] = (nameRev[kind][i] or 0) + 1
         if kind == "S" then
           src[i] = s
           iconS[i] = nil
@@ -225,7 +260,7 @@ do
       local function isCallDest(j)
         local v = callD[j]
         if v == nil then
-          v = isCall(dst[j] or "")
+          v = isCall(rawName("D", j))
           callD[j] = v
         end
         return v
@@ -342,17 +377,25 @@ do
       end
 
       -- ---------- picking and routing ----------
+      -- The put-down timer. When it fires under a finger resting on a source
+      -- tile it waits in short steps for the lift (a routing tap re-arms it,
+      -- a bare press ends with the source put down shortly after).
+      local function putDownDue()
+        timer = nil
+        if picked == nil then return end
+        if carry ~= nil then
+          timer = E.after(HOLD_POLL, putDownDue)
+          return
+        end
+        picked = nil
+        hintText = idleHint()
+        say(hintText)
+        E.invalidate()
+      end
+
       local function armTimer()
         if timer then timer:cancel() end
-        timer = E.after(PUT_DOWN, function()
-          timer = nil
-          if picked ~= nil and carry == nil then
-            picked = nil
-            hintText = idleHint()
-            say(hintText)
-            E.invalidate()
-          end
-        end)
+        timer = E.after(PUT_DOWN, putDownDue)
       end
 
       local function putDown()
@@ -399,17 +442,18 @@ do
       end
 
       local function broadcast(i)
-        local n = 0
+        local n, set = 0, {}
         for j = 1, nD do
           if not (allowCalls and isCallDest(j)) then
             writeRoute(j, i)
             E.pulse("Routed", j)
+            set[j] = true
             n = n + 1
           end
         end
         putDown()
         if n > 0 then
-          flash = { j = 0, at = E.now() }
+          flash = { set = set, at = E.now() }
           E.after(FLASH + 0.05, function() E.invalidate() end)
           say(shortName("S", i) .. " -> all screens")
         else
@@ -437,42 +481,54 @@ do
         down = hitTest(x, y)
         hover = nil
         carry = nil
+        endedCarry = false
         if down and down.kind == "S" and down.i and not tapOnly then
-          carry = { i = down.i, x = x, y = y, dragging = false }
+          carry = { i = down.i, x = x, y = y, x0 = x, y0 = y, dragging = false }
         end
         E.invalidate()
       end
 
+      -- A press on a source carries it once the finger has moved further than
+      -- the engine's drag threshold; a jittery tap stays a tap.
       function self:onTouchMove(x, y, t, dx, dy)
         if carry then
           carry.x, carry.y = x, y
-          if not carry.dragging then
+          if not carry.dragging and U.dist(carry.x0, carry.y0, x, y) > DRAG_START then
             carry.dragging = true
             if timer then timer:cancel(); timer = nil end
             picked = carry.i
             hintText = HINT_CARRY
             say(HINT_CARRY)
           end
-          local h = hitTest(x, y)
-          hover = (h and h.kind == "D" and h.i) or nil
+          if carry.dragging then
+            local h = hitTest(x, y)
+            hover = (h and h.kind == "D" and h.i) or nil
+          end
         end
         E.invalidate()
       end
 
       function self:onTouchEnd(x, y, t, info)
         local c = carry
+        swipeKind = down and down.kind or nil
         carry, hover, down = nil, nil, nil
+        endedCarry = false
         if info and info.aborted then
-          if c and c.dragging then putDown() end
+          if c and c.dragging then
+            putDown()
+            say(idleHint())
+          end
           E.invalidate()
           return
         end
         if c and c.dragging then
           local h = hitTest(x, y)
           if h and h.kind == "D" and h.i then
+            endedCarry = true
             putDown()
             route(h.i, c.i, info and info.inferred)
           elseif h and h.arrow then
+            endedCarry = true
             local prevPage = plans[h.kind].page
             turnPage(h.kind, h.arrow)
             pick(c.i)
@@ -557,11 +613,13 @@ do
           -- The engine's "DOUBLE TAP" text follows the second tap: keep ours.
           if lastText then E.setGesture(lastText) end
         elseif g.type == "swipe" then
-          -- A fast drag-drop is also a swipe to the engine: keep the route text.
+          -- A fast drag-drop is also a swipe to the engine: keep the route
+          -- text and leave the pages alone. A swipe that dropped nothing
+          -- turns the list it started and ended in.
           if lastText then E.setGesture(lastText) end
-          if (g.dir == "left" or g.dir == "right") and down == nil and lastDrop == nil then
+          if (g.dir == "left" or g.dir == "right") and not endedCarry then
             local h = hitTest(g.x, g.y)
-            if h and (h.kind == "S" or h.kind == "D") and not (h.kind == "S" and picked ~= nil and not tapOnly) then
+            if h and h.kind == swipeKind and not (h.kind == "S" and picked ~= nil and not tapOnly) then
               if turnPage(h.kind, (g.dir == "left") and 1 or -1) then E.invalidate() end
             end
           end
@@ -598,7 +656,11 @@ do
           clearAll()
         elseif name == "TapOnly" then
           tapOnly = ctl.Boolean and true or false
-          if tapOnly and carry then carry, hover = nil, nil end
+          if tapOnly and carry then
+            -- a drag in progress is dropped: the source goes down with it
+            if carry.dragging then putDown() end
+            carry, hover = nil, nil
+          end
           if picked == nil then
             hintText = idleHint()
             say(hintText)
@@ -610,18 +672,10 @@ do
       end
 
       function self:onStart()
-        for i = 1, nS do
-          local c = E.ctl("SourceName", i)
-          local a = E.ctl("SourceActive", i)
-          active[i] = (a == nil) or (a.Boolean and true or false)
-          src[i] = tostring((c and c.String) or "")
-        end
         for j = 1, nD do
-          local c = E.ctl("DestName", j)
-          dst[j] = tostring((c and c.String) or "")
           local r = E.ctl("Route", j)
           routes[j] = clampRoute(r and r.Value or 0)
-          E.out("RouteName", (routes[j] > 0) and displayName("S", routes[j]) or "", j)
+          if routes[j] > 0 then E.out("RouteName", displayName("S", routes[j]), j) end
         end
         local to = E.ctl("TapOnly")
         tapOnly = (to ~= nil) and (to.Boolean and true or false) or false
@@ -638,14 +692,50 @@ do
       end
 
       -- A tile is rendered once per visual state (picked, routed, dimmed,
-      -- pressed, hovered, flashing, its sub label) into a scratch canvas and
-      -- the string is replayed on later frames: a 64 x 64 page costs a few
-      -- lookups per frame instead of a full tile drawing.
-      local function tileRaw(c, kind, i, tl, o, label, key)
+      -- pressed, hovered, flashing, the routed source's name) into a scratch
+      -- canvas and the string is replayed on later frames. Rendering from
+      -- scratch costs a fixed part plus the characters the label fitting
+      -- walks (the name's length capped by what the tile width can hold), so
+      -- a frame spends at most COLD_CHARS of those units on cold tiles: six
+      -- tiles of 23 characters on a 500 px pad, three of 117 on a 1600 px one.
+      -- The rest show their box only and a follow-up frame WARM_DELAY later
+      -- fills them, so 64 x 64 names of 120 characters never near the budget.
+      local coldLeft, needWarm, warmTimer = 0, false, nil
+      local coldCount, coldSpent = 0, 0               -- the last frame's cold tiles and their cost
+
+      local function fitCost(kind, i, maxW, size)
+        local n = #rawName(kind, i)
+        if n == 0 then n = 10 end                        -- "Source 64"
+        local holds = floor(maxW / (size * 0.5)) + 1     -- characters the width can take
+        return min(n, holds)
+      end
+
+      local function placeholder(tl, radius)
+        if tl.ph then return tl.ph end
+        local s = Svg.new(W, H, { limit = 2000 })
+        s:rect(tl.x + 0.5, tl.y + 0.5, tl.w - 1, tl.h - 1, { fill = T.panel, stroke = T.line, sw = 1, rx = radius })
+        tl.ph = table.concat(s.parts)
+        return tl.ph
+      end
+
+      local function tileRaw(c, kind, i, tl, o, key, size, maxW, r)
         local e = tileCache[kind][i]
         if e and e.key == key then return e.raw end
+        local withSub = (kind == "D" and r > 0 and tl.h >= 56)
+        local cost = COLD_TILE_COST + fitCost(kind, i, maxW, size)
+        if withSub then cost = cost + fitCost("S", r, maxW, 11) end
+        -- the first cold tile of a frame always renders, so a page keeps filling
+        if cost > coldLeft and coldLeft < COLD_CHARS then
+          needWarm = true
+          return placeholder(tl, o.radius)
+        end
+        coldLeft = coldLeft - cost
+        coldCount, coldSpent = coldCount + 1, coldSpent + cost
+        if o.wantIcon then o.icon = iconOf(kind, i) end
+        o.wantIcon = nil
+        if withSub then o.sub = fittedLabel("S", r, maxW, 11) end
         local s = Svg.new(W, H, { family = c.family, limit = 6000 })
-        Shapes.tile(s, T, tl.x, tl.y, tl.w, tl.h, label, o)
+        Shapes.tile(s, T, tl.x, tl.y, tl.w, tl.h, fittedLabel(kind, i, maxW, size), o)
         local raw = table.concat(s.parts)
         tileCache[kind][i] = { key = key, raw = raw }
         return raw
@@ -657,26 +747,29 @@ do
           local tl = tiles[idx]
           local i = tl.i
           local size = sizeFor(tl.h)
-          local iconW = min(24, tl.h * 0.6) + 6
+          -- a narrow tile gives its width to the name rather than the icon;
+          -- the icon itself (a word scan of the name) is looked up only when
+          -- the tile is rendered cold
+          local wantIcon = tl.w >= 96
+          local iconW = wantIcon and (min(24, tl.h * 0.6) + 6) or 0
           local maxW = tl.w - 2 * TILE_PAD - iconW
-          local o = { size = size, radius = min(8, tl.h / 4), icon = iconOf(kind, i) }
-          local key
+          local o = { size = size, radius = min(8, tl.h / 4), wantIcon = wantIcon }
+          local key, r = nil, 0
           if kind == "S" then
             o.picked = (picked == i)
-            o.dim = not active[i]
+            o.dim = not isActive(i)
             if down and down.kind == "S" and down.i == i and not o.picked then o.stroke = T.accent end
             key = (o.picked and "p" or "-") .. (o.dim and "d" or "-") .. (o.stroke and "s" or "-")
           else
-            local r = routes[i]
+            r = routes[i]
             o.on = r > 0
-            if r > 0 and tl.h >= 56 then o.sub = fittedLabel("S", r, maxW, 11) end
             if hover == i then o.picked = true end
-            if flash and (flash.j == i or (flash.j == 0 and r > 0)) and (now - flash.at) < FLASH then
+            if flash and (flash.j == i or (flash.set and flash.set[i])) and (now - flash.at) < FLASH then
               o.accent = T.accent2
             end
-            key = (o.picked and "h" or "-") .. (o.accent and "f" or "-") .. r .. "|" .. (o.sub or "")
+            key = (o.picked and "h" or "-") .. (o.accent and "f" or "-") .. r .. ":" .. (nameRev.S[r] or 0)
           end
-          c:raw(tileRaw(c, kind, i, tl, o, fittedLabel(kind, i, maxW, size), key))
+          c:raw(tileRaw(c, kind, i, tl, o, key, size, maxW, r))
         end
         if plan.arrows then
           local a = plan.area
@@ -687,12 +780,20 @@ do
 
       function self:draw(c)
         local now = E.now()
+        coldLeft, needWarm = COLD_CHARS, false
+        coldCount, coldSpent = 0, 0
         if capH > 0 then
           c:text(areaS.x + 2, areaS.y - 5, "SOURCES", { size = 10, fill = T.muted, weight = "bold", spacing = 1 })
           c:text(areaD.x + 2, areaD.y - 5, "SCREENS", { size = 10, fill = T.muted, weight = "bold", spacing = 1 })
         end
         drawList(c, plans.S, "S", now)
         drawList(c, plans.D, "D", now)
+        if needWarm and not warmTimer then
+          warmTimer = E.after(WARM_DELAY, function()
+            warmTimer = nil
+            E.invalidate()
+          end)
+        end
         if carry and carry.dragging then
           local gw = U.clamp(areaS.w * 0.8, 72, 180)
           local gh = 36
@@ -731,6 +832,7 @@ do
         return plan.page, #plan.pages, table.concat(plan.pages, ",")
       end
       function self:pickedSource() return picked end
+      function self:coldStats() return coldCount, coldSpent, COLD_CHARS end
       function self:isCarrying() return carry ~= nil and carry.dragging end
 
       return self

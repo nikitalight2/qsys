@@ -656,8 +656,8 @@ Modes["Zone Select"] = {
     -- A zone tile is rendered once per (state, geometry, name) and replayed.
     -- At most TILE_RENDERS tiles are re-rendered per frame: a stale tile keeps
     -- its old fragment for one frame and the mode asks for another frame.
-    local TILE_RENDERS = 10
-    local renders, stale = 0, false
+    local TILE_RENDERS = 6
+    local renders, stale, scratch = 0, false, nil
 
     local function tileFrag(i)
       local z = self.zones[i]
@@ -672,7 +672,10 @@ Modes["Zone Select"] = {
       end
       renders = renders + 1
       local x, y, w, h = z.x * W, z.y * H, z.w * W, z.h * H
-      local s = Svg.new(W, H, { limit = 6000, family = FAMILY })
+      -- One scratch canvas per frame; each tile is the slice of parts it added.
+      if not scratch then scratch = Svg.new(W, H, { limit = 50000, family = FAMILY }) end
+      local s = scratch
+      local p0 = #s.parts
       local size = U.clamp(math.floor(math.min(h * 0.38, w * 0.18)), 9, 16)
       local picked = self.edit and self.last == i
       Shapes.tile(s, T, x, y, w, h, labelOf(i),
@@ -685,13 +688,13 @@ Modes["Zone Select"] = {
         s:text(x + w - hs / 2 - 1, y + h - hs / 2 + 3, tostring(i),
           { size = 9, fill = T.onAccent, anchor = "middle", weight = "bold" })
       end
-      local svg = table.concat(s.parts)
+      local svg = table.concat(s.parts, "", p0 + 1, #s.parts)
       self.cache[i] = { key = key, svg = svg }
       return svg
     end
 
     function self:draw(c)
-      renders, stale = 0, false
+      renders, stale, scratch = 0, false, nil
       if self.background then
         c:rect(inset, inset, W - 2 * inset, H - 2 * inset,
           { fill = T.panel, stroke = T.line, sw = 1, rx = math.max(4, math.floor(inset * 1.2)) })

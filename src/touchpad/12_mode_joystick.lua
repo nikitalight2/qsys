@@ -19,6 +19,9 @@ do
 
   local HINT = "Drag the stick. Double tap: home"
   local SPRING_TIME = 0.15                -- s, the spring-back animation
+  local HOME_GUARD = 0.5                  -- s: the trailing edge of a Home pulse is not a second home
+  local TEXT_MIN = 300                    -- px: smaller pads carry no readout and no hint
+  local TEXT_INSET = 26                   -- px: room above and below the base for the two text lines
   local STUCK_TIME = 30                   -- s, a resting finger under a stuck Panel Touch
   local SECTOR = 0.383                    -- cos 67.5 deg: eight-way direction sectors
   local CURVES = { "Linear", "Squared", "Cubed" }
@@ -88,13 +91,16 @@ do
     create = function(E)
       local W, H, T = E.W, E.H, E.T
       local cx, cy = W / 2, H / 2
+      local showText = min(W, H) >= TEXT_MIN       -- the readout and the hint need room off the base
       local inset = clamp(floor(min(W, H) * 0.06), 8, 28)
+      if showText and inset < TEXT_INSET then inset = TEXT_INSET end
       local R = min(W, H) / 2 - inset              -- base radius: full travel
       local KNOB = clamp(floor(R * 0.16), 8, 28)
       local self = {
         px = 0, py = 0,              -- stick position in -1..1 (y up), unit disc
         down = false,
         lastMoveAt = 0,
+        homeAt = -1e9,               -- when the stick was last homed (the Home pulse guard)
         spring = nil,                -- { x0, y0, t } while springing back
         jx = 0, jy = 0, mag = 0,     -- the published outputs
         leds = { false, false, false, false },   -- left, right, up, down
@@ -139,7 +145,9 @@ do
         end
         if flag("InvertPan") then ux = -ux end
         if flag("InvertTilt") then uy = -uy end
-        return ux * out, uy * out, out, ux, uy
+        if out == 0 then return 0, 0, 0, ux, uy end
+        -- + 0.0 turns a negative zero (an inverted zero axis) into plain 0
+        return ux * out + 0.0, uy * out + 0.0, out, ux, uy
       end
 
       local function drive(jx, jy)
@@ -166,7 +174,9 @@ do
         E.out("DirRight", leds[2])
         E.out("DirUp", leds[3])
         E.out("DirDown", leds[4])
-        drive(jx, jy)
+        -- The camera was stopped when the spring started; the decaying stick
+        -- animates the outputs only.
+        if self.spring == nil then drive(jx, jy) end
       end
 
       local function updateAnim()
@@ -207,6 +217,7 @@ do
       end
 
       local function home(fromPad)
+        self.homeAt = E.now()
         centre()
         local cam = E.camera
         if cam and type(cam.home) == "function" then cam:home() end
@@ -260,7 +271,9 @@ do
       -- ---------- pins ----------
       function self:onControl(name, index, ctl)
         if name == "Home" then
-          if ctl.Boolean then home(false) end
+          -- A Trigger's handler may run with Boolean already false; the
+          -- trailing edge of a pulse just handled does not home twice.
+          if ctl.Boolean or E.now() - self.homeAt >= HOME_GUARD then home(false) end
         elseif name == "Sticky" then
           if not ctl.Boolean and not self.down then release() end
         elseif name == "InvertPan" or name == "InvertTilt" or name == "Deadzone" or name == "Curve" then
@@ -274,6 +287,10 @@ do
               -- the new speed applies to the drive in progress
               self.driveX, self.driveY = nil, nil
               drive(self.jx, self.jy)
+            elseif name == "ZoomSpeed" and type(cam.zoom) == "function" then
+              -- the new speed applies to the zoom in progress
+              local dir = (flag("ZoomIn") and 1 or 0) - (flag("ZoomOut") and 1 or 0)
+              if dir ~= 0 then cam:zoom(dir) end
             end
           end
         end
@@ -344,10 +361,13 @@ do
         else
           c:circle(kx, ky, KNOB, { fill = T.accent, stroke = T.onAccent, sw = 1, opacity = 0.85 })
         end
-        c:text(cx, 20, sformat("X %+.2f   Y %+.2f", self.jx, self.jy),
-          { size = 12, fill = T.muted, anchor = "middle" })
-        if E.hint and not self.down then
-          Shapes.hint(c, T, HINT, W, H)
+        if showText then
+          -- Baseline 4 px above the base; the hint sits in the inset below it.
+          c:text(cx, cy - R - 8, sformat("X %+.2f   Y %+.2f", self.jx + 0.0, self.jy + 0.0),
+            { size = 12, fill = T.muted, anchor = "middle" })
+          if E.hint and not self.down then
+            Shapes.hint(c, T, HINT, W, H)
+          end
         end
       end
 

@@ -409,3 +409,148 @@ def test_joystick_frames_and_handlers_stay_within_budget():
     assert len(q.icon()) < 15000
     assert q.icon_writes("CameraView") >= 10                         # the view followed the drive
     assert q.errors == []
+
+
+# ---------------------------------------------------------------- regressions
+
+VISCA_DRIVE = b"\x81\x01\x06\x01"                               # pan-tilt drive header: ... VV WW DD DD FF
+
+
+def visca_is_stop(d):
+    return d[:4] == VISCA_DRIVE and d[6:8] == b"\x03\x03"
+
+
+def test_joystick_spring_does_not_redrive_the_camera():
+    q = demo()
+    cam = lambda code: q.run("local cam = TouchPad.E.camera " + code)
+    q.touch([(CX + R, CY)], panel_touch=True, lift=False)
+    assert cam("return cam.panSpeed") == 0.5
+    q.set_pin("PanelTouch", False)                           # the lift stops the camera at once ...
+    assert cam("return cam.panSpeed, cam.tiltSpeed") == (0.0, 0.0)
+    for _ in range(3):                                       # ... and the spring leaves it stopped
+        q.advance(0.05)
+        assert cam("return cam.panSpeed, cam.tiltSpeed") == (0.0, 0.0)
+    assert joy(q) == (0, 0, 0)
+    q.touch([(CX, CY + R)], panel_touch=True, lift=False)    # a new touch drives again
+    assert cam("return cam.tiltSpeed") == -0.5
+    q.set_pin("PanelTouch", False)
+    v = boot(props={"Camera Control": "VISCA over IP"})      # on the wire: only stops follow a lift
+    v.set_pin("CameraIP", "10.0.0.5")
+    v.advance(0.5)
+    v.touch([(CX + R, CY)], panel_touch=True, lift=False)
+    assert any(d[:4] == VISCA_DRIVE and not visca_is_stop(d) for _, _, d in v.tcp_sent)
+    n = len(v.tcp_sent)
+    v.set_pin("PanelTouch", False)
+    v.advance(0.3)
+    after = [d for _, _, d in v.tcp_sent[n:]]
+    assert after and all(visca_is_stop(d) for d in after)
+    n = len(v.tcp_sent)
+    v.double_tap(CX + 40, CY + 40, panel_touch=True)         # two presses, two lifts, one home: no spring drive
+    after = [d for _, _, d in v.tcp_sent[n:]]
+    drives = [d for d in after if d[:4] == VISCA_DRIVE and not visca_is_stop(d)]
+    assert len(drives) <= 2
+    assert visca_is_stop(after[-1]) or after[-1] == b"\x81\x01\x06\x04\xff"   # ends stopped or homed
+    assert v.errors == []
+
+
+def test_joystick_home_trigger_and_pulse_edges():
+    q = demo()
+    q.run("TouchPad.homes = 0 local cam = TouchPad.E.camera local h = cam.home "
+          "cam.home = function(...) TouchPad.homes = TouchPad.homes + 1 return h(...) end")
+    homes = lambda: q.run("return TouchPad.homes")
+    q.set_pin("Sticky", True)
+    q.touch([(CX + R, CY)], panel_touch=True)
+    assert near(joy(q)[0], 1)
+    q.trigger("Home")                                        # ctl:Trigger(): the handler sees Boolean false
+    assert joy(q) == (0, 0, 0) and homes() == 1
+    q.touch([(CX - R / 2, CY), (CX - R, CY)], panel_touch=True, lift=False)
+    assert near(joy(q)[0], -1)
+    q.set_pin("Home", True)                                  # the rising edge of a pulse homes ...
+    assert joy(q) == (0, 0, 0) and homes() == 2
+    q.touch([(CX - R, CY), (CX, CY - R)], panel_touch=True, lift=False)
+    assert near(joy(q)[1], 1)
+    q.set_pin("Home", False)                                 # ... its trailing edge does not home again
+    assert near(joy(q)[1], 1) and homes() == 2
+    q.set_pin("PanelTouch", False)
+    q.advance(0.6)                                           # past the guard: the next pulse homes once
+    q.set_pin("Home", True)
+    q.set_pin("Home", False)
+    assert joy(q) == (0, 0, 0) and homes() == 3
+    q.touch([(CX + R, CY)], panel_touch=True)
+    q.advance(0.6)
+    q.reset_pulses()
+    q.double_tap(CX + 40, CY + 40, panel_touch=True)         # the pad's own pulse homes once as well
+    assert q.pulses("Home") == 1 and homes() == 4 and joy(q) == (0, 0, 0)
+    assert q.errors == []
+
+
+def test_joystick_outputs_and_readout_never_show_negative_zero():
+    q = boot()
+    q.touch([(CX - 6, CY)], lift=False)                      # inside the deadzone, left of centre
+    q.advance(0.05)
+    svg = q.icon()
+    assert "X +0.00   Y +0.00" in svg and "-0.00" not in svg
+    assert q.run("return 1 / TouchPad.inst.jx, 1 / TouchPad.inst.jy") == (math.inf, math.inf)
+    assert q.run("return 1 / Controls.JoyX.Value") == math.inf
+    q.set_pin("InvertPan", True)
+    q.touch([(CX, CY - R)], lift=False)                      # straight up: the inverted X axis is +0
+    q.advance(0.05)
+    assert "X +0.00   Y +1.00" in q.icon()
+    assert q.run("return 1 / TouchPad.inst.jx") == math.inf
+    q.set_pin("InvertTilt", True)
+    q.touch([(CX - R, CY)], lift=False)
+    q.advance(0.05)
+    assert "X +1.00   Y +0.00" in q.icon() and q.run("return 1 / TouchPad.inst.jy") == math.inf
+    q.lift()
+    q.advance(0.05)
+    assert "-0.00" not in q.icon() and joy(q) == (0, 0, 0)
+
+
+def test_joystick_small_pads_keep_the_text_off_the_base():
+    for size in (120, 200, 250):                             # too small: no readout and no hint on the pad
+        q = boot(props={"Pad Width": size, "Pad Height": size})
+        svg = q.icon()
+        assert "<text" not in svg, size
+        assert q.pin("Gesture")["String"] == "DRAG THE STICK. DOUBLE TAP: HOME"
+        inset = max(8, min(28, int(size * 0.06)))
+        assert (size / 2, size / 2, size / 2 - inset) in circles(svg)   # the base keeps its full size
+        q.touch([(size / 2 + 10, size / 2)], lift=False)
+        assert "<text" not in q.icon()
+        q.lift()
+    for w, h in ((300, 300), (1600, 300), (300, 1200), (467, 467), (500, 500)):
+        q = boot(props={"Pad Width": w, "Pad Height": h})
+        svg = q.icon()
+        cx, cy = w / 2, h / 2
+        r = min(w, h) / 2 - max(26, min(28, int(min(w, h) * 0.06)))     # the inset leaves 26 px for the text
+        cs = circles(svg)
+        assert (cx, cy, r + 4) in cs and (cx, cy, r) in cs, (w, h)
+        ys = [float(y) for y in re.findall(r'<text[^>]*? y="([-\d.]+)"', svg)]
+        assert ys == [cy - r - 8, h - 8], (w, h, ys)         # readout baseline above the base, hint below it
+        assert cy - r - 8 - 12 >= 0                          # the readout fits in the pad ...
+        assert h - 8 - 12 > cy + r + 4                       # ... and the hint clears the base ring
+    assert [float(y) for y in re.findall(r'<text[^>]*? y="([-\d.]+)"', boot().icon())] == [20, 492]
+
+
+def test_joystick_zoom_speed_applies_to_the_zoom_in_progress():
+    q = demo()
+    cam = lambda code: q.run("local cam = TouchPad.E.camera " + code)
+    q.set_pin("ZoomSpeed", 100)                              # idle: nothing starts zooming
+    assert cam("return cam.zoomSpeed") == 0
+    q.set_pin("ZoomSpeed", 50)
+    q.set_pin("ZoomIn", True)
+    assert cam("return cam.zoomSpeed") == 0.5
+    q.set_pin("ZoomSpeed", 100)                              # re-applied to the zoom in hand
+    assert cam("return cam.zoomSpeed") == 1.0
+    q.set_pin("ZoomSpeed", 20)
+    assert near(cam("return cam.zoomSpeed"), 0.2)
+    q.set_pin("ZoomIn", False)
+    assert cam("return cam.zoomSpeed") == 0
+    q.set_pin("ZoomOut", True)
+    assert near(cam("return cam.zoomSpeed"), -0.2)
+    q.set_pin("ZoomSpeed", 100)
+    assert cam("return cam.zoomSpeed") == -1.0
+    q.set_pin("ZoomOut", False)
+    assert cam("return cam.zoomSpeed") == 0
+    q.set_pin("ZoomSpeed", 50)
+    assert cam("return cam.zoomSpeed") == 0
+    assert q.errors == []

@@ -30,6 +30,7 @@ do
   local CAM_RATE = 0.1                      -- s between absolute positions sent to a camera
   local ZOOM_POLL = 0.2                     -- s between zoom readings while Zoom +/- is held
   local HOME_GUARD = 0.5                    -- s: the trailing edge of a Home pulse is not a second home
+  local HOME_ZOOM_READS = { 0.2, 1.0, 2.5 } -- s after a home: the zoom is re-read from the camera
 
   local function clamp(v, lo, hi)
     if v < lo then return lo elseif v > hi then return hi end
@@ -89,10 +90,12 @@ do
         down = false, dragging = false,
         fx = 0, fy = 0,                 -- finger
         accX = 0, accY = 0,             -- movement before the drag threshold
-        lastT = nil,
+        lastT = nil,                    -- time of the last report that moved the aim (or the touch start)
         stall = nil,                    -- timer that zeroes the speeds
         homing = nil,                   -- { x0, y0, t } while the aim glides home
         homeAt = -10,
+        homeEdge = false,               -- a Home press (Boolean true) was handled; its release is not a second home
+        zoomRead = {},                  -- pending zoom re-reads after a home
         camAt = -10, camPending = false, camTimer = nil,
         camZoom = 0,                    -- zoom position 0..1 read from the camera
         zooming = false, zoomPollAt = 0,
@@ -236,7 +239,16 @@ do
           self.camPending = false
           self.camAt = now
           pcall(c.home, c)
-          self.camZoom = 0
+          -- Whether the home preset resets the zoom is the camera's business
+          -- (the Demo does, a Q-SYS or VISCA home leaves it): re-read it, and
+          -- again later for a camera that glides there.
+          for i = 1, #HOME_ZOOM_READS do
+            if self.zoomRead[i] then self.zoomRead[i]:cancel() end
+            self.zoomRead[i] = E.after(HOME_ZOOM_READS[i], function()
+              self.zoomRead[i] = nil
+              readZoom()
+            end)
+          end
         end
         if self.homing then E.animate(true) end
         E.invalidate()
@@ -251,8 +263,7 @@ do
       end
 
       function self:onTouchMove(x, y, t, dx, dy)
-        local dt = self.lastT and (t - self.lastT) or 0
-        self.fx, self.fy, self.lastT = x, y, t
+        self.fx, self.fy = x, y
         if not self.dragging then
           -- Below the drag threshold nothing moves (a tap moves nothing);
           -- the whole movement so far applies once the drag is certain.
@@ -264,6 +275,11 @@ do
           dx, dy = self.accX, self.accY
           self.accX, self.accY = 0, 0
         end
+        -- The speed is the movement applied now over the time since the last
+        -- applied movement (the touch start while accumulating, the last
+        -- report before a pause on a resumed drag): no spike at either.
+        local dt = self.lastT and (t - self.lastT) or 0
+        self.lastT = t
         applyMove(dx, dy, dt)
         outAim()
         aimChanged(t)
@@ -279,10 +295,12 @@ do
       end
 
       function self:onTouchResume(x, y, t)
-        -- The same drag goes on: the finger position is re-based so the
-        -- aim does not jump by the distance covered while the lift was pending.
+        -- The same drag goes on. The engine's next onTouchMove carries the
+        -- distance covered while the lift was pending, so the aim catches
+        -- up by exactly that; lastT is left at the last applied report so
+        -- the speed of that catch-up spans the pause instead of one frame.
         self.down, self.dragging = true, true
-        self.fx, self.fy, self.lastT = x, y, t
+        self.fx, self.fy = x, y
         self.accX, self.accY = 0, 0
         E.invalidate()
       end
@@ -308,9 +326,19 @@ do
       function self:onControl(name, index, ctl)
         local now = E.now()
         if name == "Home" then
-          -- A Trigger's handler may run with Boolean already false; the
-          -- trailing edge of a pulse just handled does not home twice.
-          if ctl.Boolean or now - self.homeAt >= HOME_GUARD then goHome(now, false) end
+          -- A press (Boolean true) homes; its release never homes again,
+          -- however long the pin was held (a toggle or a held button wired
+          -- to Home). A Trigger's handler may run with Boolean already
+          -- false and no press seen: that homes too, unless it is the
+          -- trailing edge of a pulse handled moments ago.
+          if ctl.Boolean then
+            self.homeEdge = true
+            goHome(now, false)
+          elseif self.homeEdge then
+            self.homeEdge = false
+          elseif now - self.homeAt >= HOME_GUARD then
+            goHome(now, false)
+          end
           return
         end
         if name == "InvertPan" or name == "InvertTilt" or name == "Sensitivity"

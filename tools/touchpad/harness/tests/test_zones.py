@@ -21,13 +21,19 @@ MODE_BUILD = os.path.join(REPO, "plugins", ".build", "NikitaTouchPad-zones.qplug
 
 
 def plugin_path():
-    """The first plugin that contains the Zone Select mode: $TOUCHPAD_PLUGIN,
-    the full build, then the per-mode build."""
-    for path in (os.environ.get("TOUCHPAD_PLUGIN"), DEFAULT_PLUGIN, MODE_BUILD):
-        if path and os.path.exists(path):
+    """$TOUCHPAD_PLUGIN when set, else the newest of the full build and the
+    per-mode build that contains the Zone Select mode."""
+    env = os.environ.get("TOUCHPAD_PLUGIN")
+    if env and os.path.exists(env):
+        return env
+    found = []
+    for path in (DEFAULT_PLUGIN, MODE_BUILD):
+        if os.path.exists(path):
             with open(path, "rb") as fh:
                 if b'Modes["Zone Select"]' in fh.read():
-                    return path
+                    found.append((os.path.getmtime(path), path))
+    if found:
+        return max(found)[1]
     return DEFAULT_PLUGIN
 
 
@@ -126,11 +132,11 @@ def test_zones_names_feed_list_and_drawing():
     q.tap(*centre(q, 1))
     assert q.pin("SelectedList")["String"] == "Stage, Bar"
     assert q.pin("Gesture")["String"] == "STAGE ON"
-    q.set_pin("ZoneName", "Café", 1)                            # non-ASCII stays out of the SVG
+    q.set_pin("ZoneName", "Caf\u00e9", 1)                            # non-ASCII stays out of the SVG
     q.advance(0.05)
     svg = q.icon()
     assert "Caf&#233;" in svg and all(ord(ch) < 127 for ch in svg)
-    assert q.pin("SelectedList")["String"] == "Café, Bar"
+    assert q.pin("SelectedList")["String"] == "Caf\u00e9, Bar"
 
 
 def test_zones_drag_paints_the_opposite_of_the_start_zone():
@@ -272,6 +278,7 @@ def test_zones_select_all_clear_all_and_input_pins():
     assert selected(q) == list(range(1, 9))
     assert q.pin("SelectedList")["String"] == ", ".join("Zone %d" % i for i in range(1, 9))
     assert q.pin("Gesture")["String"] == "ALL SELECTED"
+    q.advance(0.2)                                                   # tiles re-render six per frame
     svg = q.icon()
     assert svg.count('fill="#C513E8"') >= 8                          # eight accent-filled tiles
     q.set_pin("ClearAll", True)
@@ -433,7 +440,10 @@ def test_zones_thirty_two_zones_stay_within_budget():
     q.set_pin("SelectAll", False)
     q.advance(0.2)
     assert q.icon().count('fill="#C513E8"') >= 32                    # every tile caught up
-    q.drag(ring(800, 580, 760, 560, n=200), seconds=3.0, panel_touch=True)  # a 200-point lasso
+    # a 200-point lasso along the margins (a rectangle: an ellipse misses the corner centres)
+    box = [(20 + 1560 * k / 50, 20) for k in range(50)] + [(1580, 20 + 1160 * k / 50) for k in range(50)] \
+        + [(1580 - 1560 * k / 50, 1180) for k in range(50)] + [(20, 1180 - 1160 * k / 50) for k in range(50)] + [(20, 24)]
+    q.drag(box, seconds=3.0, panel_touch=True)
     assert q.pin("Gesture")["String"] == "LASSO: 32 ZONES"
     q.set_pin("Edit", True)
     q.drag([(100 + 20 * i, 60 + 10 * i) for i in range(30)], seconds=1.0, panel_touch=True)

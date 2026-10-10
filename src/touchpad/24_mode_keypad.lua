@@ -4,11 +4,21 @@
 -- A numeric keypad drawn by the pad (digits 0-9, clear, enter) for PIN entry
 -- on a lobby or lectern. Accepted codes live in `Pin` (several separated by
 -- commas); every key press updates `Entry`; a code is checked on Enter or,
--- with `AutoSubmit`, as soon as the entry equals a code or reaches the length
--- of the longest code. `MaxTries` failures lock the keypad (`Locked` on) for
--- `LockoutSeconds`; `Locked` is a pin both ways (a script locks or clears).
--- `Learn` stores the next entered code (ended by Enter) into `Pin`. `Masked`
--- shows dots instead of digits on the pad. A swipe left deletes a digit.
+-- with `AutoSubmit`, as soon as the entry is as long as one of the codes
+-- (spec 3.14; codes of different lengths therefore want AutoSubmit off).
+-- `MaxTries` failures lock the keypad (`Locked` on) for `LockoutSeconds`;
+-- `Locked` is a pin both ways (a script locks or clears). `Learn` stores the
+-- next entered code (ended by Enter) into `Pin`. `Masked` shows dots instead
+-- of digits on the pad and keeps the digit out of `Gesture` ("KEY *"). A
+-- swipe left deletes a digit.
+--
+-- A key is entered when the finger lifts from it (the touch landed on the key
+-- and never moved more than 12 px), however long it rested there, so slow or
+-- firm presses count; a drag or a swipe presses nothing. Without Panel Touch
+-- the engine infers lifts from silence and swallows a report within 6 px and
+-- 0.5 s of the last tap as the finger peeling off, so the same key tapped
+-- twice in quick succession needs Panel Touch wired or a 0.5 s pause (the
+-- test with silence=0.3 pins this down).
 --
 -- The whole body sits in a `do` block: the built plugin is one chunk with a
 -- 200-local limit, so only Modes["Keypad"] is defined at the top level.
@@ -150,14 +160,6 @@ do
         return c and tostring(c.String or "") or ""
       end
 
-      local function longestCode()
-        local n = 0
-        for i = 1, #self.codes do
-          if #self.codes[i] > n then n = #self.codes[i] end
-        end
-        return n
-      end
-
       local function matches(entry)
         for i = 1, #self.codes do
           if self.codes[i] == entry then return true end
@@ -191,6 +193,11 @@ do
         end)
       end
 
+      local function setEntry(s)
+        self.entry = s
+        E.out("Entry", s)
+      end
+
       -- ---------- lockout ----------
       local function stopLockTimer()
         if self.lockTimer then self.lockTimer:cancel() end
@@ -199,7 +206,8 @@ do
 
       local function unlock(write)
         stopLockTimer()
-        self.locked, self.lockUntil, self.tries, self.entry = false, 0, 0, ""
+        self.locked, self.lockUntil, self.tries = false, 0, 0
+        setEntry("")                              -- the pad shows "Enter code": the pin agrees
         clearFeedback()
         if write then E.out("Locked", false) end
         E.setGesture("UNLOCKED")
@@ -212,7 +220,10 @@ do
         clearFeedback()
         self.locked = true
         self.lockUntil = E.now() + seconds
-        self.entry, self.downKey = "", nil
+        self.downKey = nil
+        -- Digits typed before a script lock are dropped from the pin too; a
+        -- lock earned by a submit keeps the last code there (see submit).
+        if self.entry ~= "" then setEntry("") end
         E.out("Locked", true)
         E.setGesture("LOCKED")
         -- One tick per second redraws the countdown and ends the lockout.
@@ -227,11 +238,6 @@ do
       end
 
       -- ---------- entry and submit ----------
-      local function setEntry(s)
-        self.entry = s
-        E.out("Entry", s)
-      end
-
       local function submit()
         if self.locked then return end
         local entry = self.entry
@@ -263,11 +269,17 @@ do
         end
       end
 
-      -- AutoSubmit: a match submits at once; otherwise the entry is checked
-      -- when it is as long as the longest code (so it can only be rejected).
+      -- AutoSubmit (spec 3.14): the entry is submitted as soon as its length
+      -- equals a code's length, whether or not it matches that code.
       local function autoCheck()
         if not self.auto or self.learn or #self.codes == 0 then return end
-        if matches(self.entry) or #self.entry >= longestCode() then submit() end
+        local n = #self.entry
+        for i = 1, #self.codes do
+          if #self.codes[i] == n then
+            submit()
+            return
+          end
+        end
       end
 
       local function pressKey(i)
@@ -283,7 +295,7 @@ do
           submit()
         else
           if #self.entry < MAX_ENTRY then setEntry(self.entry .. label) end
-          E.setGesture("KEY " .. label)
+          E.setGesture(self.masked and "KEY *" or ("KEY " .. label))   -- a masked pad never shows the digit
           autoCheck()
         end
         E.invalidate()
@@ -319,18 +331,22 @@ do
         end
       end
 
+      -- The key under the landing point is entered when the finger lifts,
+      -- whatever the duration of the press (a tap gesture needs < 0.35 s,
+      -- which deliberate or firm presses exceed). A cancelled touch (lock,
+      -- rebind) or a swipe enters nothing.
       function self:onTouchEnd(x, y, t, info)
-        if self.downKey then
-          self.downKey = nil
+        local i = self.downKey
+        self.downKey = nil
+        if i and not info.aborted and info.swipe == nil then
+          pressKey(i)
+        else
           E.invalidate()
         end
       end
 
       function self:onGesture(gst)
-        if gst.type == "tap" then
-          local i = hitKey(gst.x, gst.y)
-          if i then pressKey(i) end
-        elseif gst.type == "swipe" and gst.dir == "left" then
+        if gst.type == "swipe" and gst.dir == "left" then
           backspace()
         end
       end
@@ -355,30 +371,55 @@ do
           self.auto = ctl.Boolean and true or false
         elseif name == "Learn" then
           self.learn = ctl.Boolean and true or false
-          if self.learn then self.entry = "" end
+          if self.learn and self.entry ~= "" then setEntry("") end
         end
         E.invalidate()
       end
 
       -- ---------- drawing ----------
+      -- Largest size from `size` down to `minSize` at which text fits maxW
+      -- (bounded: at most size - minSize measurements, each cached by Font).
+      local function fitSize(text, maxW, size, minSize, weight)
+        while size > minSize and Font.width(text, size, weight) > maxW do
+          size = size - 1
+        end
+        return size
+      end
+
+      -- Banner with an icon and one or two lines, scaled to the display: on a
+      -- narrow pad (under 160 px) the icon goes and the text is centred.
+      local function drawBanner(c, bx, cy, bw, bh, icon, colour, line1, size1, colour2, line2)
+        local s = U.clamp(math.floor(math.min(bh * 0.5, bw / 5)), 10, 28)
+        local wide = bw >= 160
+        local maxW = wide and (bw - 32 - s) or (bw - 16)
+        local s1 = fitSize(line1, maxW, size1, 8, "bold")
+        local s2 = line2 and fitSize(line2, maxW, 11, 8, nil) or 0
+        local y1 = line2 and (cy - 2) or (cy + s1 * 0.35)
+        if wide then
+          local tw = math.max(Font.width(line1, s1, "bold"), line2 and Font.width(line2, s2, nil) or 0)
+          local x0 = line2 and (bx + 12) or (bx + bw / 2 - (tw + s + 8) / 2)
+          Shapes.icon(c, icon, x0 + s / 2, cy, s, colour)
+          c:textFit(x0 + s + 8, y1, maxW, line1, { size = s1, fill = colour, weight = "bold" })
+          if line2 then c:textFit(x0 + s + 8, cy + 2 + s2, maxW, line2, { size = s2, fill = colour2 }) end
+        else
+          local cx = bx + bw / 2
+          c:textFit(cx, y1, maxW, line1, { size = s1, fill = colour, weight = "bold", anchor = "middle" })
+          if line2 then c:textFit(cx, cy + 2 + s2, maxW, line2, { size = s2, fill = colour2, anchor = "middle" }) end
+        end
+      end
+
       local function drawEntry(c, bx, by, bw, bh)
         local cx, cy = bx + bw / 2, by + bh / 2
         if self.locked then
           local remaining = math.max(0, math.ceil(self.lockUntil - E.now() - 1e-6))
-          local s = U.clamp(math.floor(bh * 0.5), 14, 28)
-          Shapes.icon(c, "lock", bx + 12 + s / 2, cy, s, T.danger)
-          c:textFit(bx + 20 + s, cy - 2, bw - 32 - s, "Locked", { size = U.clamp(math.floor(bh * 0.3), 11, 18), fill = T.danger, weight = "bold" })
-          c:textFit(bx + 20 + s, cy + 13, bw - 32 - s, "Try again in " .. remaining .. " s", { size = 11, fill = T.muted })
+          drawBanner(c, bx, cy, bw, bh, "lock", T.danger, "Locked", U.clamp(math.floor(bh * 0.3), 11, 18),
+                     T.muted, "Try again in " .. remaining .. " s")
           return
         end
         if self.feedback then
           local colour = (self.feedback == "ok") and T.ok or T.danger
           local icon = (self.feedback == "ok") and "check" or "cross"
-          local s = U.clamp(math.floor(bh * 0.5), 14, 28)
-          local tw = Font.width(self.feedbackText, 18, "bold")
-          local x0 = cx - (tw + s + 8) / 2
-          Shapes.icon(c, icon, x0 + s / 2, cy, s, colour)
-          c:textFit(x0 + s + 8, cy + 6, bw - 24 - s, self.feedbackText, { size = 18, fill = colour, weight = "bold" })
+          drawBanner(c, bx, cy, bw, bh, icon, colour, self.feedbackText, 18)
           return
         end
         local n = #self.entry
@@ -386,7 +427,7 @@ do
           local text = "Enter code"
           if self.learn then text = "New code, then Enter"
           elseif #self.codes == 0 then text = "No code set" end
-          c:textFit(cx, cy + 5, bw - 24, text, { size = 14, fill = T.muted, anchor = "middle" })
+          c:textFit(cx, cy + 5, bw - 24, text, { size = fitSize(text, bw - 24, 14, 9, nil), fill = T.muted, anchor = "middle" })
         elseif self.masked then
           local r = U.clamp(math.floor(bh * 0.12), 3, 7)
           local step = math.min(2.6 * r, (bw - 16) / n)
@@ -395,8 +436,9 @@ do
             c:circle(x0 + (i - 1) * step, cy, r, { fill = T.text })
           end
         else
-          c:textFit(cx, cy + math.floor(bh * 0.18), bw - 24, self.entry,
-            { size = U.clamp(math.floor(bh * 0.5), 12, 36), fill = T.text, anchor = "middle", weight = "bold" })
+          local size = fitSize(self.entry, bw - 24, U.clamp(math.floor(bh * 0.5), 12, 36), 8, "bold")
+          c:textFit(cx, cy + math.floor(size * 0.36), bw - 24, self.entry,
+            { size = size, fill = T.text, anchor = "middle", weight = "bold" })
         end
         if self.learn and n > 0 then
           c:textFit(bx + bw - 8, by + 12, bw / 2, "Learn", { size = 10, fill = T.accent2, anchor = "end" })
