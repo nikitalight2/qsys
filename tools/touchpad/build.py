@@ -56,8 +56,23 @@ class BuildError(Exception):
 
 # ---------------------------------------------------------------- sources
 
-def source_files(src_dir):
+MODE_FILE = re.compile(r"^\d\d_mode_([a-z0-9]+)\.lua$")
+
+
+def source_files(src_dir, modes=None):
+    """All src/touchpad/*.lua in name order. With `modes` (a list of mode ids
+    such as ["xy", "swipe"]), mode files whose id is not listed are left out;
+    every other file (header, utilities, camera, framework, runtime) is kept."""
     files = sorted(glob.glob(os.path.join(src_dir, "*.lua")), key=os.path.basename)
+    if modes is not None:
+        wanted = set(m.strip() for m in modes if m.strip())
+        kept = []
+        for path in files:
+            m = MODE_FILE.match(os.path.basename(path))
+            if m and m.group(1) not in wanted:
+                continue
+            kept.append(path)
+        files = kept
     if not files:
         raise BuildError("no .lua files in " + src_dir)
     return files
@@ -535,8 +550,8 @@ def compile_and_smoke(source, starts, verbose):
 
 # ------------------------------------------------------------------ main
 
-def build(src_dir, out_path, check_only, verbose):
-    files = source_files(src_dir)
+def build(src_dir, out_path, check_only, verbose, modes=None):
+    files = source_files(src_dir, modes)
     problems = []
     for path in files:
         text = read_text(path)
@@ -564,6 +579,8 @@ def main(argv):
     ap.add_argument("--out", default=DEFAULT_OUT, help="output .qplug path")
     ap.add_argument("--check", action="store_true", help="run every check but write nothing")
     ap.add_argument("--selftest", action="store_true", help="test the ASCII checker on probe sources only")
+    ap.add_argument("--modes", default=None,
+                    help="comma-separated mode ids to include (e.g. xy,swipe); other mode files are left out")
     ap.add_argument("-v", "--verbose", action="store_true")
     args = ap.parse_args(argv)
     if args.selftest:
@@ -573,7 +590,8 @@ def main(argv):
         print("selftest: %d cases, %d failed" % (len(SELFTEST_CASES), len(failures)))
         return 1 if failures else 0
     try:
-        build(args.src, args.out, args.check, args.verbose)
+        build(args.src, args.out, args.check, args.verbose,
+              args.modes.split(",") if args.modes else None)
     except BuildError as exc:
         print("BUILD FAILED\n" + str(exc), file=sys.stderr)
         return 1
