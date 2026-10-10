@@ -1274,3 +1274,153 @@ def test_display_disabled_reasserted_on_style_channel_and_clear():
     q.run("Controls.Display.IsDisabled = false; Q.clearIcon(Controls.Display)")
     d = q.pin("Display")
     assert d["Legend"] == '{"DrawChrome":false}' and d["IsDisabled"] is True
+
+
+# --------------------------------------------------------- non-square pads
+# Spec 13.3: the picker's touch square has the side S of the pad's longer
+# side and the pad sits at its top-left; the rest of the square is outside.
+
+def test_wide_pad_maps_the_top_of_the_touch_square():
+    q = boot(props={"Pad Width": 640, "Pad Height": 360, "Debug Print": "Gestures"})
+    assert q.to_picker(0, 0) == (0.0, 1.0)
+    u, v = q.to_picker(640, 360)                                      # the pad's bottom-right corner ...
+    assert near(u, 1.0) and near(v, 1 - 360 / 640)                    # ... is 360 px down a 640 px square
+    q.tap(600, 340)
+    assert q.pulses("Tap") == 1 and q.pulses("Press") == 1
+    assert near(q.pin("X")["Value"], 0.9375, 1e-3) and near(q.pin("Y")["Value"], 0.0556, 1e-3)
+    q.advance(1.0)
+    q.drag([(20 + 60 * i, 358) for i in range(11)], seconds=1.0)      # along the bottom edge
+    assert q.pulses("Press") == 2 and q.pulses("Release") == 2 and q.pin("Touching")["Boolean"] is False
+    assert near(q.pin("X")["Value"], 620 / 640, 1e-3) and near(q.pin("Y")["Value"], 2 / 360, 1e-3)
+    assert not any("outside the pad" in line for line in q.output())
+
+
+def test_touch_below_a_wide_pad_is_ignored():
+    q = boot(props={"Pad Width": 640, "Pad Height": 360, "Debug Print": "Gestures"})
+    u, v = q.to_picker(300, 500)                                      # below the pad, inside the square
+    assert 0.0 < v < 1 - 360 / 640 and near(u, 300 / 640)
+    q.tap(300, 500)
+    assert q.pulses("Press") == 0 and q.pulses("Tap") == 0 and q.pin("Touching")["Boolean"] is False
+    assert any("outside the pad" in line for line in q.output())
+    q.advance(1.0)
+    q.touch([(300, 500), (300, 420), (300, 350), (300, 300)], dt=0.08)   # slides up onto the pad: still ignored
+    assert q.pulses("Press") == 0 and q.pin("Touching")["Boolean"] is False
+    q.advance(1.0)
+    q.tap(300, 300)                                                   # a new touch on the pad works
+    assert q.pulses("Tap") == 1 and near(q.pin("Y")["Value"], 1 - 300 / 360, 1e-3)
+
+
+def test_tall_pad_maps_the_left_of_the_touch_square():
+    q = boot(props={"Pad Width": 360, "Pad Height": 640, "Debug Print": "Gestures"})
+    assert q.to_picker(0, 0) == (0.0, 1.0)
+    u, v = q.to_picker(360, 640)                                      # the pad's bottom-right corner ...
+    assert near(u, 360 / 640) and near(v, 0.0)                        # ... is 360 px into a 640 px square
+    q.tap(340, 40)
+    assert q.pulses("Tap") == 1
+    assert near(q.pin("X")["Value"], 340 / 360, 1e-3) and near(q.pin("Y")["Value"], 1 - 40 / 640, 1e-3)
+    q.advance(1.0)
+    q.drag([(358, 20 + 60 * i) for i in range(11)], seconds=1.0)      # along the right edge
+    assert q.pulses("Press") == 2 and q.pulses("Release") == 2 and q.pin("Touching")["Boolean"] is False
+    assert near(q.pin("X")["Value"], 358 / 360, 1e-3) and near(q.pin("Y")["Value"], 1 - 620 / 640, 1e-3)
+    assert not any("outside the pad" in line for line in q.output())
+    q.advance(1.0)
+    q.tap(500, 300)                                                   # right of the pad, inside the square
+    assert q.pulses("Press") == 2 and q.pulses("Tap") == 1
+    assert any("outside the pad" in line for line in q.output())
+
+
+def test_wide_pad_in_designer_keeps_the_4_7_factor():
+    q = boot(emulate=True, props={"Pad Width": 640, "Pad Height": 360})
+    assert q.touch_mode == "designer"
+    u, v = q.to_picker(640, 360)
+    assert near(u, 4 / 7) and near(v, 1 - 360 / 640)                  # the pad: left 4/7 of the surface, top 360 of 640
+    q.tap(600, 340)
+    assert q.pulses("Tap") == 1
+    assert near(q.pin("X")["Value"], 0.9375, 1e-3) and near(q.pin("Y")["Value"], 0.0556, 1e-3)
+    q.advance(1.0)
+    q.picker.set(0.5, 0.7, force=True)                                # raw: u = 0.5 of 4/7, v = 0.7 of 0.4375..1
+    q.advance(0.05)
+    assert q.pulses("Press") == 2
+    assert near(q.pin("X")["Value"], 0.875, 1e-3) and near(q.pin("Y")["Value"], (0.7 - 0.4375) / 0.5625, 1e-3)
+    q.advance(1.0)
+    q.picker.set(0.65, 0.7, force=True)                               # right of the pad (u > 4/7)
+    q.advance(1.0)
+    q.picker.set(0.3, 0.3, force=True)                                # below the pad (v < 0.4375)
+    q.advance(1.0)
+    assert q.pulses("Press") == 2 and q.pin("Touching")["Boolean"] is False
+
+
+def test_calibration_line_overrides_the_non_square_default():
+    q = boot(props={"Pad Width": 640, "Pad Height": 360})
+    q.set_pin("Calibration", "P 0.0 0.0 1.0 1.0")                     # the panel maps the whole square to the pad
+    q.calibration = (0.0, 0.0, 1.0, 1.0)
+    q.tap(320, 180)
+    assert near(q.pin("X")["Value"], 0.5, 1e-3) and near(q.pin("Y")["Value"], 0.5, 1e-3)
+    q.advance(1.0)
+    q.picker.set(0.5, 0.1, force=True)                                # below the default pad, inside this calibration
+    q.advance(0.05)
+    assert q.pulses("Press") == 2 and near(q.pin("Y")["Value"], 0.1, 1e-3)
+    q.advance(1.0)
+    q.set_pin("Calibration", "")                                      # back to the default: the same point is outside
+    q.picker.set(0.5, 0.1, force=True)
+    q.advance(1.0)
+    assert q.pulses("Press") == 2
+
+
+# ------------------------------------------------ Panel Touch true at start
+
+def boot_panel_touch_on(**kw):
+    """A started engine whose PanelTouch toggle was already true when the
+    script loaded (left on, nothing wired to it)."""
+    kw.setdefault("mode", "XY Pad")
+    kw.setdefault("picker", "Color_Picker")
+    q = QSys(runtime=False, **kw)
+    q.set_pin("PanelTouch", True)
+    q._dispatch("load", q._chunk)
+    q.advance(0.2)
+    assert q.pin("PanelTouch")["Boolean"] is True
+    return q
+
+
+def test_panel_touch_true_at_start_is_not_wired():
+    q = boot_panel_touch_on()
+    q.tap(250, 125)                                                   # no edge ever: the lift is inferred
+    assert q.pulses("Press") == 1 and q.pulses("Tap") == 1 and q.pulses("Release") == 1
+    assert q.pin("Touching")["Boolean"] is False
+    assert near(q.pin("X")["Value"], 0.5) and near(q.pin("Y")["Value"], 0.75)
+    q.touch([(100, 100), (150, 150)], lift=False)
+    assert q.pulses("Press") == 2 and q.pin("Touching")["Boolean"] is True
+    q.advance(1.0)                                                    # silence lifts it, as if unwired
+    assert q.pin("Touching")["Boolean"] is False and q.pulses("Release") == 2
+    q.lift()
+
+
+def test_panel_touch_first_edge_after_start_makes_it_sticky():
+    q = boot_panel_touch_on()
+    q.touch([(100, 100)], lift=False)                                 # a touch under the resting toggle
+    assert q.pulses("Press") == 1
+    q.set_pin("PanelTouch", False)                                    # the first observed edge: an exact release
+    assert q.pulses("Release") == 1 and q.pin("Touching")["Boolean"] is False
+    q.lift()
+    q.touch([(300, 300)], panel_touch=True, lift=False)               # from now on Panel Touch owns press and release
+    assert q.pulses("Press") == 2
+    q.advance(2.0)                                                    # no silence lift any more
+    assert q.pin("Touching")["Boolean"] is True and q.pulses("Release") == 1
+    q.lift()
+    assert q.pulses("Release") == 2 and q.pin("Touching")["Boolean"] is False
+
+
+def test_panel_touch_toggled_after_start_is_exact():
+    q = boot()
+    q.touch([(100, 100), (140, 140)], panel_touch=True, lift=False)
+    assert q.pulses("Press") == 1 and q.pin("Touching")["Boolean"] is True
+    q.advance(3.0)                                                    # silence does not lift a wired touch
+    assert q.pin("Touching")["Boolean"] is True and q.pulses("Release") == 0
+    q.set_pin("PanelTouch", False)
+    assert q.pulses("Release") == 1 and q.pin("Touching")["Boolean"] is False
+    q.advance(0.5)
+    q.tap(250, 125)                                                   # a report without a down waits for one ...
+    assert q.pulses("Press") == 1
+    q.advance(0.5)
+    q.tap(250, 125, panel_touch=True)                                 # ... and an edge-driven tap is exact
+    assert q.pulses("Press") == 2 and q.pulses("Tap") == 1 and q.pulses("Release") == 2

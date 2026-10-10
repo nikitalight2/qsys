@@ -1658,13 +1658,26 @@ class QSys:
         H = self.properties["Pad Height"]
         return (float(W.Value) if W is not None else 500.0, float(H.Value) if H is not None else 500.0)
 
+    def _default_calibration(self):
+        """The engine's default finger geometry (spec 5.2, 13.1, 13.3): the picker's
+        touch square has the side S of the pad's longer side and the pad sits at
+        its top-left, so the pad is u 0..W/S, v 1-H/S..1 (v = 0 at the bottom);
+        Designer draws the surface wider and the square is the left 4/7 of it.
+        A square pad gives (0, 0, 1, 1) and (0, 0, 4/7, 1)."""
+        W, H = self.pad_size
+        S = max(W, H)
+        xf = (4.0 / 7.0) if self.emulate else 1.0
+        return (0.0, 1.0 - H / S, xf * W / S, H / S)
+
     def to_picker(self, x, y):
-        """Pad pixels (y down) -> (u, v) picker Positions through the geometry the engine assumes."""
+        """Pad pixels (y down) -> (u, v) picker Positions through the geometry the
+        engine assumes (q.calibration overrides the default). A point outside the
+        pad but inside the touch square stays outside the pad for the engine; one
+        outside the square is clamped to its edge."""
         W, H = self.pad_size
         px = x / W
         py = 1.0 - y / H
-        cal = self.calibration or ((0.0, 0.0, 4.0 / 7.0, 1.0) if self.emulate else (0.0, 0.0, 1.0, 1.0))
-        x0, y0, w, h = cal
+        x0, y0, w, h = self.calibration or self._default_calibration()
         u = x0 + px * w
         v = y0 + py * h
         return (min(1.0, max(0.0, u)), min(1.0, max(0.0, v)))

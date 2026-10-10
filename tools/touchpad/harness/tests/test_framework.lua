@@ -441,6 +441,26 @@ function test_picker_geometry()
   T.ok(txt:find("(38, 12)", 1, true), "text carries the offset")
   T.ok(txt:find("x 39..", 1, true), "text carries the x range")
   T.ok(isAscii(txt), "text is ascii")
+  T.ok(not txt:find("touch square", 1, true), "square pad: no free-area sentence")
+  local wide = Framework.pickerGeometry(640, 360)
+  T.eq(wide.w, 1223, "wide pad: picker width from the longer side")
+  T.eq(wide.h, 664, "wide pad: picker height from the longer side")
+  T.eq(wide.dx, 49, "wide pad: offset unchanged")
+  T.eq(wide.free, "below", "wide pad: free area below")
+  T.eq(wide.freeW, 640, "wide pad: free width")
+  T.eq(wide.freeH, 280, "wide pad: free height")
+  local tall = Framework.pickerGeometry(360, 640)
+  T.eq(tall.free, "right", "tall pad: free area right")
+  T.eq(tall.freeW, 280, "tall pad: free width")
+  T.eq(tall.freeH, 640, "tall pad: free height")
+  T.eq(Framework.pickerGeometry(500, 500).free, nil, "square pad: no free area")
+  local wideTxt = Framework.pickerText(640, 360)
+  T.ok(wideTxt:find("1223 x 664", 1, true), "wide text carries the size")
+  T.ok(wideTxt:find("(49, 12)", 1, true), "wide text carries the offset")
+  T.ok(wideTxt:find("The 640 x 640 touch square extends below the pad by 280 px: keep that area free of other controls.", 1, true), "wide text warns about the area below")
+  local tallTxt = Framework.pickerText(360, 640)
+  T.ok(tallTxt:find("extends to the right of the pad by 280 px", 1, true), "tall text warns about the area right")
+  T.ok(isAscii(wideTxt) and isAscii(tallTxt), "non-square text is ascii")
   local _, g3 = layoutOf(defaults(), "Setup")
   local found = false
   for _, e in ipairs(g3) do if e.Text and e.Text:find("955 x 524", 1, true) then found = true end end
@@ -457,7 +477,16 @@ function test_display_page_and_colour_note()
        "Pad colour: 28,35,45", "custom colour")
   T.eq(Framework.padColourNote(defaults(nil, function(p) p["Theme"].Value = "Custom"; p["Background Color"].Value = "" end)),
        "Pad colour: 23,21,28", "blank custom falls back to Nikita")
-  T.ok(Framework.padColourNote(defaults(nil, function(p) p["Background"].Value = "Transparent" end)):find("none", 1, true), "transparent note")
+  T.eq(Framework.padColourNote(defaults(nil, function(p) p["Background"].Value = "Transparent" end)),
+       "Pad colour: none (Transparent: the page art shows through)", "transparent note")
+  T.eq(Framework.padColourNote(defaults(nil, function(p) p["Background"].Value = "Panel" end)),
+       "Pad colour: 32,29,38", "Panel prints the theme's panel colour, not the Solid colour")
+  T.eq(Framework.padColourNote(defaults(nil, function(p) p["Background"].Value = "Panel"; p["Theme"].Value = "Sunset" end)),
+       "Pad colour: 36,23,15", "Panel colour of another theme")
+  T.eq(Framework.padColourNote(defaults(nil, function(p) p["Background"].Value = "Panel"; p["Theme"].Value = "Custom"; p["Background Color"].Value = "#1C232D" end)),
+       "Pad colour: 42,48,58", "Custom Panel is the background lightened as the runtime does")
+  T.eq(Framework.padColourNote(defaults(nil, function(p) p["Background"].Value = "Panel"; p["Theme"].Value = "Custom"; p["Background Color"].Value = "" end)),
+       "Pad colour: 32,29,38", "blank Custom Panel falls back to the Nikita panel colour")
   local three = false
   for _, e in ipairs(g) do if e.Text and e.Text:find("three times", 1, true) then three = true end end
   T.ok(three, "three copies instruction")

@@ -111,26 +111,37 @@ local function themeOf(props)
   return THEMES[name] or THEMES["Nikita"], name
 end
 
--- Colour to put under the pad on the UCI, as "r,g,b" or a note.
+-- Colour to put under the pad on the UCI, as "r,g,b" or a note: the theme's
+-- background for Solid, its panel colour for Panel (a Custom background is
+-- lightened by the same 6 % the runtime uses), none for Transparent.
 local function padColourNote(props)
   local background = prop(props, "Background", "Solid")
   if background == "Transparent" then
     return "Pad colour: none (Transparent: the page art shows through)"
   end
   local T, name = themeOf(props)
-  local rgb = T.padRGB
-  if name == "Custom" then
-    local r, g, b = U.hexToRgb(prop(props, "Background Color", ""))
-    if r then rgb = { r, g, b } end
+  local custom = (name == "Custom") and prop(props, "Background Color", "") or ""
+  local hex
+  if background == "Panel" then
+    hex = U.isHex(custom) and Svg.lighten(custom, 0.06) or T.panel
+  elseif U.isHex(custom) then
+    hex = custom
   end
-  return string.format("Pad colour: %d,%d,%d", rgb[1], rgb[2], rgb[3])
+  local r, g, b = U.hexToRgb(hex)
+  if not r then r, g, b = T.padRGB[1], T.padRGB[2], T.padRGB[3] end
+  return string.format("Pad colour: %d,%d,%d", r, g, b)
 end
 Framework.padColourNote = padColourNote
 
 -- Picker size and placement for a pad (spec 13.3, measured on the Gesture
--- Pad design): picker width = ceil(1.91 P), height = P + 24, pad top-left =
--- picker top-left + (round(0.04 width), 12), with P the longer pad side. The
--- cover box is the picker rectangle grown by 2 px on each side.
+-- Pad design). The picker's touch square has side P = the longer pad side:
+-- picker width = ceil(1.91 P), height = P + 24, and the pad sits at the
+-- square's top-left, at picker top-left + (round(0.04 width), 12), whatever
+-- the pad's shape. A wide pad leaves the rest of the square free below it
+-- (`free = "below"`, freeW x freeH), a tall pad to its right (`free =
+-- "right"`); the engine ignores touches there, and other controls must not
+-- cover that area. The cover box is the picker rectangle grown by 2 px on
+-- each side.
 function Framework.pickerGeometry(padW, padH)
   local P = math.max(padW, padH)
   local w = math.ceil(1.91 * P)
@@ -140,6 +151,13 @@ function Framework.pickerGeometry(padW, padH)
   local g = { w = w, h = h, dx = dx, dy = dy, side = P, coverW = w + 4, coverH = h + 4 }
   g.xMin, g.xMax = dx + 1, 1280 - w + dx
   g.yMin, g.yMax = dy, 800 - h + dy
+  if padW > padH then
+    g.free, g.freeW, g.freeH = "below", padW, P - padH
+  elseif padH > padW then
+    g.free, g.freeW, g.freeH = "right", P - padW, padH
+  else
+    g.free, g.freeW, g.freeH = nil, 0, 0
+  end
   return g
 end
 
@@ -151,7 +169,13 @@ function Framework.pickerText(padW, padH)
   else
     fit = "Wider than a 1280 x 800 page: use a smaller pad or a larger page."
   end
-  return string.format("Picker on the UCI: %d x %d px. Pad top-left = picker top-left + (%d, %d).\nCover box: %d x %d px, 2 px outside the picker. %s", g.w, g.h, g.dx, g.dy, g.coverW, g.coverH, fit)
+  local text = string.format("Picker on the UCI: %d x %d px. Pad top-left = picker top-left + (%d, %d).\nCover box: %d x %d px, 2 px outside the picker. %s", g.w, g.h, g.dx, g.dy, g.coverW, g.coverH, fit)
+  if g.free then
+    text = text .. string.format("\nThe %d x %d touch square extends %s the pad by %d px: keep that area free of other controls.",
+                                 g.side, g.side, (g.free == "below") and "below" or "to the right of",
+                                 (g.free == "below") and g.freeH or g.freeW)
+  end
+  return text
 end
 
 -- ---------------------------------------------------------------- GetColor / GetPrettyName

@@ -97,11 +97,17 @@ QSys(mode="XY Pad", props=None, picker="Color_Picker", emulate=False, plugin=Non
 Coordinates (spec 13.1): points are **pad pixels, origin top-left, y down**.
 The helper converts a point to picker Positions `u, v` with `px = x / W`,
 `py = 1 - y / H` and the calibration `(x0, y0, w, h)`: `u = x0 + px * w`,
-`v = y0 + py * h`. The default calibration follows `emulate`, as the engine
-does: panel `(0, 0, 1, 1)`; Designer `(0, 0, 4/7, 1)` (the pad is the left
-4/7 of the surface). `q.calibration = (x0, y0, w, h)` overrides it;
-`q.to_picker(x, y)` shows the mapping. `W, H` come from `Pad Width` /
-`Pad Height` (`q.pad_size`).
+`v = y0 + py * h`. The default calibration is the engine's (spec 13.3): the
+picker's touch square has the side `S` of the pad's longer side and the pad
+sits at its top-left, so panel `(0, 1 - H/S, W/S, H/S)` and, following
+`emulate`, Designer `(0, 1 - H/S, 4/7 * W/S, H/S)` (Designer draws the
+surface wider; the square is its left 4/7). A square pad gives the identity
+`(0, 0, 1, 1)` / `(0, 0, 4/7, 1)`. A point below a wide pad or right of a
+tall pad is still inside the square, so the engine sees it and ignores it as
+outside the pad; a point outside the square is clamped to its edge.
+`q.calibration = (x0, y0, w, h)` overrides the default; `q.to_picker(x, y)`
+shows the mapping. `W, H` come from `Pad Width` / `Pad Height`
+(`q.pad_size`).
 
 ```python
 q.touch(points, dt=0.05, mode=None, panel_touch=False, lift=True, hold=0.0, pause=None, silence=None)

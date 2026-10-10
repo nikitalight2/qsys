@@ -915,8 +915,15 @@ if Controls then (function()
     out("Gesture", string.upper(tostring(text or "")))
   end
 
-  -- ---------- geometry and calibration (spec 5.2, 13.1) ----------
-  local DEFAULT_CAL = EMULATING and { 0, 0, 4 / 7, 1 } or { 0, 0, 1, 1 }
+  -- ---------- geometry and calibration (spec 5.2, 13.1, 13.3) ----------
+  -- The picker's touch square has the side of the pad's longer side and the
+  -- pad sits at its top-left: a wide pad covers the top of the square, a
+  -- tall pad its left, and the rest of the square is outside the pad.
+  -- Designer draws the surface as a wider rectangle whose left 4/7 is the
+  -- square. A square pad gives {0, 0, 1, 1} and {0, 0, 4/7, 1}.
+  local SIDE = max(W, H)
+  local DEFAULT_CAL = EMULATING and { 0, 1 - H / SIDE, (4 / 7) * W / SIDE, H / SIDE }
+                               or { 0, 1 - H / SIDE, W / SIDE, H / SIDE }
   local cal = { P = nil, D = nil }
 
   -- Only the first CAL_LINES lines of the first CAL_CHARS characters are
@@ -1890,7 +1897,10 @@ if Controls then (function()
   pcall(function() Controls.PickerLayout.String = Framework.pickerText(W, H) end)
   protect("calibration", function() parseCalibration(Controls.Calibration.String) end)
   S.locked = Controls.Lock.Boolean and true or false
-  if Controls.PanelTouch.Boolean then S.panelWired, S.panelDown = true, true end
+  -- Panel Touch counts as wired only once an edge is observed after arming
+  -- (onPanelTouch): a toggle left true at start with nothing wired to it
+  -- would otherwise hold every touch down for ever. Until that first edge
+  -- lifts are inferred from silence as if the control were unwired.
   out("Touching", false)
   out("X", 0)
   out("Y", 0)
