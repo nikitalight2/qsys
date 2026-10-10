@@ -11,6 +11,7 @@ Q-SYS Designer plugins by Nikita Visual Arts.
 | Plugin | File | Version |
 |---|---|---|
 | Mic Mixer | `plugins/NikitaMicMixer.qplug` | 2.0.0 |
+| Touch Pad | `plugins/NikitaTouchPad.qplug` | 1.0.0 |
 
 ## Mic Mixer
 
@@ -84,6 +85,65 @@ the debug output together with the Q-SYS Designer version.
 ```
 plugins/NikitaMicMixer.qplug   the plugin
 assets/brand/                  logo files used by the plugin and this README
+```
+
+## Touch Pad
+
+Real touch gestures on any Q-SYS UCI with no extra hardware. A native Color
+Picker hidden under the page reports where a finger is; the Touch Pad block
+reads it, works out the gesture (tap, double tap, long press, drag, swipe)
+and draws its own interface on top of the page as a script-set icon. Every
+result is a pin: live X and Y, a pulse per gesture, and the outputs of the
+mode you pick. One block is one pad; every mode shares the same setup.
+
+Modes: XY Pad, Swipe Layer, Joystick, PTZ Pad, Camera Framing, Dial, Knob,
+Fader, Panner, Zone Select, Drag & Drop, Matrix, Pattern Lock, Keypad,
+Sign-In and Whiteboard.
+
+### Install
+
+1. Copy `plugins/NikitaTouchPad.qplug` to the same plugin folder as the Mic
+   Mixer (`%USERPROFILE%\Documents\QSC\Q-Sys Designer\Plugins` on Windows).
+2. Restart Q-SYS Designer. The block appears under **Plugins > User >
+   Custom** as **Nikita Visual Arts > Touch Pad**; drag it into the
+   schematic.
+
+### Set up a pad
+
+1. Block: pick the *Mode* and set *Pad Width* and *Pad Height*.
+2. Color Picker: add one, set its Script Access to All, and type its Code
+   Name into the block's *Color Picker* property.
+3. Read the block's Setup page: the picker's size, and where the pad can go.
+4. UCI: the picker's color surface at that size and place, sent to the back.
+5. A Group Box over the picker, in the page color, 2 px bigger on every side.
+6. Where the pad goes: a box in the pad's color, then the Display from the
+   block's Display page pasted three times on top.
+7. UCI: Swipe Disabled on.
+8. Test. On a TSC, tick and wire the panel's Touch Activity to the block's
+   Panel Touch.
+
+The user guide, [docs/touchpad/GUIDE.md](docs/touchpad/GUIDE.md), explains
+every step, the properties, calibration, Touch Activity, the themes and the
+status messages. [docs/touchpad/PINS.md](docs/touchpad/PINS.md) lists every
+pin and control of every mode, built from the plugin by
+`tools/touchpad/gen_pins.py`.
+
+### Test status
+
+Built and tested only in an offline harness that fakes the Q-SYS runtime
+(108 scenario tests and 98 unit tests at the time of writing, with mode-level
+tests for XY Pad only); never opened in Q-SYS Designer, never run on a Core
+or a touch panel. The Color Picker's control names and axis orientation are
+inferred, with Swap Axes, Flip X, Flip Y and the Calibrate tool as the
+remedies. See "What has been tested, honestly" in the guide.
+
+### Repository layout
+
+```
+plugins/NikitaTouchPad.qplug   the plugin (built from src/touchpad/)
+src/touchpad/                  the Lua modules
+tools/touchpad/                build.py, gen_pins.py and the offline test harness
+docs/touchpad/                 GUIDE.md and PINS.md
 ```
 
 ---
