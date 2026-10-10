@@ -3,7 +3,8 @@
 """A bounded rotary with a 270 degree sweep: a touch on the ring sets the
 value from its angle, dragging turns relative with acceleration, the readout
 shows display units from KnobMin / KnobMax / Units, KnobValue and
-KnobPosition are pins both ways and DialTarget drives a control position-wise."""
+KnobPosition are pins both ways and DialTarget drives a control position-wise
+and is followed when changed elsewhere, a resting finger included."""
 import math
 import os
 import re
@@ -276,13 +277,53 @@ def test_knob_dial_target_is_driven_and_followed():
     assert near(gain.get("gain")["Position"], 0.25)
     gain.set("gain", 20)                                   # changed elsewhere: followed
     assert near(pos(q), 1) and near(q.pin("KnobValue")["Value"], 100)
-    q.touch([polar(g, g["Rin"] * 0.6, 90)], lift=False)    # a resting finger owns the knob
+    q.touch([polar(g, g["Rin"] * 0.6, 90)], lift=False)    # a resting finger: still followed (as in Dial)
     gain.set("gain", -100)
-    assert near(pos(q), 1)
+    assert near(pos(q), 0) and near(q.pin("KnobValue")["Value"], 0)
     q.lift()
+    settle(q)
     q.set_pin("DialTarget", "")                            # unbound: changes no longer follow
     gain.set("gain", -40)
-    assert near(pos(q), 1)
+    assert near(pos(q), 0)
+    assert q.errors == []
+
+
+def test_knob_target_change_under_a_resting_finger_is_kept_and_not_overwritten():
+    """A level moved elsewhere while a finger rests on the body is adopted at
+    once; the next nudge turns relative to it instead of writing the stale
+    level back over the external change."""
+    q = boot()
+    g = geometry(q)
+    gain = q.add_component("Gain", "gain", controls={"gain": {"Value": -100, "Min": -100, "Max": 20}})
+    q.set_pin("DialTarget", "Gain~gain")
+    q.set_pin("KnobPosition", 0.5)
+    assert near(gain.get("gain")["Position"], 0.5)
+    q.touch([polar(g, g["Rin"] * 0.6, 90)], dt=0.5, panel_touch=True, lift=False)
+    assert q.run("return TouchPad.inst.down") is True
+    gain.set("gain", 20)                                   # someone else moves the level to the top
+    assert near(pos(q), 1) and near(q.pin("KnobValue")["Value"], 100)
+    assert "100" in texts(q.icon())
+    # the drag in progress continues relative to the followed level: 27 degrees
+    # counter-clockwise, 0.5 s after the last report (54 deg/s: gain 1)
+    q.touch([polar(g, g["Rin"] * 0.6, 117)], panel_touch=True, lift=False)
+    assert near(pos(q), 0.9, 1e-6) and near(gain.get("gain")["Position"], 0.9, 1e-6)
+    q.lift()
+    q.advance(2.0)
+    assert near(pos(q), 0.9, 1e-6) and near(gain.get("gain")["Position"], 0.9, 1e-6)
+    # a small clockwise nudge after the lift moves from 0.9, not from the stale 0.5
+    q.drag(arc_points(g, g["Rin"] * 0.6, 90, 85, 2), seconds=0.3, panel_touch=True)
+    assert near(pos(q), 0.9 + 5 / 270, 1e-6)
+    assert near(gain.get("gain")["Position"], 0.9 + 5 / 270, 1e-6)
+    # the same while the finger rests on the ring and the change goes the other way
+    gain.set("gain", -100)
+    assert near(pos(q), 0)
+    q.touch([polar(g, g["Rm"], 90)], panel_touch=True, lift=False)   # ring touch sets 0.5
+    assert near(pos(q), 0.5) and near(gain.get("gain")["Position"], 0.5)
+    gain.set("gain", -76)                                  # position 0.2 under the resting finger
+    assert near(pos(q), 0.2, 1e-6) and near(q.pin("KnobValue")["Value"], 20, 1e-6)
+    q.lift()
+    q.advance(2.0)
+    assert near(pos(q), 0.2, 1e-6) and near(gain.get("gain")["Position"], 0.2, 1e-6)
     assert q.errors == []
 
 
@@ -350,7 +391,8 @@ def test_knob_themes_and_sizes_stay_ascii_and_small():
     assert g["R"] == 120
     tiny = boot(props={"Pad Width": 120, "Pad Height": 120})
     assert len(tiny.icon()) < 8000
-    tiny.tap(60, 60 - 36)
+    tg = geometry(tiny)
+    tiny.tap(*polar(tg, tg["Rm"], 90))
     assert near(pos(tiny), 0.5)
 
 
@@ -364,3 +406,160 @@ def test_knob_frames_stay_within_budget():
     assert b["frames"] >= 40
     assert b["max_frame"] < 20000 and b["max_handler"] < 20000, b
     assert len(q.icon()) < 8000
+
+
+def lines_of(svg):
+    out = []
+    for m in re.finditer(r'<line x1="([-\d.]+)" y1="([-\d.]+)" x2="([-\d.]+)" y2="([-\d.]+)"', svg):
+        out.append(tuple(float(v) for v in m.groups()))
+    return out
+
+
+def text_boxes(q, svg):
+    """(x0, x1, baseline, size, text) of every <text> with its measured width."""
+    out = []
+    for m in re.finditer(r'<text x="([-\d.]+)" y="([-\d.]+)"[^>]*font-size="([-\d.]+)"([^>]*)>([^<]*)</text>', svg):
+        x, y, size, attrs, s = m.groups()
+        x, y, size = float(x), float(y), float(size)
+        weight = "bold" if "bold" in attrs else None
+        w = q.run("return Font.width(%r, %s, %s)" % (s, size, "'bold'" if weight else "nil"))
+        anchor = "end" if "end" in attrs else ("middle" if "middle" in attrs else "start")
+        x0 = x - w if anchor == "end" else (x - w / 2 if anchor == "middle" else x)
+        out.append((x0, x0 + w, y, size, s))
+    return out
+
+
+def test_knob_small_pads_keep_ticks_and_labels_inside_the_pad():
+    """Ticks never leave the viewBox, the Min / Max labels stay inside the pad
+    width and above the hint line, and the readout is never cut; the hint is
+    dropped on pads shorter than 160 px, where it cannot fit under the knob."""
+    for W, H, hints in ((120, 120, True), (120, 120, False), (160, 160, True), (200, 200, True),
+                        (240, 240, True), (1600, 300, True), (120, 1200, True), (1600, 120, True)):
+        q = boot(props={"Pad Width": W, "Pad Height": H, "Show Hints": hints})
+        q.set_pin("KnobMin", -1000)
+        q.set_pin("KnobMax", 1000)
+        q.advance(0.1)
+        svg = q.icon()
+        g = geometry(q)
+        outside = [l for l in lines_of(svg)
+                   if min(l[1], l[3]) < 0 or max(l[1], l[3]) > H or min(l[0], l[2]) < 0 or max(l[0], l[2]) > W]
+        assert outside == [], (W, H, hints, outside)
+        assert len(lines_of(svg)) == 31 + 1, (W, H)      # every tick is drawn, plus the pointer
+        assert g["cy"] - g["R"] - q.run("return TouchPad.inst.geometry.tickOut") >= 0
+        boxes = text_boxes(q, svg)
+        labels = [b for b in boxes if b[4] in ("-1000", "1000") and b[2] > g["cy"] + g["Rin"]]
+        assert len(labels) == 2, boxes
+        for x0, x1, y, size, s in labels:
+            assert x0 >= 1.5 and x1 <= W - 1.5, (W, H, s, x0, x1)
+            assert y <= H - 2, (W, H, s, y)
+        hint = [b for b in boxes if b[4].startswith("Touch the ring")]
+        if hints and H >= 160:
+            assert len(hint) == 1, (W, H)
+            assert max(b[2] for b in labels) + 2 <= hint[0][2] - hint[0][3], (W, H, labels, hint)   # labels above the hint glyphs
+        else:
+            assert hint == [], (W, H)
+        assert g["Rin"] > g["Rdead"] and g["Rin"] >= 6
+        assert q.errors == []
+    # the readout shrinks its font rather than truncating: 995.00 .. 1000.00 on a 120 px pad
+    q = boot(props={"Pad Width": 120, "Pad Height": 120})
+    q.set_pin("KnobMin", 995)
+    q.set_pin("KnobMax", 1000)
+    q.advance(0.1)
+    t = texts(q.icon())
+    assert "995.00" in t and "1000.00" in t and not any("..." in s for s in t), t
+    boxes = text_boxes(q, q.icon())
+    for x0, x1, y, size, s in boxes:
+        assert x0 >= 1.5 and x1 <= 118.5, (s, x0, x1)
+    assert [b for b in boxes if b[3] == 14 and b[4] == "995.00"], boxes   # fits at the full size
+    q.set_pin("KnobMin", -1000)
+    q.set_pin("KnobMax", -995)
+    q.advance(0.1)
+    t = texts(q.icon())
+    assert "-1000.00" in t and "-995.00" in t and not any("..." in s for s in t), t
+    boxes = text_boxes(q, q.icon())
+    readout = [b for b in boxes if b[2] < 100 and b[4] == "-1000.00"]
+    assert len(readout) == 1 and 9 <= readout[0][3] < 14, boxes   # the centre readout at a reduced size
+    assert readout[0][0] >= 60 - 30 * 0.9 and readout[0][1] <= 60 + 30 * 0.9    # inside the knob body
+    for x0, x1, y, size, s in boxes:
+        assert x0 >= 1.5 and x1 <= 118.5, (s, x0, x1)
+    q.set_pin("KnobMin", 0)
+    q.set_pin("KnobMax", 100)
+    q.advance(0.1)
+    boxes = text_boxes(q, q.icon())
+    assert [b for b in boxes if b[3] == 14 and b[4] == "0"], boxes   # back to the full size
+    # 500 x 500 keeps the reference geometry
+    assert geometry(boot())["R"] == 200
+
+
+def test_knob_gain_readout_follows_the_current_speed():
+    q = boot()
+    g = geometry(q)
+    pts = arc_points(g, g["Rin"] * 0.6, 90, 36, 9)
+    q.touch(pts, dt=0.05 / 3, panel_touch=True, lift=False)   # 54 degrees in 0.15 s: gain 1.67
+    assert [s for s in texts(q.icon()) if s.startswith("x")] == ["x1.7"]
+    assert near(q.run("return TouchPad.inst.gain"), 1 + 2 * (360 - 180) / 540, 1e-3)
+    q.advance(0.05)
+    assert "x1.7" in texts(q.icon())                       # still shown right after the move
+    q.advance(0.3)                                         # the finger rests: the multiplier clears
+    assert q.run("return TouchPad.inst.down") is True
+    assert q.run("return TouchPad.inst.gain") == 1
+    assert not any(s.startswith("x") for s in texts(q.icon()))
+    # moving again brings it back (36 degrees 0.1 s after the previous report:
+    # 360 deg/s), a slow move (10 degrees in 0.1 s) shows none
+    q.touch([polar(g, g["Rin"] * 0.6, 10), polar(g, g["Rin"] * 0.6, -26)], dt=0.1, panel_touch=True, lift=False)
+    assert "x1.7" in texts(q.icon())
+    q.touch([polar(g, g["Rin"] * 0.6, -36)], dt=0.5, panel_touch=True, lift=False)
+    assert not any(s.startswith("x") for s in texts(q.icon()))
+    q.touch([polar(g, g["Rin"] * 0.6, -46), polar(g, g["Rin"] * 0.6, -82)], dt=0.1, panel_touch=True, lift=False)
+    assert "x1.7" in texts(q.icon())
+    q.lift()
+    assert q.run("return TouchPad.inst.gain") == 1 and q.run("return TouchPad.inst.gainTimer") is None
+    assert not any(s.startswith("x") for s in texts(q.icon()))
+    # a lock while the readout shows clears it too
+    q.touch(pts, dt=0.05 / 3, panel_touch=True, lift=False)
+    assert "x1.7" in texts(q.icon())
+    q.set_pin("Lock", True)
+    q.advance(0.05)
+    assert q.run("return TouchPad.inst.gain") == 1
+    q.lift()
+    q.set_pin("Lock", False)
+    assert q.errors == []
+
+
+def test_knob_readout_rounds_half_away_from_zero():
+    q = boot()
+    for v, shown in ((0.5, "1"), (1.5, "2"), (2.5, "3"), (50.5, "51"), (51.5, "52"), (99.5, "100")):
+        q.set_pin("KnobValue", v)
+        q.advance(0.1)
+        assert shown in texts(q.icon()), (v, texts(q.icon()))
+    assert q.run("return TouchPad.inst.readout(0.5)") == "1"
+    assert q.run("return TouchPad.inst.readout(1.5)") == "2"
+    assert q.run("return TouchPad.inst.readout(2.5)") == "3"
+    assert q.run("return TouchPad.inst.readout(50.5)") == "51"
+    assert q.run("return TouchPad.inst.readout(51.5)") == "52"
+    assert q.run("return TouchPad.inst.readout(99.5)") == "100"
+    assert q.run("return TouchPad.inst.readout(0.4)") == "0"
+    q.set_pin("KnobMin", -100)
+    q.set_pin("KnobMax", 20)
+    q.advance(0.1)
+    assert q.run("return TouchPad.inst.readout(-0.5)") == "-1"
+    assert q.run("return TouchPad.inst.readout(-2.5)") == "-3"
+    assert q.run("return TouchPad.inst.readout(-0.4)") == "0"
+    assert q.run("return TouchPad.inst.readout(-0.0)") == "0"
+    # the labels round the same way
+    q.set_pin("KnobMin", 0.5)
+    q.set_pin("KnobMax", 200.5)
+    q.advance(0.1)
+    t = texts(q.icon())
+    assert "1" in t and "201" in t, t
+    q.set_pin("KnobMin", 0)
+    q.set_pin("KnobMax", 10)
+    q.advance(0.1)
+    assert q.run("return TouchPad.inst.readout(0.25)") == "0.3"
+    assert q.run("return TouchPad.inst.readout(0.35)") == "0.4"
+    assert q.run("return TouchPad.inst.readout(-0.04)") == "0.0"
+    q.set_pin("KnobMax", 5)
+    q.advance(0.1)
+    assert q.run("return TouchPad.inst.readout(0.125)") == "0.13"
+    assert q.run("return TouchPad.inst.readout(1.005)") in ("1.01", "1.00")   # a float just under .005 may go either way
+    assert q.errors == []

@@ -2,9 +2,10 @@
 # Touch Pad for Q-SYS: scenario tests of the Swipe Layer mode (11_mode_swipe.lua)
 """The Swipe Layer draws only a fading finger trail and a brief chevron in the
 swipe direction, adds the Setup knob SwipeDistance (fraction of the pad
-diagonal, 0.05..0.8, default 0.2), needs distance and speed (0.6 s at most)
-for a swipe and does not lose a second swipe that follows the first within
-0.25 s."""
+diagonal, 0.05..0.8, default 0.2) that owns the swipe threshold in both
+directions, needs distance and speed (0.6 s at most) for a swipe, splits a
+touch into strokes where the finger landed again and does not lose a second
+swipe that follows the first within 0.25 s."""
 import math
 import os
 import re
@@ -289,7 +290,154 @@ def test_swipe_second_swipe_within_the_release_time_is_not_lost():
     q.advance(2.0)
     counts = swipe_pulses(q)
     assert counts["SwipeLeft"] == 2 and counts["SwipeUp"] == 1 and counts["SwipeRight"] == 0, counts
-    assert q.run("return TouchPad.inst.swipes") >= 3
+    assert q.run("return TouchPad.inst.swipes") == 3                  # the strokes ended by a landing; the engine took the last
+
+
+# ---------------------------------------------------------------- review findings (regressions)
+
+def test_swipe_distance_knob_raises_the_threshold_too():
+    q = boot()
+    q.set_pin("SwipeDistance", 0.8)                                  # 566 px of the 707 px diagonal
+    q.swipe(100, 250, 400, 250, seconds=0.2)                         # 300 px = 0.42: enough for the engine, not for the knob
+    q.advance(2.0)
+    assert sum(swipe_pulses(q).values()) == 0, swipe_pulses(q)
+    assert q.pin("Gesture")["String"] == "DRAG"
+    assert q.pulses("Tap") == 0 and q.pulses("LongPress") == 0
+    q.swipe(20, 250, 480, 250, seconds=0.2)                          # 460 px = 0.65: still short of 0.8
+    q.advance(2.0)
+    assert sum(swipe_pulses(q).values()) == 0
+    q.set_pin("SwipeDistance", 0.6)                                  # 424 px
+    q.swipe(20, 250, 480, 250, seconds=0.2)                          # 460 px: a swipe again, pulsed once
+    q.advance(2.0)
+    only(q, "SwipeRight")
+    assert q.pin("Gesture")["String"] == "SWIPE RIGHT"
+    q.reset_pulses()
+    q.swipe(100, 250, 400, 250, seconds=0.2, panel_touch=True, lift=False)   # 0.42 under a resting finger
+    q.advance(1.5)                                                   # a rest is not a long press either
+    q.lift()
+    q.advance(1.0)
+    assert sum(swipe_pulses(q).values()) == 0 and q.pulses("LongPress") == 0
+    q.tap(250, 250, panel_touch=True)                                # taps are untouched by the knob
+    assert q.pulses("Tap") == 1 and sum(swipe_pulses(q).values()) == 0
+
+
+def test_swipe_second_stroke_in_another_direction_is_classified_on_its_own():
+    q = boot()                                                       # no Panel Touch
+    q.swipe(50, 250, 450, 250, seconds=0.15, lift=False)             # right
+    q.advance(0.15)
+    q.swipe(250, 50, 250, 200, seconds=0.15, lift=False)             # lands 283 px away, then 150 px down
+    q.lift()
+    q.advance(2.0)
+    counts = swipe_pulses(q)
+    assert counts["SwipeRight"] == 1 and counts["SwipeDown"] == 1, counts
+    assert counts["SwipeLeft"] == 0 and counts["SwipeUp"] == 0
+    assert q.pin("Gesture")["String"] == "SWIPE DOWN"
+    assert q.pulses("Press") == 1                                    # one touch to the engine
+    assert abs(q.pin("DragDistance")["Value"] - 150 / DIAG) < 1e-6   # the drag outputs follow the stroke
+
+
+def test_swipe_back_from_where_the_finger_left_counts_both_strokes():
+    q = boot()
+    q.swipe(50, 250, 450, 250, seconds=0.15, lift=False)             # right
+    q.advance(0.15)
+    q.swipe(450, 250, 50, 250, seconds=0.15, lift=False)             # left from the very spot: no displacement
+    q.lift()
+    q.advance(2.0)
+    counts = swipe_pulses(q)
+    assert counts["SwipeRight"] == 1 and counts["SwipeLeft"] == 1, counts
+    assert q.pin("Gesture")["String"] == "SWIPE LEFT"
+    q.reset_pulses()
+    q.swipe(50, 250, 450, 250, seconds=0.15, lift=False)             # right again
+    q.advance(0.15)
+    q.touch([(455, 252)], dt=0.033, lift=False)                      # lands 5 px off, then flicks at 30 Hz
+    q.swipe(455, 252, 55, 252, seconds=0.2, lift=False)
+    q.lift()
+    q.advance(2.0)
+    counts = swipe_pulses(q)
+    assert counts["SwipeRight"] == 1 and counts["SwipeLeft"] == 1, counts
+
+
+def test_swipe_repeated_short_swipes_from_the_same_start_each_count():
+    q = boot()
+    q.swipe(100, 250, 260, 250, seconds=0.15, lift=False)            # 160 px: above the 141 px threshold
+    q.advance(0.15)
+    q.swipe(100, 250, 260, 250, seconds=0.15, lift=False)            # back to the start: a 160 px landing
+    q.lift()
+    q.advance(2.0)
+    only(q, "SwipeRight", 2)
+    small = boot(props={"Pad Width": 120, "Pad Height": 120})        # 170 px diagonal
+    for _ in range(4):
+        small.swipe(6, 60, 114, 60, seconds=0.15, lift=False)        # 108 px = 0.64 of the diagonal
+        small.advance(0.1)
+    small.lift()
+    small.advance(2.0)
+    only(small, "SwipeRight", 4)
+    assert small.pulses("Press") == 1
+    assert small.pin("Gesture")["String"] == "SWIPE RIGHT"
+
+
+def test_swipe_flick_after_a_taken_back_lift_counts():
+    q = boot()
+    q.set_pin("SwipeDistance", 0.05)
+    q.swipe(100, 250, 160, 250, seconds=0.1, steps=3, lift=False)    # 60 px
+    q.advance(0.3)                                                   # inferred lift: the first swipe
+    only(q, "SwipeRight")
+    q.swipe(164, 252, 460, 252, seconds=0.15, lift=False)            # resumes 4 px away and flicks 300 px
+    q.lift()
+    q.advance(2.0)
+    only(q, "SwipeRight", 2)
+    assert q.run("return TouchPad.inst.swipes") == 2
+    assert q.pulses("Press") == 1
+
+
+def test_swipe_landing_in_designer_splits_on_separate_axes():
+    q = boot(emulate=True)                                           # axes arrive 0.06 s apart
+    q.swipe(100, 100, 400, 100, seconds=0.15, lift=False)            # right
+    q.advance(0.15)
+    q.swipe(220, 280, 220, 440, seconds=0.15, lift=False)            # lands 254 px away: 180 px per axis
+    q.lift()
+    q.advance(2.0)
+    counts = swipe_pulses(q)
+    assert counts["SwipeRight"] == 1 and counts["SwipeDown"] == 1, counts
+    assert counts["SwipeLeft"] == 0 and counts["SwipeUp"] == 0
+
+
+def test_swipe_landing_starts_a_new_trail_line_without_dropping_the_old_one():
+    q = boot()
+    q.drag([(100 + 20 * i, 300) for i in range(6)], seconds=0.25, lift=False)
+    q.advance(0.15)
+    q.drag([(300, 320 + 20 * i) for i in range(4)], seconds=0.15, lift=False)
+    svg = q.icon()
+    lines = polylines(svg)
+    joined = " ".join(p for p, _ in lines)
+    assert "100,300" in joined and "200,300" in joined               # the first stroke still fades (in age buckets)
+    assert "300,380" in joined                                       # the second is drawn
+    assert not any("200,300" in p and "300,320" in p for p, _ in lines)   # nothing joins them
+    assert q.run("return TouchPad.inst.stroke.x0") == 300
+    q.lift()
+    q.advance(0.75)                                                  # 10 Hz reports are one stroke, one line
+    q.drag([(100 + 30 * i, 300) for i in range(8)], seconds=0.7, lift=False)
+    assert polylines(q.icon()) and q.run("return TouchPad.inst.stroke.x0") == 100
+    q.lift()
+
+
+def test_swipe_locked_pad_ignores_a_script_pulsed_swipe_pin():
+    q = boot()
+    q.set_pin("Lock", True)
+    q.advance(0.1)
+    q.set_pin("SwipeLeft", True)
+    q.set_pin("SwipeLeft", False)
+    q.advance(0.06)
+    svg = q.icon()
+    assert "Locked" in svg and polylines(svg) == []
+    assert q.run("return TouchPad.state.animating") is False
+    assert q.run("return TouchPad.inst.locked") is True
+    q.set_pin("Lock", False)
+    q.advance(0.1)
+    q.set_pin("SwipeLeft", True)                                     # unlocked: the chevron shows again
+    q.set_pin("SwipeLeft", False)
+    q.advance(0.06)
+    assert len([p for p, _ in polylines(q.icon()) if p.count(" ") == 2]) == 2
 
 
 def test_swipe_pin_written_by_a_script_shows_the_chevron_without_pulsing():

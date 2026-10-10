@@ -6,6 +6,7 @@ is Linear or Audio (0 dB at 75 % of the travel for -100..10); SnapCenter
 snaps within 3 % of the centre value; FaderValue / FaderPosition are pins
 both ways; DialTarget drives a control position-wise; the pad draws the
 slot, the fill, the cap, scale ticks and the value readout."""
+import itertools
 import os
 import re
 
@@ -36,11 +37,20 @@ def geometry(q):
     return dict(zip(keys, vals))
 
 
-def at(g, p):
-    """Pad point on the travel at position p (0..1)."""
+_WOBBLE = itertools.count()
+
+
+def at(g, p, w=None):
+    """Pad point on the travel at position p (0..1), w px across the slot.
+    A real finger wobbles across the slot; by default the points alternate
+    1 px either side so every report carries both axes and lands at once (a
+    lone-axis report waits the engine's 0.12 s pairing window and can be
+    superseded by the next)."""
+    if w is None:
+        w = 1 if next(_WOBBLE) % 2 else -1
     if g["vertical"]:
-        return (g["cx"], g["y0"] - p * g["len"])
-    return (g["x0"] + p * g["len"], g["cy"])
+        return (g["cx"] + w, g["y0"] - p * g["len"])
+    return (g["x0"] + p * g["len"], g["cy"] + w)
 
 
 def along(g, p0, p1, n):
@@ -225,7 +235,7 @@ def test_fader_audio_taper_puts_zero_db_at_three_quarters():
     assert all(b > a for a, b in zip(vals, vals[1:]))
     # the scale labels follow the curve; a taper change keeps the position and re-outputs the value
     q.advance(0.1)
-    assert "0" in texts(q.icon())
+    assert "-20" in texts(q.icon()) and "-45" not in texts(q.icon())
     q.set_pin("FaderPosition", 0.5)
     q.set_pin("Taper", "Linear")
     assert near(pos(q), 0.5) and near(val(q), -45)
@@ -384,18 +394,20 @@ def test_fader_resume_after_inferred_lift_reanchors_without_a_jump():
     assert near(pos(q), 0.1, 1e-6)
     q.advance(0.5)                                             # inferred lift
     assert q.run("return TouchPad.inst.down") is False
-    q.touch([at(g, 0.23)], lift=False)                         # resumed a little further: no jump
+    q.touch([at(g, 0.23)], lift=False)                      # resumed a little further: no jump
     assert q.run("return TouchPad.inst.down") is True
     assert near(pos(q), 0.1, 1e-6)
-    q.touch([at(g, 0.33)], lift=False)                         # then moves again
+    q.touch([at(g, 0.33)], lift=False)                     # then moves again
     assert near(pos(q), 0.2, 1e-6)
     q.lift()
     # in Jump mode a resumed finger simply keeps the fader under it
     q.set_pin("GrabMode", "Jump")
     q.touch(along(g, 0.5, 0.6, 2), lift=False)
     q.advance(0.5)
+    assert q.run("return TouchPad.inst.down") is False
     q.touch([at(g, 0.62)], lift=False)
-    assert near(pos(q), 0.6, 1e-6)
+    assert q.run("return TouchPad.inst.down") is True
+    assert near(pos(q), 0.62, 1e-6)
     q.touch([at(g, 0.7)], lift=False)
     assert near(pos(q), 0.7, 1e-6)
     q.lift()
@@ -428,7 +440,10 @@ def test_fader_hints_off_themes_and_sizes_stay_ascii_and_small():
     assert q.pin("Gesture")["String"] == "TOUCH OR DRAG THE FADER"
     light = boot(props={"Theme": "Light"})
     svg = light.icon()
-    assert "#2F6FEB" in svg and "#E8EAEE" in svg and "#17151C" not in svg
+    assert "#E8EAEE" in svg and "#1DA27A" in svg and "#17151C" not in svg   # well, cap line
+    light.set_pin("FaderPosition", 0.5)
+    light.advance(0.1)
+    assert "#2F6FEB" in light.icon()                           # the fill takes the accent
     wide = boot(props={"Pad Width": 1600, "Pad Height": 300})
     svg = wide.icon()
     assert 'viewBox="0 0 1600 300"' in svg and all(ord(ch) < 127 for ch in svg)
@@ -454,6 +469,7 @@ def test_fader_frames_stay_within_budget():
     q.drag(along(g, 0, 1, 100), seconds=2.0)
     assert near(pos(q), 1, 1e-6)
     q.set_pin("GrabMode", "Relative")
+    q.advance(2.0)                                             # the inferred lift confirms and parks
     q.drag(along(g, 1, 0, 100), seconds=2.0)
     assert near(pos(q), 0, 1e-6)
     q.set_pin("Taper", "Audio")
@@ -463,3 +479,193 @@ def test_fader_frames_stay_within_budget():
     assert b["frames"] >= 40
     assert b["max_frame"] < 30000 and b["max_handler"] < 30000, b
     assert len(q.icon()) < 10000
+
+
+def families(svg):
+    """{text: font-family} of every <text> in the SVG."""
+    return {t: f for f, t in re.findall(r'<text[^>]*font-family="([^"]*)"[^>]*>([^<]*)</text>', svg)}
+
+
+def test_fader_scale_labels_take_the_configured_font():
+    q = boot(props={"Font": "Heebo Bold"})
+    fam = families(q.icon())
+    assert fam["-100.0 dB"] == "Heebo Bold, Roboto, sans-serif"
+    assert fam["Touch or drag the fader"] == "Heebo Bold, Roboto, sans-serif"
+    for label in ("-100", "-45", "10"):
+        assert fam[label] == "Heebo Bold, Roboto, sans-serif", label
+    assert len(set(fam.values())) == 1                         # one family on the whole pad
+    q.set_pin("FaderMin", -60)                                 # the cache rebuilds with the family
+    q.advance(0.1)
+    fam = families(q.icon())
+    assert fam["-60"] == "Heebo Bold, Roboto, sans-serif" and len(set(fam.values())) == 1
+    h = boot(props={"Font": "Heebo Bold", "Orientation": "Horizontal", "Pad Width": 600, "Pad Height": 200})
+    assert set(families(h.icon()).values()) == {"Heebo Bold, Roboto, sans-serif"}
+    plain = boot()
+    assert set(families(plain.icon()).values()) == {"Roboto, sans-serif"}
+
+
+def test_fader_target_status_never_hides_an_engine_problem():
+    # persisted target, no picker: the engine's error stays on Status after load
+    q = QSys(mode="Fader", picker=None, plugin=PLUGIN, runtime=False)
+    q.add_component("Gain", "gain", controls={"gain": {"Value": -100, "Min": -100, "Max": 20}})
+    q.control("DialTarget").String = "Gain~gain"
+    q._dispatch("load", q._chunk)
+    assert q.status().startswith("No Color Picker in the design") and q.pin("Status")["Value"] == 2
+    q.advance(0.2)
+    assert q.run("return TouchPad.inst.target ~= nil") is True # the target still bound
+    # a runtime bind over the error keeps the error too, and so does a bad target
+    r = boot(picker=None)
+    r.add_component("Gain", "gain", controls={"gain": {"Value": -100, "Min": -100, "Max": 20}})
+    r.set_pin("DialTarget", "Gain~gain")
+    assert r.status().startswith("No Color Picker in the design") and r.pin("Status")["Value"] == 2
+    r.set_pin("DialTarget", "Nope~gain")
+    assert r.status().startswith("No Color Picker in the design") and r.pin("Status")["Value"] == 2
+    # once the picker problem is solved, the mode's own messages show again
+    r.picker = r.add_picker("Late")
+    r.set_pin("Refresh", True)
+    assert r.status() == "OK - Ready. Picker OK: saturation / value"
+    r.set_pin("DialTarget", "Zilch~gain")
+    assert r.status() == "Fader target: no component named Zilch" and r.pin("Status")["Value"] == 1
+    r.set_pin("DialTarget", "Gain~gain")
+    assert r.status() == "Fader target OK: Gain~gain" and r.pin("Status")["Value"] == 0
+    assert q.errors == [] and r.errors == []
+
+
+def test_fader_clearing_the_target_restores_the_engine_status():
+    q = boot()
+    g = geometry(q)
+    ok = q.status()
+    assert ok == "OK - Ready. Picker OK: saturation / value"
+    q.set_pin("DialTarget", "Nope~gain")
+    assert q.status() == "Fader target: no component named Nope" and q.pin("Status")["Value"] == 1
+    q.set_pin("DialTarget", "")
+    assert q.status() == ok and q.pin("Status")["Value"] == 0
+    q.tap(*at(g, 0.5))
+    assert q.status() == ok and near(pos(q), 0.5, 1e-6)
+    # a good target then cleared: back to the engine's text as well
+    q.add_component("Gain", "gain", controls={"gain": {"Value": -100, "Min": -100, "Max": 20}})
+    q.set_pin("DialTarget", "Gain~gain")
+    assert q.status() == "Fader target OK: Gain~gain"
+    q.set_pin("DialTarget", "   ")
+    assert q.status() == ok and q.pin("Status")["Value"] == 0
+    # a bad target replaced by a bad target, then blank: still the engine's text
+    q.set_pin("DialTarget", "Gain")
+    q.set_pin("DialTarget", "Gain~nope")
+    assert "has no control nope" in q.status()
+    q.set_pin("DialTarget", "")
+    assert q.status() == ok and q.errors == []
+
+
+def test_fader_relative_finger_continues_from_an_outside_write():
+    q = boot()
+    g = geometry(q)
+    q.set_pin("GrabMode", "Relative")
+    q.set_pin("FaderPosition", 0.5)
+    q.touch([at(g, 0.5)], lift=False)
+    q.set_pin("FaderPosition", 0.9)                            # written from outside under the finger
+    q.advance(0.05)
+    assert near(pos(q), 0.9) and "-1.0 dB" in texts(q.icon())
+    q.touch([at(g, 0.55)], lift=False)                         # +0.05 of travel continues from 0.9
+    assert near(pos(q), 0.95, 1e-6)
+    q.set_pin("FaderValue", -45)                               # a value write re-anchors too
+    assert near(pos(q), 0.5)
+    q.touch([at(g, 0.45)], lift=False)
+    assert near(pos(q), 0.4, 1e-6)
+    q.lift()
+    # a target bound while the finger rests re-anchors as well
+    gain = q.add_component("Gain", "gain", controls={"gain": {"Value": -40, "Min": -100, "Max": 20}})
+    q.touch([at(g, 0.3)], lift=False)
+    q.set_pin("DialTarget", "Gain~gain")
+    assert near(pos(q), 0.5)
+    q.touch([at(g, 0.35)], lift=False)
+    assert near(pos(q), 0.55, 1e-6) and near(gain.get("gain")["Position"], 0.55, 1e-6)
+    q.lift()
+    # Jump mode is unaffected: the finger keeps the fader under it
+    q.set_pin("DialTarget", "")
+    q.set_pin("GrabMode", "Jump")
+    q.touch([at(g, 0.2)], lift=False)
+    q.set_pin("FaderPosition", 0.8)
+    q.touch([at(g, 0.25)], lift=False)
+    assert near(pos(q), 0.25, 1e-6)
+    q.lift()
+    assert q.errors == []
+
+
+def labels_of(q):
+    """[(y, text)] of the scale labels of a vertical pad, top first."""
+    svg = q.icon()
+    out = []
+    for x, y, t in re.findall(r'<text x="([-\d.]+)" y="([-\d.]+)"[^>]*>([^<]*)</text>', svg):
+        if t.startswith("Touch") or "dB" in t or t.endswith("..."):   # the hint (maybe shortened), the readout
+            continue
+        out.append((float(y), t))
+    return sorted(out)
+
+
+def test_fader_short_pads_keep_the_scale_labels_apart():
+    for w, h in ((200, 120), (300, 125), (500, 130), (1600, 120), (500, 200), (120, 120)):
+        q = boot(props={"Pad Width": w, "Pad Height": h})
+        labs = labels_of(q)
+        if not labs:
+            continue                                           # no room for labels at all
+        assert labs[0][1] == "10" and labs[-1][1] == "-100", (w, h, labs)
+        gaps = [b[0] - a[0] for a, b in zip(labs, labs[1:])]
+        assert min(gaps) >= 9, (w, h, labs)                    # never closer than the font size
+    # horizontal: the same guard keeps the end label clear of its neighbour
+    for w, h in ((200, 200), (260, 120), (600, 200)):
+        q = boot(props={"Orientation": "Horizontal", "Pad Width": w, "Pad Height": h})
+        xs = sorted((float(x), t) for x, t in re.findall(r'<text x="([-\d.]+)" y="[-\d.]+"[^>]*anchor="middle"[^>]*>([^<]*)</text>', q.icon())
+                    if "dB" not in t and not t.startswith("Touch") and not t.endswith("..."))
+        if len(xs) < 2:
+            continue
+        assert xs[-1][1] == "10" and xs[0][1] == "-100"
+        assert min(b[0] - a[0] for a, b in zip(xs, xs[1:])) >= 20, (w, h, xs)
+
+
+def test_fader_degenerate_range_reads_min_everywhere():
+    q = boot()
+    g = geometry(q)
+    q.set_pin("FaderMin", 5)
+    q.set_pin("FaderMax", 5)
+    q.tap(*at(g, 0.25))
+    assert near(pos(q), 0.25, 1e-6) and near(val(q), 5)
+    t = texts(q.icon())
+    assert "5.00 dB" in t and "5.25 dB" not in t
+    assert all(x in ("5.00 dB", "Touch or drag the fader") for x in t), t   # no scale labels
+    assert q.icon().count("<line") == 62 + 1                   # the ticks still draw
+    q.set_pin("FaderValue", 7)                                 # any value maps to position 0
+    assert near(pos(q), 0) and near(val(q), 5)
+    q.set_pin("FaderPosition", 0.8)
+    assert near(val(q), 5)
+    assert q.run("return TouchPad.inst.readout(TouchPad.inst.valueOf(0.8))") == "5.00 dB"
+    # a real range again: labels and values come back
+    q.set_pin("FaderMax", 15)
+    q.advance(0.1)
+    assert near(val(q), 13) and "15.0" in texts(q.icon())
+    assert q.errors == []
+
+
+def test_fader_resumes_from_the_persisted_position():
+    q = QSys(mode="Fader", picker="Color_Picker", plugin=PLUGIN, runtime=False)
+    q.control("FaderValue").Value = -20
+    q.control("FaderPosition").Value = 0.6
+    q._dispatch("load", q._chunk)
+    assert near(pos(q), 0.6) and near(val(q), -34)             # position wins, the value follows the range
+    q.advance(0.2)
+    assert "-34.0 dB" in texts(q.icon())
+    g = geometry(q)
+    q.set_pin("GrabMode", "Relative")
+    q.drag(along(g, 0.2, 0.3, 5), seconds=0.3)
+    assert near(pos(q), 0.7, 1e-6)
+    # a persisted position outside 0..1 clamps; a bound target overrides it
+    r = QSys(mode="Fader", picker="Color_Picker", plugin=PLUGIN, runtime=False)
+    r.control("FaderPosition").Value = 1.7
+    r._dispatch("load", r._chunk)
+    assert near(pos(r), 1) and near(val(r), 10)
+    s = QSys(mode="Fader", picker="Color_Picker", plugin=PLUGIN, runtime=False)
+    s.add_component("Gain", "gain", controls={"gain": {"Value": -40, "Min": -100, "Max": 20}})
+    s.control("FaderPosition").Value = 0.2
+    s.control("DialTarget").String = "Gain~gain"
+    s._dispatch("load", s._chunk)
+    assert near(pos(s), 0.5) and s.status() == "Fader target OK: Gain~gain"
+    assert q.errors == [] and r.errors == [] and s.errors == []

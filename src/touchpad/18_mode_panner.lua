@@ -8,8 +8,10 @@
 -- a stereo pan such as the Mic Mixer's MicPan: it equals PanX) and one
 -- SpeakerGain per speaker in dB from a constant-power law on the distance
 -- between the source and each speaker (a gaussian kernel whose width grows
--- with `Divergence`, normalised so the squared weights sum to one; weights
--- are clamped at 1e-4, so -80 dB is the floor). The LFE channel of 5.1 and
+-- with `Divergence`: 0 feeds the nearest speaker only, 0.5 keeps a focused
+-- image, 1 spreads the source over every speaker within about a decibel;
+-- the weights are normalised so their squares sum to one and clamped at
+-- 1e-4, so -80 dB is the floor). The LFE channel of 5.1 and
 -- 7.1 has no position and stays at 0 dB. PanX, PanY and Pan are pins in both
 -- directions: writing one moves the source and recomputes the gains.
 --
@@ -24,7 +26,7 @@ Modes = Modes or {}
 do
   local HINT = "Drag to pan, double tap to centre"
   local FLOOR_W = 1e-4                      -- weight floor: 20*log10(1e-4) = -80 dB
-  local SIGMA0, SIGMA1 = 0.25, 2.75         -- kernel width (room units) at Divergence 0 and 1
+  local SIGMA0, SIGMA1 = 0.25, 6            -- kernel width (room units) at Divergence 0 and 1
 
   local floor, abs, sqrt, min, max, exp, log = math.floor, math.abs, math.sqrt, math.min, math.max, math.exp, math.log
   local sformat = string.format
@@ -57,7 +59,8 @@ do
 
   -- Constant-power weights (0..1) of a source at (x, y) into `out`.
   local function computeWeights(layout, x, y, div, out)
-    local sigma = SIGMA0 + (SIGMA1 - SIGMA0) * U.clamp(div, 0, 1)
+    local k = U.clamp(div, 0, 1)
+    local sigma = SIGMA0 + (SIGMA1 - SIGMA0) * k * k * k     -- cubic: the low half stays focused
     local inv = 1 / (sigma * sigma)
     local sum, placed = 0, 0
     for i = 1, #layout do
@@ -228,11 +231,15 @@ do
         E.out("Pan", self.x)
       end
 
+      -- A NaN (x ~= x) is tested before the clamp: U.clamp would turn it into
+      -- the low bound and send the source hard left / fully back.
       local function setSource(x, y)
-        x = U.clamp(tonumber(x) or 0, -1, 1)
-        y = U.clamp(tonumber(y) or 0, -1, 1)
+        x = tonumber(x) or 0
+        y = tonumber(y) or 0
         if x ~= x then x = 0 end
         if y ~= y then y = 0 end
+        x = U.clamp(x, -1, 1)
+        y = U.clamp(y, -1, 1)
         if abs(x - self.x) < 1e-12 and abs(y - self.y) < 1e-12 then return false end
         self.x, self.y = x, y
         writePan()
@@ -282,13 +289,19 @@ do
       end
 
       -- ---------- pins ----------
+      -- A pin written with a NaN moves that axis to the centre; when the source
+      -- did not move the pins are rewritten anyway so none keeps the NaN.
       function self:onControl(name, index, ctl)
         if name == "PanX" or name == "Pan" then
           local v = tonumber(ctl.Value)
-          if v then setSource(v, self.y) end
+          if v then
+            if not setSource(v, self.y) and v ~= v then writePan() end
+          end
         elseif name == "PanY" then
           local v = tonumber(ctl.Value)
-          if v then setSource(self.x, v) end
+          if v then
+            if not setSource(self.x, v) and v ~= v then writePan() end
+          end
         elseif name == "Divergence" then
           readDivergence()
           updateGains()
@@ -305,9 +318,11 @@ do
       -- ---------- drawing ----------
       -- The room, its centre lines and the speaker labels never change:
       -- drawn once into a scratch canvas and replayed as one raw element.
-      local function staticRaw()
+      -- The scratch canvas takes the engine canvas's font family so the
+      -- labels use the Font property like every other string (spec 5.5).
+      local function staticRaw(c)
         if self.static then return self.static end
-        local s = Svg.new(W, H, { limit = 20000 })
+        local s = Svg.new(W, H, { limit = 20000, family = c.family })
         s:rect(rx, ry, rw, rh, { fill = T.panel, stroke = T.line, sw = 1, rx = roomRadius })
         local cx, cy = toPad(0, 0)
         s:line(ax, cy, ax + aw, cy, { stroke = T.line, sw = 1, opacity = 0.7, dash = "3 5" })
@@ -325,7 +340,7 @@ do
 
       function self:draw(c)
         c:gradient("pglow", "radial", { { 0, T.accent, 0.85 }, { 0.55, T.accent, 0.3 }, { 1, T.accent, 0 } })
-        c:raw(staticRaw())
+        c:raw(staticRaw(c))
         -- speakers: glow, body and gain readout
         for i = 1, n do
           local p = spk[i]

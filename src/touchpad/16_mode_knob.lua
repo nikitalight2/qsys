@@ -11,8 +11,8 @@
 --
 -- Controls: KnobMin / KnobMax (display range), Units (text), KnobValue
 -- (display units, pin Both), KnobPosition (0..1, pin Both), DialTarget
--- ("CodeName~control", driven position-wise and followed while no finger
--- is down).
+-- ("CodeName~control", driven position-wise and followed when changed
+-- elsewhere, a resting finger included).
 --
 -- Design time (controls, layout) and the runtime `create(E)` live here. The
 -- body is one do-block so the built chunk gains no top-level locals.
@@ -25,6 +25,7 @@ do
   local START_ANGLE = 225           -- position 0 (bottom-left, canvas angles: 0 = right, 90 = up)
   local ACCEL_FROM, ACCEL_TO = 180, 720   -- deg/s: gain 1 below, 3 above
   local GAIN_MAX = 3
+  local GAIN_HOLD = 0.15            -- seconds the acceleration readout outlives the last move
   local ECHO_TIME = 1.0             -- seconds a target echo of our own write is ignored
   local MAJOR_TICKS, MINOR_PER = 10, 2  -- 11 major ticks, 2 minor ticks between majors
 
@@ -39,11 +40,25 @@ do
     return 2
   end
 
+  -- Rounds half away from zero (string.format alone rounds half to even, so
+  -- 50.5 would read "50" and 51.5 "52").
   local function fmtNumber(v, decimals)
     if v ~= v then return "0" end
-    local s = sformat("%." .. decimals .. "f", v)
+    local m = 10 ^ decimals
+    local r = floor(abs(v) * m + 0.5) / m
+    if v < 0 then r = -r end
+    local s = sformat("%." .. decimals .. "f", r)
     if s == "-0" or s == "-0.0" or s == "-0.00" then s = s:sub(2) end
     return s
+  end
+
+  -- Largest of a few font sizes (down to 9 px) at which str fits maxW.
+  local function fitSize(str, size, maxW, weight)
+    for _ = 1, 4 do
+      if size <= 9 or Font.width(str, size, weight) <= maxW then break end
+      size = max(9, floor(size * 0.8))
+    end
+    return size
   end
 
   -- Canvas angle (degrees) of a sweep position 0..1.
@@ -104,15 +119,30 @@ do
 
     create = function(E)
       local W, H, T = E.W, E.H, E.T
-      local cx, cy = W / 2, H / 2 - (E.hint and 6 or 0)
+      -- The hint line needs about 20 px under the labels; a pad shorter than
+      -- 160 px cannot hold it next to a usable knob, so it is dropped there.
+      local hintOn = (E.hint and H >= 160) and true or false
+      local cx, cy = W / 2, H / 2 - (hintOn and 6 or 0)
       local R = min(W, H) * 0.5 * 0.80          -- outer radius of the track
-      local band = max(12, R * 0.14)            -- track stroke width
+      local labelSize = max(10, floor(min(14, R * 0.08)))
+      local function bandOf(r) return max(12, r * 0.14) end
+      -- Fit the track into the free margin: ticks overhang half a band
+      -- outside R (top and sides) and the Min / Max labels hang below the
+      -- arc ends, above the hint line. The band never grows as R shrinks.
+      local lim = min(cx, cy) - 2
+      if R + bandOf(R) / 2 > lim then R = lim - bandOf(R) / 2 end
+      local room = H - cy - (hintOn and 20 or 2) - labelSize - 8
+      local rLabel = room / 0.70711 - bandOf(R) * 0.15
+      if R > rLabel then R = rLabel end
+      if R < 16 then R = 16 end
+      local band = bandOf(R)                    -- track stroke width
       local Rm = R - band / 2                   -- track centre radius
-      local Rin = Rm - band                     -- knob body radius; the ring is outside it
-      local Rdead = max(10, R * 0.12)           -- no angle inside this radius
+      local Rin = max(6, Rm - band)             -- knob body radius; the ring is outside it
+      local Rdead = min(max(10, R * 0.12), Rin * 0.6)   -- no angle inside this radius
+      local tickIn, tickMid, tickOut = band * 0.15, band * 0.35, band * 0.5
       local valueSize = max(14, floor(Rin * 0.34))
       local unitSize = max(10, floor(valueSize * 0.5))
-      local labelSize = max(10, floor(min(14, R * 0.08)))
+      local readW = Rin * 1.7                   -- width the readout and its sub-line fit
 
       local self = {
         p = 0,                 -- sweep position 0..1
@@ -122,6 +152,7 @@ do
         lastAngle = nil,       -- canvas angle of the previous report (nil inside the dead centre)
         lastT = nil,
         gain = 1,              -- acceleration gain of the last move (drawn while down)
+        gainTimer = nil,       -- resets the gain readout when the finger stops moving
         static = nil,          -- cached track, ticks and labels
         staticKey = nil,
         target = nil,          -- { ctl, name, wrote = { p, t } }
@@ -156,11 +187,12 @@ do
       local function targetReport(ctl)
         local tg = self.target
         if not tg or ctl ~= tg.ctl then return end
-        if self.down then return end                     -- a resting finger owns the knob
         local ok, p = pcall(function() return ctl.Position end)
         if not ok or type(p) ~= "number" then return end
         local w = tg.wrote
         if w and abs(w.p - p) < 1e-6 and E.now() - w.t < ECHO_TIME then return end
+        -- Changed elsewhere: followed, a resting finger included (as in Dial);
+        -- a drag in progress continues relative to the followed position.
         p = U.clamp(p, 0, 1)
         if abs(p - self.p) < 1e-9 then return end
         self.p = p
@@ -251,9 +283,25 @@ do
       end
 
       -- ---------- touch ----------
+      -- The multiplier readout reflects the current speed: it clears when no
+      -- move has arrived for GAIN_HOLD seconds while the finger rests.
+      local function setGain(g)
+        if self.gainTimer then self.gainTimer:cancel(); self.gainTimer = nil end
+        self.gain = g
+        if g > 1.05 then
+          self.gainTimer = E.after(GAIN_HOLD, function()
+            self.gainTimer = nil
+            if self.gain ~= 1 then
+              self.gain = 1
+              E.invalidate()
+            end
+          end)
+        end
+      end
+
       function self:onTouchStart(x, y, t)
         self.down = true
-        self.gain = 1
+        setGain(1)
         local a, d = angleAt(x, y)
         self.lastAngle, self.lastT = a, t
         if a and d >= Rin then
@@ -281,7 +329,7 @@ do
         if dt < 0.005 then dt = 0.005 end
         local speed = abs(delta) / dt
         local gain = 1 + (GAIN_MAX - 1) * U.clamp((speed - ACCEL_FROM) / (ACCEL_TO - ACCEL_FROM), 0, 1)
-        self.gain = gain
+        setGain(gain)
         if delta ~= 0 then
           setPos(self.p + delta / SWEEP * gain, true)
         end
@@ -290,7 +338,7 @@ do
       function self:onTouchEnd(x, y, t, info)
         self.down = false
         self.lastAngle, self.lastT = nil, nil
-        self.gain = 1
+        setGain(1)
         E.invalidate()
       end
 
@@ -304,6 +352,7 @@ do
         if locked then
           self.down = false
           self.lastAngle = nil
+          setGain(1)
         end
         E.invalidate()
       end
@@ -344,19 +393,29 @@ do
         s:arc(cx, cy, Rm, START_ANGLE, START_ANGLE - SWEEP, { stroke = T.well, sw = band, cap = "round" })
         s:arc(cx, cy, Rm, START_ANGLE, START_ANGLE - SWEEP, { stroke = T.line, sw = 1, opacity = 0.6 })
         local n = MAJOR_TICKS * (MINOR_PER + 1)
-        local r0, r1 = R + 4, R + 10
         for i = 0, n do
           local a = angleOfPos(i / n)
           local major = (i % (MINOR_PER + 1)) == 0
-          local x0, y0 = Svg.polar(cx, cy, r0, a)
-          local x1, y1 = Svg.polar(cx, cy, major and (r1 + 4) or r1, a)
+          local x0, y0 = Svg.polar(cx, cy, R + tickIn, a)
+          local x1, y1 = Svg.polar(cx, cy, R + (major and tickOut or tickMid), a)
           s:line(x0, y0, x1, y1, { stroke = major and T.muted or T.line, sw = major and 2 or 1, cap = "round" })
         end
+        -- Min / Max labels under the arc ends, kept inside the pad: a label
+        -- that would leave the edge slides towards the centre and is fitted
+        -- to its half of the width.
         local d = decimals()
-        local lx, ly = Svg.polar(cx, cy, R + 4, angleOfPos(0))
-        local hx, hy = Svg.polar(cx, cy, R + 4, angleOfPos(1))
-        s:text(lx - 4, ly + labelSize + 6, fmtNumber(self.lo, d), { size = labelSize, fill = T.muted, anchor = "end" })
-        s:text(hx + 4, hy + labelSize + 6, fmtNumber(self.hi, d), { size = labelSize, fill = T.muted, anchor = "start" })
+        local lx, ly = Svg.polar(cx, cy, R + tickIn, angleOfPos(0))
+        local hx = Svg.polar(cx, cy, R + tickIn, angleOfPos(1))
+        local ty = ly + labelSize + 6
+        local loS, hiS = fmtNumber(self.lo, d), fmtNumber(self.hi, d)
+        local x = lx - 4
+        local w = Font.width(loS, labelSize)
+        if x - w < 2 then x = min(2 + w, cx - 4) end
+        s:textFit(x, ty, cx - 6, loS, { size = labelSize, fill = T.muted, anchor = "end" })
+        x = hx + 4
+        w = Font.width(hiS, labelSize)
+        if x + w > W - 2 then x = max(W - 2 - w, cx + 4) end
+        s:textFit(x, ty, W - cx - 6, hiS, { size = labelSize, fill = T.muted, anchor = "start" })
         s.parts[1] = s.parts[1] or ""
         self.static = table.concat(s.parts)
         self.staticKey = key
@@ -384,18 +443,19 @@ do
           c:circle(dx, dy, band * 0.35, { fill = T.accent2, stroke = T.onAccent, sw = 1 })
         end
         -- readout
-        local v = valueOf(self.p)
-        c:textFit(cx, cy + valueSize * 0.36, Rin * 1.5, fmtNumber(v, decimals()),
-                  { size = valueSize, fill = T.text, anchor = "middle", weight = "bold" })
+        local vs = fmtNumber(valueOf(self.p), decimals())
+        local vsize = fitSize(vs, valueSize, readW, "bold")
+        c:textFit(cx, cy + valueSize * 0.36, readW, vs,
+                  { size = vsize, fill = T.text, anchor = "middle", weight = "bold" })
         local sub = self.units
         if self.down and self.gain > 1.05 then
           sub = sformat("x%.1f", self.gain) .. (sub ~= "" and ("  " .. sub) or "")
         end
         if sub ~= "" then
-          c:textFit(cx, cy + valueSize * 0.36 + unitSize + 4, Rin * 1.5, sub,
+          c:textFit(cx, cy + valueSize * 0.36 + unitSize + 4, readW, sub,
                     { size = unitSize, fill = T.muted, anchor = "middle" })
         end
-        if E.hint and not self.down then
+        if hintOn and not self.down then
           Shapes.hint(c, T, HINT, W, H)
         end
       end
@@ -403,7 +463,8 @@ do
       -- white-box helpers for tests
       self.readout = readout
       self.valueOf = valueOf
-      self.geometry = { cx = cx, cy = cy, R = R, Rm = Rm, Rin = Rin, Rdead = Rdead, band = band }
+      self.geometry = { cx = cx, cy = cy, R = R, Rm = Rm, Rin = Rin, Rdead = Rdead, band = band,
+                        tickOut = tickOut, hintOn = hintOn }
       self.angleOfPos = angleOfPos
       self.posOfAngle = posOfAngle
 

@@ -13,7 +13,13 @@
 -- for a -100..10 range (the lower half of the travel covers the quiet end).
 -- SnapCenter snaps a touch-driven position to the centre value (the middle
 -- of the range) within 3 % of the travel. DialTarget ("CodeName~control")
--- drives a control position-wise and follows it while no finger is down.
+-- drives a control position-wise and follows it while no finger is down; a
+-- target problem shows on Status (never over an engine error) and clearing
+-- the target restores the engine's own status. Min == Max is a degenerate
+-- range: every value reads Min and the scale carries no labels.
+--
+-- At start the fader resumes from the persisted FaderPosition pin (or the
+-- target's level when DialTarget binds) rather than the minimum.
 --
 -- Outputs: FaderPosition (0..1, pin Both), FaderValue (display units, pin
 -- Both) and the common set (Touching, X, Y, the pulses, Gesture...).
@@ -29,6 +35,8 @@ do
   local ECHO_TIME = 1.0             -- seconds a target echo of our own write is ignored
   local SNAP = 0.03                 -- SnapCenter window as a fraction of the travel
   local MAJOR_TICKS, MINOR_PER = 10, 2  -- 11 major ticks, 2 minor ticks between majors
+  local STATUS_PREFIX = "Fader target"  -- every Status text this mode writes starts so
+  local LEVEL_OF = { [0] = "ok", [1] = "warn", [2] = "error" }
   -- Audio taper: travel position -> normalised range position, piecewise
   -- linear. For -100..10 the knees read -60, -40, -20, 0 and +10 dB.
   local AUDIO_CURVE = {
@@ -188,9 +196,11 @@ do
         static = nil,          -- cached slot, ticks and labels
         staticKey = nil,
         target = nil,          -- { ctl, name, wrote = { p, t } }
+        statusBase = nil,      -- the engine's Status before this mode wrote one { text, level }
       }
 
       -- ---------- value helpers ----------
+      local function degenerate() return abs(self.hi - self.lo) < 1e-9 end
       local function range()
         local r = self.hi - self.lo
         if abs(r) < 1e-9 then r = 1 end
@@ -204,8 +214,12 @@ do
         if self.audio then return audioInverse(n) end
         return n
       end
-      local function valueOf(p) return self.lo + normOfPos(U.clamp(p, 0, 1)) * range() end
+      local function valueOf(p)
+        if degenerate() then return self.lo end
+        return self.lo + normOfPos(U.clamp(p, 0, 1)) * range()
+      end
       local function posOfValue(v)
+        if degenerate() then return 0 end
         local n = (v - self.lo) / range()
         return posOfNorm(U.clamp(n, 0, 1))
       end
@@ -221,6 +235,38 @@ do
         local c = centrePos()
         if abs(p - c) <= SNAP then return c end
         return p
+      end
+
+      -- ---------- status ----------
+      -- The engine owns Status (picker problems, errors). This mode only
+      -- writes over it when its own message is at least as severe, remembers
+      -- what the engine showed and restores that when the target is cleared.
+      local function engineStatus()
+        local ok, text, value = pcall(function()
+          local st = E.ctl("Status")
+          return st and st.String, st and st.Value
+        end)
+        if not ok or type(text) ~= "string" then return nil end
+        return text, LEVEL_OF[floor(tonumber(value) or 0)] or "ok"
+      end
+      local function mine(text) return type(text) == "string" and U.startsWith(text, STATUS_PREFIX) end
+      local function rememberBase()
+        local text, level = engineStatus()
+        if text and not mine(text) then self.statusBase = { text = text, level = level } end
+      end
+      local function postStatus(text, level)
+        rememberBase()
+        local base = self.statusBase
+        local baseLevel = base and base.level or "ok"
+        local rank = { ok = 0, warn = 1, error = 2 }
+        if base and rank[baseLevel] > rank[level] then return end   -- the engine's problem stays visible
+        E.status(text, level)
+      end
+      local function restoreStatus()
+        local text = engineStatus()
+        if mine(text) and self.statusBase then
+          E.status(self.statusBase.text, self.statusBase.level)
+        end
       end
 
       -- ---------- the direct target ----------
@@ -247,6 +293,12 @@ do
         E.invalidate()
       end
 
+      -- An outside change while a finger rests (a pin write, a target bind)
+      -- re-anchors a relative move so it continues from the new position.
+      local function anchor()
+        if self.down then self.raw = self.p end
+      end
+
       local function unbindTarget()
         local tg = self.target
         if tg then
@@ -258,25 +310,28 @@ do
       local function bindTarget(spec)
         unbindTarget()
         spec = U.trim(spec)
-        if spec == "" then return end
+        if spec == "" then
+          restoreStatus()
+          return
+        end
         local code, name = spec:match("^(.-)%s*~%s*(.+)$")
         if not code or code == "" then
-          E.status("Fader target: use CodeName~control", "warn")
+          postStatus("Fader target: use CodeName~control", "warn")
           return
         end
         local comp = (type(Q) == "table" and type(Q.component) == "function") and Q.component(code) or nil
         if not comp then
-          E.status("Fader target: no component named " .. code, "warn")
+          postStatus("Fader target: no component named " .. code, "warn")
           return
         end
         local ok, ctl = pcall(function() return comp[name] end)
         if not ok or ctl == nil then
-          E.status("Fader target: " .. code .. " has no control " .. name, "warn")
+          postStatus("Fader target: " .. code .. " has no control " .. name, "warn")
           return
         end
         local okp, p = pcall(function() return ctl.Position end)
         if not okp or type(p) ~= "number" then
-          E.status("Fader target: " .. spec .. " has no position", "warn")
+          postStatus("Fader target: " .. spec .. " has no position", "warn")
           return
         end
         local tg = { ctl = ctl, name = spec }
@@ -286,9 +341,10 @@ do
         pcall(function() ctl.EventHandler = handler end)
         -- Start from the target's level.
         self.p = U.clamp(p, 0, 1)
+        anchor()
         E.out("FaderPosition", self.p)
         E.out("FaderValue", valueOf(self.p))
-        E.status("Fader target OK: " .. spec, "ok")
+        postStatus("Fader target OK: " .. spec, "ok")
         E.invalidate()
       end
 
@@ -387,10 +443,10 @@ do
       function self:onControl(name, index, ctl)
         if name == "FaderValue" then
           local v = tonumber(ctl.Value)
-          if v then setPos(posOfValue(v)) end
+          if v then setPos(posOfValue(v)) anchor() end
         elseif name == "FaderPosition" then
           local v = tonumber(ctl.Value)
-          if v then setPos(v) end
+          if v then setPos(v) anchor() end
         elseif name == "FaderMin" or name == "FaderMax" or name == "Units" or name == "Taper" then
           readInputs()
           rangeChanged()
@@ -403,6 +459,9 @@ do
 
       function self:onStart()
         readInputs()
+        local fp = E.ctl("FaderPosition")
+        local pv = fp and tonumber(fp.Value)
+        if pv and pv == pv then self.p = U.clamp(pv, 0, 1) end   -- the persisted level
         E.out("FaderPosition", self.p)
         E.out("FaderValue", valueOf(self.p))
         local tg = E.ctl("DialTarget")
@@ -415,12 +474,13 @@ do
       -- Slot, ticks and labels only change with the range, the units and the
       -- taper: drawn once into a scratch canvas and replayed as one raw
       -- element.
-      local function staticRaw()
+      local function staticRaw(c)
         local key = tostring(self.lo) .. "|" .. tostring(self.hi) .. "|" .. self.units .. "|" .. tostring(self.audio)
         if self.static and self.staticKey == key then return self.static end
-        local s = Svg.new(W, H, { limit = 20000 })
+        local s = Svg.new(W, H, { limit = 20000, family = c.family })
         local n = MAJOR_TICKS * (MINOR_PER + 1)
         local d = max(0, decimals() - 1)
+        local labels = not degenerate()                 -- Min == Max: ticks only
         local slot = g.slot
         if vertical then
           s:rect(g.cx - slot / 2, g.y1 - slot / 2, slot, g.len + slot,
@@ -437,9 +497,10 @@ do
             local col = major and T.muted or T.line
             s:line(xl - tl, y, xl, y, { stroke = col, sw = major and 2 or 1, cap = "round" })
             s:line(xr, y, xr + tl, y, { stroke = col, sw = major and 2 or 1, cap = "round" })
-            if major and room >= 28 then
+            if major and labels and room >= 28 then
               local m = i // (MINOR_PER + 1)
-              if m % every == 0 or m == MAJOR_TICKS then
+              -- a thinned label too close to the end label is skipped
+              if (m % every == 0 and MAJOR_TICKS - m >= every) or m == MAJOR_TICKS then
                 s:text(xl - 14, y + labelSize * 0.36, fmtNumber(valueOf(i / n), d),
                        { size = labelSize, fill = T.muted, anchor = "end" })
               end
@@ -459,9 +520,9 @@ do
             local col = major and T.muted or T.line
             s:line(x, yb, x, yb + tl, { stroke = col, sw = major and 2 or 1, cap = "round" })
             s:line(x, yt - tl, x, yt, { stroke = col, sw = major and 2 or 1, cap = "round" })
-            if major and room >= labelSize then
+            if major and labels and room >= labelSize then
               local m = i // (MINOR_PER + 1)
-              if m % every == 0 or m == MAJOR_TICKS then
+              if (m % every == 0 and MAJOR_TICKS - m >= every) or m == MAJOR_TICKS then
                 s:text(x, yb + 12 + labelSize, fmtNumber(valueOf(i / n), d),
                        { size = labelSize, fill = T.muted, anchor = "middle" })
               end
@@ -475,7 +536,7 @@ do
       end
 
       function self:draw(c)
-        c:raw(staticRaw())
+        c:raw(staticRaw(c))
         local p = self.p
         local cw, ch, slot = g.capW, g.capH, g.slot
         local stroke = self.down and T.accent or T.line
