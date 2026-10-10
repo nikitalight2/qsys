@@ -8,14 +8,20 @@
 -- at both ends; `Turns` is how many full turns cover the range. `Detents`
 -- notches per turn each pulse StepUp or StepDown once as the wheel clicks
 -- past them (the step pulses keep coming at the ends of the range: the
--- wheel is endless, only the level is bounded). `DialTarget` names a control
--- ("CodeName~control") that is driven position-wise and followed when it
--- changes elsewhere, even while a finger rests on the wheel; DialValue
--- written from outside is followed the same way. With a camera set the
--- level is the camera's zoom position: a turn sends it as a zoom position
--- (a camera whose position is unknown gets zoom speed bursts instead), the
--- wheel shows the zoom factor read back from the camera, and Zoom +/-
--- changes made elsewhere are followed by the level.
+-- wheel is endless, only the level is bounded; a flick that clicks past
+-- more notches than one report may pulse pays the rest off over the next
+-- frames, none is lost). `DialTarget` names a control ("CodeName~control")
+-- that is driven position-wise and followed when it changes elsewhere, even
+-- while a finger rests on the wheel; DialValue written from outside (or
+-- restored by the Core at start) is followed the same way. With a camera
+-- set the level is the camera's zoom position: a turn sends it as a zoom
+-- position (a camera whose position is unknown gets zoom speed bursts
+-- instead), the wheel shows the zoom factor read back from the camera, and
+-- Zoom +/- changes made elsewhere are followed by the level. When both a
+-- camera and a target exist the camera seeds the level (so the first turn
+-- does not jump the zoom) and the target follows it; binding a target never
+-- moves the camera. Target problems go on Status only while nothing worse
+-- is reported there, and the engine's own text comes back on unbind.
 --
 -- Design time (controls, layout) and the runtime `create(E)` live here. The
 -- body is one do-block so the built chunk gains no top-level locals.
@@ -26,7 +32,7 @@ do
   local HINT = "Turn the wheel. The centre does nothing"
   local DEAD_FRACTION = 0.30        -- inner part of the wheel that does nothing
   local SETTLE_DEG = 8              -- degrees of a new touch that move nothing
-  local MAX_STEPS = 8               -- step pulses per report at most (bounded loop)
+  local MAX_STEPS = 8               -- step pulses per report or frame at most (bounded loop)
   local MAX_MARKS = 72              -- notches drawn at most
   local IDLE_MARKS = 12             -- notches drawn when Detents = 0
   local ECHO_TIME = 1.0             -- s a target echo of our own write is ignored
@@ -35,6 +41,9 @@ do
   local CAM_SETTLE = 4.0            -- s of readings after the last send at most
   local ZOOM_BURST = 0.25           -- s a speed burst lasts for a camera without position
   local STEP_TEXT_TIME = 0.6        -- s the step readout stays on the pad
+  local HINT_H = 22                 -- px kept clear for the hint line (Shapes.hint)
+  local STATUS_PREFIX = "Dial target"
+  local LEVEL_NAME = { [0] = "ok", [1] = "warn", [2] = "error" }
 
   local floor, abs, sqrt, min, max = math.floor, math.abs, math.sqrt, math.min, math.max
   local sformat = string.format
@@ -95,14 +104,25 @@ do
 
     create = function(E)
       local W, H, T = E.W, E.H, E.T
-      local cx, cy = W / 2, H / 2 - (E.hint and 6 or 0)
-      local R = min(W, H) * 0.5 * 0.80          -- wheel radius
+      -- The wheel, its level track and the step cue stay inside the canvas
+      -- above the hint line on every pad size (120 px up).
+      local hintH = E.hint and HINT_H or 0
+      local avail = min(W, H - hintH)
+      local cx, cy = W / 2, (H - hintH) / 2
+      local trackW = max(4, min(8, avail * 0.02))
+      local R = min(min(W, H) * 0.40, avail / 2 - 11 - trackW / 2)   -- wheel radius
       local Rdead = R * DEAD_FRACTION           -- dead centre radius
       local Rtrack = R + 9                      -- level arc radius (outside the wheel)
-      local trackW = max(4, min(8, R * 0.05))
       local markIn, markOut = R * 0.80, R * 0.95
-      local valueSize = max(14, floor(Rdead * 0.55))
-      local subSize = max(9, floor(valueSize * 0.42))
+      local readW = R * 1.5 - 6                 -- readout width (inside the notches)
+      local valueSize = max(9, floor(Rdead * 0.55))
+      local w100 = Font.width("100%", valueSize, "bold")
+      if w100 > readW then valueSize = max(9, floor(valueSize * readW / w100)) end
+      local subSize = max(7, floor(valueSize * 0.42))
+      local wsub = Font.width("ZOOM x40.0", subSize)
+      if wsub > readW then subSize = max(7, floor(subSize * readW / wsub)) end
+      local cueR = (Rdead + markIn) / 2         -- step cue: inside the wheel, above the centre
+      local cueSize = max(8, min(14, (markIn - Rdead) * 0.45))
 
       local self = {
         v = 0,                  -- the level 0..1 (DialValue)
@@ -113,9 +133,11 @@ do
         lastAngle = nil,        -- canvas angle of the previous report (nil in the dead centre)
         fx = 0, fy = 0,         -- finger
         detentAcc = 0,          -- clockwise degrees since the detent phase was reset
+        stepDebt = 0,           -- detent clicks still to pulse (+ up / - down)
         lastStep = 0,           -- +1 / -1 of the last step pulse (drawn briefly)
         stepAt = -10,
-        target = nil,           -- { ctl, name, wrote = { p, t } }
+        target = nil,           -- { ctl, name, wrote = { p, t }, writing }
+        prevStatus = nil,       -- Status text/level before the first target message
         -- camera
         camZoom = 0,            -- zoom position read back (0..1)
         camPan = nil, camTilt = nil,
@@ -133,12 +155,46 @@ do
         local c = E.ctl(name)
         if c == nil then return default end
         local n = tonumber(c.Value)
-        if n == nil then return default end
+        if n == nil or n ~= n then return default end
         return n
       end
       local function turns() return U.clamp(knob("Turns", 2), 0.5, 10) end
       local function detents() return floor(U.clamp(knob("Detents", 24), 0, 72) + 0.5) end
       local function opticalZoom() return U.clamp(knob("OpticalZoom", 12), 1, 40) end
+      local function held(name)
+        local c = E.ctl(name)
+        return c ~= nil and c.Boolean == true
+      end
+
+      -- ---------- status ----------
+      -- Target messages never hide a worse status (no picker, an error); the
+      -- engine's own text comes back when the target is unbound or OK.
+      local function statusNow()
+        local st = E.ctl("Status")
+        if st == nil then return "", 0 end
+        local text = st.String
+        if type(text) ~= "string" then text = "" end
+        return text, floor(tonumber(st.Value) or 0)
+      end
+
+      local function clearDialStatus()
+        local text = statusNow()
+        local prev = self.prevStatus
+        if prev and U.startsWith(text, STATUS_PREFIX) then
+          E.status(prev.text, LEVEL_NAME[prev.level] or "ok")
+        end
+        self.prevStatus = nil
+      end
+
+      local function dialStatus(text, level)
+        local cur, curLevel = statusNow()
+        local mine = U.startsWith(cur, STATUS_PREFIX)
+        if not mine then
+          self.prevStatus = { text = cur, level = curLevel }
+          if curLevel > (level == "warn" and 1 or 0) then return end   -- a worse status stands
+        end
+        E.status(text, level)
+      end
 
       -- ---------- camera ----------
       local function cam() return E.camera end
@@ -149,7 +205,11 @@ do
 
       local setValue   -- forward
 
-      local function readZoom()
+      -- Reads the camera position. `adopt` makes the level take the zoom read
+      -- (so does Zoom +/- held when the answer comes); the answer may come
+      -- later (VISCA answers on the inquiry reply), so the intent travels
+      -- with the callback.
+      local function readZoom(adopt)
         local c = cam()
         if c == nil or type(c.getPosition) ~= "function" then return end
         self.camReadAt = E.now()
@@ -157,13 +217,13 @@ do
           if type(p) == "number" and type(t) == "number" then
             self.camPan, self.camTilt = p, t
           end
-          if type(z) ~= "number" then return end
+          if type(z) ~= "number" or z ~= z then return end
           z = U.clamp(z, 0, 1)
           if abs(z - self.camZoom) > 1e-9 then
             self.camZoom = z
             E.invalidate()
           end
-          if self.following then setValue(z, "camera") end
+          if adopt or self.following then setValue(z, "camera") end
         end)
       end
 
@@ -222,16 +282,22 @@ do
       end
 
       -- ---------- the direct target ----------
+      -- The echo of our own write is told apart by the position the control
+      -- actually took (a quantised target snaps it), not by the value sent.
       local function targetWrite(p)
         local tg = self.target
         if not tg then return end
-        tg.wrote = { p = p, t = E.now() }
+        tg.writing = true
         pcall(function() tg.ctl.Position = p end)
+        tg.writing = false
+        local ok, got = pcall(function() return tg.ctl.Position end)
+        if not ok or type(got) ~= "number" then got = p end
+        tg.wrote = { p = got, t = E.now() }
       end
 
       local function targetReport(ctl)
         local tg = self.target
-        if not tg or ctl ~= tg.ctl then return end
+        if not tg or ctl ~= tg.ctl or tg.writing then return end
         local ok, p = pcall(function() return ctl.Position end)
         if not ok or type(p) ~= "number" then return end
         local w = tg.wrote
@@ -251,25 +317,28 @@ do
       local function bindTarget(spec)
         unbindTarget()
         spec = U.trim(tostring(spec or ""))
-        if spec == "" then return end
+        if spec == "" then
+          clearDialStatus()
+          return
+        end
         local code, name = spec:match("^(.-)%s*~%s*(.+)$")
         if not code or code == "" then
-          E.status("Dial target: use CodeName~control", "warn")
+          dialStatus(STATUS_PREFIX .. ": use CodeName~control", "warn")
           return
         end
         local comp = (type(Q) == "table" and type(Q.component) == "function") and Q.component(code) or nil
         if not comp then
-          E.status("Dial target: no component named " .. code, "warn")
+          dialStatus(STATUS_PREFIX .. ": no component named " .. code, "warn")
           return
         end
         local ok, ctl = pcall(function() return comp[name] end)
         if not ok or ctl == nil then
-          E.status("Dial target: " .. code .. " has no control " .. name, "warn")
+          dialStatus(STATUS_PREFIX .. ": " .. code .. " has no control " .. name, "warn")
           return
         end
         local okp, p = pcall(function() return ctl.Position end)
         if not okp or type(p) ~= "number" then
-          E.status("Dial target: " .. spec .. " has no position", "warn")
+          dialStatus(STATUS_PREFIX .. ": " .. spec .. " has no position", "warn")
           return
         end
         local tg = { ctl = ctl, name = spec }
@@ -277,15 +346,21 @@ do
         local handler = function(c) targetReport(c) end
         if type(Q) == "table" and type(Q.guard) == "function" then handler = Q.guard("dial target", handler) end
         pcall(function() ctl.EventHandler = handler end)
-        -- Start from the target's level.
-        setValue(U.clamp(p, 0, 1), "target")
-        E.status("Dial target OK: " .. spec, "ok")
+        if cam() then
+          -- The level is the camera's zoom: the target follows it (no camera move).
+          targetWrite(self.v)
+        else
+          -- Start from the target's level (no write back to the target).
+          setValue(U.clamp(p, 0, 1), "bind")
+        end
+        dialStatus(STATUS_PREFIX .. " OK: " .. spec, "ok")
         E.invalidate()
       end
 
       -- ---------- the level ----------
-      -- source: "touch" | "pin" | "target" | "camera". Every source but the
-      -- camera drives the camera; every source but the target drives the target.
+      -- source: "touch" | "pin" | "target" | "camera" | "bind". Every source
+      -- but the camera drives the camera; every source but the target drives
+      -- the target; "bind" (adopting a target's level) drives neither.
       setValue = function(v, source)
         v = U.clamp(v, 0, 1)
         if v ~= v then v = 0 end
@@ -295,10 +370,24 @@ do
         self.lastDir = sign(v - self.v)
         self.v = v
         E.out("DialValue", v)
-        if source ~= "target" then targetWrite(v) end
-        if source ~= "camera" then zoomChanged(E.now()) end
+        if source ~= "target" and source ~= "bind" then targetWrite(v) end
+        if source ~= "camera" and source ~= "bind" then zoomChanged(E.now()) end
         E.invalidate()
         return true
+      end
+
+      -- Pulses `diff` detent clicks (+ up / - down), MAX_STEPS at a time; the
+      -- rest waits in stepDebt for the next report or frame.
+      local function pulseSteps(diff, now)
+        if diff == 0 then return end
+        local count = min(abs(diff), MAX_STEPS)
+        local name = diff > 0 and "StepUp" or "StepDown"
+        for _ = 1, count do E.pulse(name) end
+        self.stepDebt = diff - sign(diff) * count
+        self.lastStep = sign(diff)
+        self.stepAt = now
+        E.setGesture(diff > 0 and "STEP UP" or "STEP DOWN")
+        E.animate(true)                  -- tick pays the debt and clears the step cue
       end
 
       -- Applies a clockwise turn of `delta` degrees: the wheel, the level and
@@ -313,16 +402,9 @@ do
           local before = floor((self.detentAcc + step / 2) / step)
           self.detentAcc = self.detentAcc + delta
           local after = floor((self.detentAcc + step / 2) / step)
-          local diff = after - before
-          if diff ~= 0 then
-            local count = min(abs(diff), MAX_STEPS)
-            local name = diff > 0 and "StepUp" or "StepDown"
-            for _ = 1, count do E.pulse(name) end
-            self.lastStep = sign(diff)
-            self.stepAt = now
-            E.setGesture(diff > 0 and "STEP UP" or "STEP DOWN")
-            E.animate(true)                  -- tick clears the step cue
-          end
+          local diff = after - before + self.stepDebt
+          self.stepDebt = 0
+          pulseSteps(diff, now)
         end
         E.invalidate()
       end
@@ -405,7 +487,7 @@ do
           return
         end
         if name == "Detents" then
-          self.detentAcc = 0
+          self.detentAcc, self.stepDebt = 0, 0
           E.invalidate()
           return
         end
@@ -421,21 +503,24 @@ do
         if c == nil then return end
         if name == "ZoomIn" or name == "ZoomOut" then
           if type(c.onControl) == "function" then pcall(c.onControl, c, name, index, ctl) end
-          self.following = ctl.Boolean and true or false
-          if self.following then
+          if ctl.Boolean then
+            self.following = true
             -- Zoom +/- is a different source: a pending dial send would fight it.
             if self.camTimer then self.camTimer:cancel(); self.camTimer = nil end
             self.camPending = false
             if self.burst then self.burst:cancel(); self.burst = nil end
-            readZoom()
+            readZoom(false)
             watchCamera(CAM_SETTLE)
           else
-            -- One last reading once the camera has stopped.
-            E.after(CAM_READ, function()
-              self.following = true
-              readZoom()
-              self.following = false
-            end)
+            -- Released: the other button may still be held.
+            self.following = held("ZoomIn") or held("ZoomOut")
+            if not self.following then
+              -- One last reading once the camera has stopped takes the level
+              -- along, unless a finger is turning the wheel by then.
+              E.after(CAM_READ, function()
+                readZoom(not (self.down and self.settled))
+              end)
+            end
           end
           E.invalidate()
           return
@@ -448,7 +533,13 @@ do
         local busy = false
         if cam() and (self.following or now < self.camWatch) then
           busy = true
-          if now - self.camReadAt >= CAM_READ - 0.0005 then readZoom() end
+          if now - self.camReadAt >= CAM_READ - 0.0005 then readZoom(false) end
+        end
+        if self.stepDebt ~= 0 then
+          local debt = self.stepDebt
+          self.stepDebt = 0
+          pulseSteps(debt, now)
+          busy = true
         end
         if now - self.stepAt < STEP_TEXT_TIME then
           busy = true
@@ -460,28 +551,30 @@ do
       end
 
       function self:onStart()
+        -- A level the Core restored (or a wired input pushed) is adopted; the
+        -- write back only normalises an out-of-range value.
+        self.v = U.clamp(knob("DialValue", 0), 0, 1)
         E.out("DialValue", self.v)
         local tg = E.ctl("DialTarget")
         if tg and type(tg.String) == "string" and U.trim(tg.String) ~= "" then
           bindTarget(tg.String)
         end
         -- With a camera the level starts at the camera's zoom position so the
-        -- first turn does not jump the zoom.
-        if cam() and not self.target then
-          self.following = true
-          readZoom()
-          self.following = false
-        end
+        -- first turn does not jump the zoom (a target follows it).
+        if cam() then readZoom(true) end
       end
 
       -- ---------- drawing ----------
       -- The notches only change with Detents: drawn once at rotation 0 into a
-      -- scratch canvas and replayed inside a rotated group every frame.
+      -- scratch canvas and replayed inside a rotated group every frame. The
+      -- cache key carries the count and the style (faint idle marks or
+      -- detent marks).
       local function marksRaw(n)
-        local marks = n > 0 and min(n, MAX_MARKS) or IDLE_MARKS
-        if self.marks and self.marksKey == marks then return self.marks end
-        local s = Svg.new(W, H, { limit = 20000 })
         local strong = n > 0
+        local marks = strong and min(n, MAX_MARKS) or IDLE_MARKS
+        local key = marks .. (strong and "s" or "f")
+        if self.marks and self.marksKey == key then return self.marks end
+        local s = Svg.new(W, H, { limit = 20000 })
         -- one path for the plain notches, one line for the index notch
         local d = {}
         for i = 1, marks - 1 do
@@ -499,7 +592,7 @@ do
         s:line(x0, y0, x1, y1, { stroke = T.accent2, sw = 3, cap = "round" })
         s.parts[1] = s.parts[1] or ""
         self.marks = table.concat(s.parts)
-        self.marksKey = marks
+        self.marksKey = key
         return self.marks
       end
 
@@ -526,22 +619,23 @@ do
         end
         -- readout: the level, then the zoom factor or the last step
         local pct = floor(self.v * 100 + 0.5)
-        c:textFit(cx, cy + valueSize * 0.36, Rdead * 1.8, sformat("%d%%", pct),
+        c:textFit(cx, cy + valueSize * 0.36, readW, sformat("%d%%", pct),
                   { size = valueSize, fill = T.text, anchor = "middle", weight = "bold" })
         local sub
+        local stepFresh = self.lastStep ~= 0 and now - self.stepAt < STEP_TEXT_TIME
         if cam() then
           sub = sformat("ZOOM x%.1f", zoomFactor())
-        elseif self.lastStep ~= 0 and now - self.stepAt < STEP_TEXT_TIME then
+        elseif stepFresh then
           sub = self.lastStep > 0 and "STEP +" or "STEP -"
         end
         if sub then
-          c:textFit(cx, cy + valueSize * 0.36 + subSize + 3, Rdead * 1.8, sub,
+          c:textFit(cx, cy + valueSize * 0.36 + subSize + 3, readW, sub,
                     { size = subSize, fill = cam() and T.muted or T.accent2, anchor = "middle" })
         end
-        -- step cue on the rim while a step is fresh
-        if self.lastStep ~= 0 and now - self.stepAt < STEP_TEXT_TIME then
-          local ax, ay = Svg.polar(cx, cy, Rtrack + trackW + 10, 90)
-          Shapes.icon(c, self.lastStep > 0 and "plus" or "minus", ax, ay, 14, T.accent2)
+        -- step cue inside the wheel while a step is fresh
+        if stepFresh then
+          local ax, ay = Svg.polar(cx, cy, cueR, 90)
+          Shapes.icon(c, self.lastStep > 0 and "plus" or "minus", ax, ay, cueSize, T.accent2)
         end
         if E.hint and not self.down then
           Shapes.hint(c, T, HINT, W, H)
@@ -560,7 +654,8 @@ do
       end
 
       -- white-box helpers for tests
-      self.geometry = { cx = cx, cy = cy, R = R, Rdead = Rdead, Rtrack = Rtrack }
+      self.geometry = { cx = cx, cy = cy, R = R, Rdead = Rdead, Rtrack = Rtrack, trackW = trackW,
+                        readW = readW, valueSize = valueSize, cueR = cueR, cueSize = cueSize }
       self.zoomFactor = zoomFactor
 
       return self

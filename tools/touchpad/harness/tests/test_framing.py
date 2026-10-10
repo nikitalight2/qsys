@@ -41,8 +41,9 @@ def clamp(v, lo, hi):
     return lo if v < lo else hi if v > hi else v
 
 
-def compose(view, box, min_frame=0.25):
-    """The frame (cx, cy, fw) a box (pad px) asks for on a view (cx, cy, fw)."""
+def compose(view, box, min_frame=0.25, oz=12):
+    """The frame (cx, cy, fw) a box (pad px) asks for on a view (cx, cy, fw); the
+    frame is never tighter than MinFrame or than the camera's reach 1 / OpticalZoom."""
     px, py, pw = view
     if box is None:
         return view
@@ -50,17 +51,18 @@ def compose(view, box, min_frame=0.25):
     f = clamp(max((x1 - x0) / VW, (y1 - y0) / VH), 0.001, 1)
     bx = ((x0 + x1) / 2 - VX) / VW
     by = ((y0 + y1) / 2 - VY) / VH
-    fw = min(max(pw * f, min_frame), 1)
+    fw = min(max(pw * f, min_frame, 1 / oz), 1)
     cx = clamp(px + (bx - 0.5) * pw, fw / 2, 1 - fw / 2)
     cy = clamp(py + (by - 0.5) * pw, fw / 2, 1 - fw / 2)
     return cx, cy, fw
 
 
-def expect_outputs(q, frame, min_frame=0.25, flip_pan=False, flip_tilt=False):
+def expect_outputs(q, frame, min_frame=0.25, flip_pan=False, flip_tilt=False, oz=12):
     cx, cy, fw = frame
     pan = 1 - cx if flip_pan else cx
     tilt = cy if flip_tilt else 1 - cy
-    zoom = clamp((1 - fw) / (1 - min_frame), 0, 1)
+    lo = max(min_frame, 1 / oz)
+    zoom = clamp((1 - fw) / (1 - lo), 0, 1) if lo < 1 else 0
     assert near(q.pin("FramePan")["Value"], pan), (q.pin("FramePan")["Value"], pan)
     assert near(q.pin("FrameTilt")["Value"], tilt), (q.pin("FrameTilt")["Value"], tilt)
     assert near(q.pin("FrameZoom")["Value"], zoom), (q.pin("FrameZoom")["Value"], zoom)
@@ -97,6 +99,30 @@ def view_rect(svg, well):
 
 def cam(q, code):
     return q.run("local cam = TouchPad.E.camera\n" + code)
+
+
+def record_camera(q):
+    """Every gotoPosition the Demo camera receives, as cam.sent = { {pan, tilt, zoom} }."""
+    q.run("""
+      local cam = TouchPad.E.camera
+      cam.sent = {}
+      local orig = cam.gotoPosition
+      cam.gotoPosition = function(self, p, t, z) self.sent[#self.sent + 1] = { p, t, z }; return orig(self, p, t, z) end
+    """)
+
+
+def last_sent(q):
+    return cam(q, "return #cam.sent, cam.sent[#cam.sent][1], cam.sent[#cam.sent][2], cam.sent[#cam.sent][3]")
+
+
+def view(q):
+    """The view the pad represents: (px, py, pw) within the home view."""
+    return q.run("return TouchPad.inst.px, TouchPad.inst.py, TouchPad.inst.pw")
+
+
+def degrees(frame, hfov=60):
+    cx, cy, fw = frame
+    return (cx - 0.5) * hfov, (0.5 - cy) * hfov * 9 / 16, clamp((1 / fw - 1) / 11, 0, 1)
 
 
 def test_framing_controls_pins_and_defaults():
@@ -499,3 +525,293 @@ def test_framing_frames_stay_within_budget():
     assert b["max_frame"] < 60000 and b["max_handler"] < 120000
     assert len(q.icon()) < 15000
     assert len(q.camera_view()) < 20000
+
+
+def test_framing_resumed_finger_outside_the_box_sends_the_pending_shot_first():
+    # Designer flow: the lift is inferred, the shot is pending; the finger comes
+    # back outside the box and draws a box that ends too small
+    q = boot()
+    q.touch(line(70, 160, 310, 295, 6), dt=0.1, lift=False)
+    q.advance(0.5)
+    assert q.pulses("Apply") == 0 and "SENDING..." in q.icon()
+    q.touch([(335, 315)], lift=False)                       # resumed 32 px off the lift, outside the box and
+    q.advance(0.15)                                         # its handles: the resumed finger starts a new box
+    assert q.pulses("Apply") == 1                           # ... and the pending shot went out first
+    assert "SENDING..." not in q.icon() and q.run("return TouchPad.inst.gesture") == "draw"
+    q.touch(line(335, 315, 352, 328, 3), dt=0.05, lift=False)
+    assert q.pulses("Apply") == 1
+    q.advance(2.0)                                          # the new box is too small: ignored
+    assert q.pin("Gesture")["String"] == "TOO SMALL" and q.pulses("Apply") == 1
+    first = compose(HOME, (70, 160, 310, 295))
+    expect_outputs(q, first)
+    assert view(q) == HOME                                  # the view was not re-based on the ignored box
+    svg = q.icon()
+    assert boxes(svg) == [(70.0, 160.0, 240.0, 135.0, "#C513E8")] and "stroke-dasharray" not in svg
+    assert "FRAME x2.0  PAN -7  TILT +3" in svg
+    # the next box composes on the shot the camera really has
+    q.touch(line(340, 130, 480, 330, 5), dt=0.1, lift=False)
+    q.advance(2.0)
+    assert q.pulses("Apply") == 2
+    expect_outputs(q, compose(first, (340, 130, 480, 330)))
+    # a resumed finger that draws a big box: the pending shot goes out, then the new one
+    q.touch(line(60, 150, 250, 250, 5), dt=0.1, lift=False)
+    q.advance(0.5)
+    assert q.pulses("Apply") == 2
+    q.touch([(272, 270)], lift=False)                       # resumed near the lift, off the 17 px corner handle
+    q.touch(line(272, 270, 420, 360, 5), dt=0.05, lift=False)
+    assert q.pulses("Apply") == 3 and q.run("return TouchPad.inst.gesture") == "draw"
+    q.advance(2.0)
+    assert q.pulses("Apply") == 4
+
+
+def test_framing_zoom_while_a_shot_is_pending_composes_it_on_the_zoomed_view():
+    q = boot(props={"Camera Control": DEMO})
+    record_camera(q)
+    q.touch(line(70, 160, 310, 295, 6), dt=0.1, lift=False)
+    q.advance(0.5)                                          # pending
+    q.set_pin("ZoomIn", True)
+    q.advance(0.4)
+    q.set_pin("ZoomIn", False)
+    q.advance(0.3)                                          # the pad adopted the camera's zoom
+    z = cam(q, "return cam.zoomPos")
+    assert z > 0.05
+    pw = 1 / (1 + z * 11)
+    px, py, got = view(q)
+    assert px == 0.5 and py == 0.5 and near(got, pw, 1e-6)
+    assert cam(q, "return #cam.sent") == 0 and q.pulses("Apply") == 0
+    assert outputs(q) == (0.5, 0.5, 0)                      # nothing claimed before the shot is sent
+    svg = q.icon()
+    assert "SENDING..." in svg and "stroke-dasharray" in svg
+    assert boxes(svg) == [(70.0, 160.0, 240.0, 135.0, "#C513E8")]    # the box is still there
+    q.advance(1.5)                                          # the pending timer sends it: a region of the zoomed view
+    shot = compose((0.5, 0.5, pw), (70, 160, 310, 295))
+    n, pan, tilt, zz = last_sent(q)
+    pan0, tilt0, z0 = degrees(shot)
+    assert n == 1 and near(pan, pan0) and near(tilt, tilt0) and near(zz, z0)
+    assert q.pulses("Apply") == 1
+    expect_outputs(q, shot)
+    q.advance(3.0)
+    assert near(cam(q, "return cam.pan"), pan0, 0.01) and near(cam(q, "return cam.zoomPos"), z0, 1e-6)
+    assert cam(q, "return #cam.sent") == 1
+
+
+def test_framing_zoom_while_drawing_is_adopted_at_the_lift():
+    q = boot(props={"Camera Control": DEMO})
+    record_camera(q)
+    q.touch(line(70, 160, 190, 227, 3), dt=0.05, panel_touch=True, lift=False)
+    assert q.run("return TouchPad.inst.gesture") == "draw"
+    q.set_pin("ZoomIn", True)
+    q.advance(0.2)
+    q.set_pin("ZoomIn", False)
+    q.advance(0.3)
+    z = cam(q, "return cam.zoomPos")
+    assert z > 0.02
+    assert view(q) == HOME                                  # not re-based on the half-drawn box
+    q.touch(line(190, 227, 310, 295, 3), dt=0.05, panel_touch=True, lift=False)
+    q.lift()
+    assert boxes(q.icon()) == [(70.0, 160.0, 240.0, 135.0, "#C513E8")]
+    pw = 1 / (1 + z * 11)
+    assert near(view(q)[2], pw, 1e-6)                       # the box is a region of what the camera saw
+    shot = compose((0.5, 0.5, pw), (70, 160, 310, 295))
+    n, pan, tilt, zz = last_sent(q)
+    pan0, tilt0, z0 = degrees(shot)
+    assert n == 1 and near(pan, pan0) and near(tilt, tilt0) and near(zz, z0)
+    assert abs(pan0 + 4.84) < 0.3 and abs(tilt0 - 1.81) < 0.2     # not the doubled -15.5 / +7.8
+    expect_outputs(q, shot)
+    assert q.pulses("Apply") == 1
+    # a zoom during a box that ends too small is adopted as the view, the shot kept
+    q.touch(line(400, 150, 410, 155, 2), dt=0.05, panel_touch=True, lift=False)
+    q.set_pin("ZoomIn", True)
+    q.advance(0.2)
+    q.set_pin("ZoomIn", False)
+    q.advance(0.3)
+    q.touch([(418, 162)], dt=0.05, panel_touch=True, lift=False)
+    q.lift()
+    assert q.pin("Gesture")["String"] == "TOO SMALL" and q.pulses("Apply") == 1
+    z2 = cam(q, "return cam.zoomPos")
+    assert near(view(q)[2], 1 / (1 + z2 * 11), 1e-6) and boxes(q.icon()) == []
+    assert near(view(q)[0], shot[0]) and near(view(q)[1], shot[1])
+    assert cam(q, "return #cam.sent") == 1
+
+
+def test_framing_optical_reach_limits_the_frame():
+    q = boot(props={"Camera Control": DEMO})
+    record_camera(q)
+    q.set_pin("OpticalZoom", 2)                             # a 2x camera: the tightest frame is 0.5
+    a = (70, 160, 310, 295)
+    draw_box(q, *a)
+    first = compose(HOME, a, oz=2)
+    assert near(first[2], 0.5) and near(last_sent(q)[3], 1.0)
+    expect_outputs(q, first, oz=2)
+    assert near(q.pin("FrameZoom")["Value"], 1.0)
+    b = (340, 130, 480, 330)
+    draw_box(q, *b)                                         # asks for 0.37: the camera cannot
+    second = compose(first, b, oz=2)
+    assert near(second[2], 0.5) and near(last_sent(q)[3], 1.0)
+    expect_outputs(q, second, oz=2)
+    svg = q.icon()
+    assert "FRAME x2.0" in svg and "ZOOM x2.0" in svg       # the readout never overstates the camera
+    assert near(view(q)[2], 0.5)
+    c = (60, 150, 250, 250)
+    draw_box(q, *c)                                         # composed on the 0.5 view the camera really has
+    third = compose(second, c, oz=2)
+    n, pan, tilt, zz = last_sent(q)
+    assert n == 3 and near(pan, (third[0] - 0.5) * 60) and near(tilt, (0.5 - third[1]) * 60 * 9 / 16) and near(zz, 1.0)
+    expect_outputs(q, third, oz=2)
+    # a camera without zoom only pans
+    q.set_pin("OpticalZoom", 1)
+    q.double_tap(400, 350, gap=0.15, panel_touch=True)
+    draw_box(q, *a)
+    pan_only = compose(HOME, a, oz=1)
+    assert pan_only[2] == 1
+    n, pan, tilt, zz = last_sent(q)
+    assert near(pan, (pan_only[0] - 0.5) * 60) and zz == 0
+    expect_outputs(q, pan_only, oz=1)
+    assert q.pin("FrameZoom")["Value"] == 0 and "FRAME x1.0" in q.icon()
+    # the default 12x camera reaches further than MinFrame: the pad is unchanged
+    q.set_pin("OpticalZoom", 12)
+    q.set_pin("MinFrame", 0.1)
+    expect_outputs(q, compose(HOME, a, 0.1, oz=12), 0.1)
+
+
+def test_framing_lock_drops_a_pending_shot():
+    q = boot()
+    q.touch(line(70, 160, 310, 295, 5), dt=0.1, lift=False)
+    q.advance(2.0)                                          # applied (a 16:9 box: no ghost frame drawn)
+    first = compose(HOME, (70, 160, 310, 295))
+    assert q.pulses("Apply") == 1
+    q.touch(line(340, 130, 480, 330, 5), dt=0.1, lift=False)
+    q.advance(0.5)                                          # pending
+    assert "SENDING..." in q.icon()
+    q.set_pin("Lock", True)
+    q.advance(2.0)
+    q.set_pin("Lock", False)
+    q.advance(0.05)
+    # nothing was sent: the pad is as before the gesture, with the first box
+    assert q.pulses("Apply") == 1
+    svg = q.icon()
+    assert boxes(svg) == [(70.0, 160.0, 240.0, 135.0, "#C513E8")]
+    assert "stroke-dasharray" not in svg and "SENDING..." not in svg and svg.count('width="8" height="8"') == 4
+    expect_outputs(q, first)
+    assert view(q) == HOME
+    # the first box is still live: dragging inside moves it
+    q.touch(line(190, 227, 240, 227, 4), dt=0.1, lift=False)
+    q.advance(2.0)
+    assert q.pulses("Apply") == 2 and boxes(q.icon()) == [(120.0, 160.0, 240.0, 135.0, "#C513E8")]
+    expect_outputs(q, compose(HOME, (120, 160, 360, 295)))
+    # a nudge dropped by Lock after the pad re-based mid-draw: view and box come back too
+    q.touch(line(400, 150, 430, 170, 3), dt=0.1, lift=False)
+    assert view(q) != HOME                                  # re-based on the current shot while drawing
+    q.set_pin("Lock", True)
+    q.advance(2.0)
+    q.set_pin("Lock", False)
+    q.advance(0.05)
+    assert view(q) == HOME and boxes(q.icon()) == [(120.0, 160.0, 240.0, 135.0, "#C513E8")]
+    assert q.pulses("Apply") == 2
+
+
+def test_framing_apply_pin_sends_a_pending_shot_once():
+    q = boot(props={"Camera Control": DEMO})
+    record_camera(q)
+    q.touch(line(70, 160, 310, 295, 6), dt=0.1, lift=False)
+    q.advance(0.5)                                          # pending
+    q.set_pin("Apply", True)
+    q.set_pin("Apply", False)
+    assert cam(q, "return #cam.sent") == 1 and q.pulses("Apply") == 1
+    svg = q.icon()
+    assert "SENDING..." not in svg and "stroke-dasharray" not in svg
+    expect_outputs(q, compose(HOME, (70, 160, 310, 295)))
+    q.advance(2.0)                                          # the pending timer was cancelled
+    assert cam(q, "return #cam.sent") == 1 and q.pulses("Apply") == 1
+    # the RESEND button does the same
+    q.touch(line(340, 130, 480, 330, 5), dt=0.1, lift=False)
+    q.advance(0.5)
+    q.trigger("Apply")
+    assert cam(q, "return #cam.sent") == 2
+    q.advance(2.0)
+    assert cam(q, "return #cam.sent") == 2 and q.pulses("Apply") == 1
+
+
+def test_framing_too_small_box_keeps_the_previous_box():
+    q = boot()
+    a = (70, 160, 310, 295)
+    draw_box(q, *a)
+    first = compose(HOME, a)
+    draw_box(q, 400, 150, 420, 165)                         # 20 x 15: ignored
+    assert q.pin("Gesture")["String"] == "TOO SMALL" and q.pulses("Apply") == 1
+    expect_outputs(q, first)
+    assert view(q) == HOME                                  # the view was not re-based
+    svg = q.icon()
+    assert boxes(svg) == [(70.0, 160.0, 240.0, 135.0, "#C513E8")] and svg.count('width="8" height="8"') == 4
+    # the first box can still be moved and resized
+    q.drag(line(190, 227, 240, 227, 5), seconds=0.5, panel_touch=True)
+    assert boxes(q.icon()) == [(120.0, 160.0, 240.0, 135.0, "#C513E8")] and q.pulses("Apply") == 2
+    expect_outputs(q, compose(HOME, (120, 160, 360, 295)))
+    q.drag(line(360, 295, 400, 320, 5), seconds=0.5, panel_touch=True)
+    assert boxes(q.icon()) == [(120.0, 160.0, 280.0, 160.0, "#C513E8")] and q.pulses("Apply") == 3
+    # the same after boxes added up: the view stays the one of the last shot
+    draw_box(q, 340, 130, 480, 330)
+    second = compose(compose(HOME, (120, 160, 400, 320)), (340, 130, 480, 330))
+    expect_outputs(q, second)
+    v = view(q)
+    draw_box(q, 60, 150, 75, 160)
+    assert q.pin("Gesture")["String"] == "TOO SMALL" and view(q) == v
+    expect_outputs(q, second)
+    assert boxes(q.icon())[0][:4] == (340.0, 130.0, 140.0, 200.0)
+
+
+def test_framing_resize_keeps_the_anchored_corner():
+    q = boot()
+    draw_box(q, 20, 160, 100, 220)                          # 10 px from the view's left edge
+    assert boxes(q.icon()) == [(20.0, 160.0, 80.0, 60.0, "#C513E8")]
+    # the bottom-right corner dragged past the anchored left edge: the box flips
+    # to the other side of the anchor at the minimum width, the anchor stays
+    q.drag(line(100, 220, 12, 230, 5), seconds=0.5, panel_touch=True)
+    assert boxes(q.icon()) == [(20.0, 160.0, 40.0, 70.0, "#C513E8")]
+    assert q.pulses("Apply") == 2
+    expect_outputs(q, compose(HOME, (20, 160, 60, 230)))
+    # the same at the view's right and bottom edges
+    draw_box(q, 400, 300, 480, 380)
+    q.drag(line(400, 300, 488, 384, 5), seconds=0.5, panel_touch=True)   # top-left corner to beyond the anchor
+    assert boxes(q.icon()) == [(440.0, 340.0, 40.0, 40.0, "#C513E8")]
+    # a corner dragged well outside the view just stops at its edge
+    q.drag(line(440, 340, 0, 0, 5), seconds=0.5, panel_touch=True)
+    assert boxes(q.icon()) == [(10.0, 115.0, 470.0, 265.0, "#C513E8")]
+    assert q.pulses("Apply") == 5
+
+
+def test_framing_held_trigger_pins_count_once():
+    q = boot(props={"Camera Control": DEMO})
+    record_camera(q)
+    q.set_pin("Home", True)                                 # held
+    q.advance(0.3)
+    draw_box(q, 70, 160, 310, 295)
+    assert q.pulses("Apply") == 1 and len(boxes(q.icon())) == 1
+    q.advance(0.5)
+    q.set_pin("Home", False)                                # released long after: not a second Home
+    first = compose(HOME, (70, 160, 310, 295))
+    assert boxes(q.icon()) == [(70.0, 160.0, 240.0, 135.0, "#C513E8")]
+    expect_outputs(q, first)
+    assert q.pin("Gesture")["String"] == "APPLY"
+    q.trigger("Home")                                       # a Pad page press still works
+    assert boxes(q.icon()) == [] and outputs(q) == (0.5, 0.5, 0) and q.pin("Gesture")["String"] == "HOME"
+    # Reset held
+    draw_box(q, 70, 160, 310, 295)
+    q.set_pin("Reset", True)
+    q.advance(2.0)
+    draw_box(q, 70, 160, 310, 295)
+    q.set_pin("Reset", False)
+    assert q.pin("Gesture")["String"] == "APPLY" and len(boxes(q.icon())) == 1
+    expect_outputs(q, first)
+    # Apply held: one send, not one per edge
+    n0 = cam(q, "return #cam.sent")
+    q.set_pin("Apply", True)
+    q.advance(1.0)
+    q.set_pin("Apply", False)
+    assert cam(q, "return #cam.sent") == n0 + 1
+    q.trigger("Apply")
+    assert cam(q, "return #cam.sent") == n0 + 2
+    # a plain pulse still counts once and the trailing edge never again
+    q.set_pin("Reset", True)
+    q.set_pin("Reset", False)
+    assert outputs(q) == (0.5, 0.5, 0) and q.pin("Gesture")["String"] == "RESET"

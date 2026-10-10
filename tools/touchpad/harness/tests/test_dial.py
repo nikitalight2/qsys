@@ -6,7 +6,10 @@ Turns sets how many turns cover the range, each detent pulses StepUp or
 StepDown, the first 8 degrees of a touch are settling, DialTarget drives a
 control position-wise and is followed, a level changed elsewhere while a
 finger rests is followed, and with a camera the level drives its zoom and
-the wheel shows the zoom factor read back."""
+the wheel shows the zoom factor read back. The last tests are regressions
+for review findings (zoom buttons, late camera answers, quantised targets,
+notch style, status text, restored levels, step debt, small pads, binding
+with a camera)."""
 import math
 import os
 import re
@@ -107,9 +110,9 @@ def test_dial_idle_drawing_wheel_dead_centre_readout_and_hint():
     svg = q.icon()
     assert svg.startswith('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 500 500"')
     assert all(ord(ch) < 127 for ch in svg)
-    assert near(g["R"], 200) and near(g["Rdead"], 60) and g["cy"] == 244  # room for the hint line
-    assert f'<circle cx="250" cy="244" r="200"' in svg                      # the wheel
-    assert f'<circle cx="250" cy="244" r="60"' in svg                       # the dead centre
+    assert near(g["R"], 200) and near(g["Rdead"], 60) and g["cy"] == 239  # room for the hint line
+    assert f'<circle cx="250" cy="239" r="200"' in svg                      # the wheel
+    assert f'<circle cx="250" cy="239" r="60"' in svg                       # the dead centre
     assert notches(svg) == (0.0, 24)                                        # 24 detent marks, not turned
     assert ">0%<" in svg and "Turn the wheel" in svg
     assert "ZOOM" not in svg                                                 # no camera: no zoom readout
@@ -125,7 +128,7 @@ def test_dial_clockwise_turn_raises_the_level_by_degrees_over_turns():
     assert near(level(q), 0.125, 1e-6)
     assert q.pulses("Press") == 1 and q.pulses("Release") == 1
     assert ">12%<" in q.icon() or ">13%<" in q.icon()
-    assert 'transform="rotate(90 250 244)"' in q.icon()  # the notches turned with the finger
+    assert 'transform="rotate(90 250 239)"' in q.icon()  # the notches turned with the finger
     settle(q)
     turn(q, -98, a0=-8)                                  # back the same way
     assert near(level(q), 0, 1e-6)
@@ -203,7 +206,7 @@ def test_dial_detents_pulse_one_step_each_way():
     g = geometry(q)
     q.touch(arc_points(g, g["R"] * 0.7, -106, -98), dt=0.03, lift=False)
     assert level(q) == 0 and q.pulses("StepDown") == 6
-    # a step is drawn briefly (text and a minus icon on the rim), then the cue goes away
+    # a step is drawn briefly (text and a minus icon inside the wheel), then the cue goes away
     svg = q.icon()
     assert "STEP -" in svg and q.run("return TouchPad.state.animating")
     q.lift()
@@ -440,3 +443,243 @@ def test_dial_frames_and_handlers_stay_within_budget():
     small = boot(props={"Pad Width": 120, "Pad Height": 120})
     turn(small, 98)
     assert near(level(small), 0.125, 1e-6) and small.errors == []
+
+
+def test_dial_zoom_button_pressed_again_keeps_following():
+    # A second press within the post-release reading delay must not switch
+    # the following off for the whole second hold.
+    q = boot(props={"Camera Control": DEMO})
+    q.set_pin("ZoomIn", True)
+    q.advance(0.5)
+    q.set_pin("ZoomIn", False)
+    q.advance(0.1)                                       # inside CAM_READ (0.2 s)
+    q.set_pin("ZoomIn", True)
+    q.advance(1.5)
+    assert q.run("return TouchPad.inst.following") is True
+    z = q.run("return TouchPad.E.camera.zoomPos")
+    assert z > 0.4 and near(level(q), z, 0.06)           # the level keeps following while held
+    assert near(q.run("return TouchPad.inst.camZoom"), level(q), 1e-6)
+    # both buttons: releasing one keeps following while the other is held
+    q.set_pin("ZoomOut", True)
+    q.set_pin("ZoomIn", False)
+    assert q.run("return TouchPad.inst.following") is True
+    q.set_pin("ZoomOut", False)
+    assert q.run("return TouchPad.inst.following") is False
+    q.advance(0.5)
+    assert near(level(q), q.run("return TouchPad.E.camera.zoomPos"), 1e-6)
+    assert q.errors == []
+
+
+def test_dial_adopts_a_camera_that_answers_later():
+    # A VISCA camera answers getPosition on the inquiry reply: the intent to
+    # adopt the zoom travels with the callback.
+    q = boot(props={"Camera Control": DEMO})
+    q.run("""
+      local cam = TouchPad.E.camera
+      cam.getPosition = function(self, cb)
+        Timer.CallAfter(function() cb(self.pan, self.tilt, self.zoomPos) end, 0.05)
+      end
+      cam.zoomPos = 0.6
+    """)
+    q.run("TouchPad.inst:onStart()")
+    assert level(q) == 0                                 # nothing yet: the answer is pending
+    q.advance(0.3)
+    assert near(level(q), 0.6, 1e-6) and near(q.run("return TouchPad.inst.camZoom"), 0.6, 1e-6)
+    q.set_pin("ZoomIn", True)
+    q.advance(1.0)
+    q.set_pin("ZoomIn", False)
+    q.advance(0.5)
+    z = q.run("return TouchPad.E.camera.zoomPos")
+    assert z > 0.8 and near(level(q), z, 1e-6)           # the late last reading is adopted too
+    # a finger turning the wheel is not overridden by the late reading
+    settle(q)
+    q.set_pin("ZoomOut", True)
+    q.advance(0.3)
+    q.set_pin("ZoomOut", False)
+    g = geometry(q)
+    q.touch(arc_points(g, g["R"] * 0.7, 90, 48), dt=0.03, lift=False)   # turning within 0.2 s
+    v = level(q)
+    q.advance(0.3)
+    assert near(level(q), v, 1e-6)
+    q.lift()
+    assert q.errors == []
+
+
+def test_dial_quantised_target_echo_is_not_followed():
+    # An Integer knob snaps the position we write; its echo must not be taken
+    # as an external change (the dial would run ahead of the finger).
+    q = boot()
+    amp = q.add_component("Amp", "gain", controls={"step": {"Value": 0, "Min": 0, "Max": 10}})
+    q.run("__FAKE.state[Component.New('Amp').step].Unit = 'Integer'")
+    q.set_pin("DialTarget", "Amp~step")
+    assert q.status().startswith("Dial target OK: Amp~step")
+    g = geometry(q)
+    q.drag(arc_points(g, g["R"] * 0.7, 90, 60), seconds=0.4)   # 52 counted at Turns 2
+    assert near(level(q), 52 / 720, 1e-6)
+    assert near(amp.get("step")["Position"], 0.1)        # the target snapped to step 1
+    settle(q)
+    q.drag(arc_points(g, g["R"] * 0.7, 30, 98), seconds=0.6)   # 90 more
+    assert near(level(q), 142 / 720, 1e-6)
+    assert near(amp.get("step")["Position"], 0.2)
+    amp.set("step", 7)                                   # a real change elsewhere is followed
+    assert near(level(q), 0.7)
+    assert q.errors == []
+
+
+def test_dial_notch_style_follows_detents_crossing_zero():
+    def notch_path(q):
+        q.advance(0.05)
+        m = re.search(r'<g transform="rotate\([^)]*\)">(.*?)</g>', q.icon())
+        return m.group(1)
+    line, muted = boot().run("return TouchPad.E.T.line, TouchPad.E.T.muted")
+    q = boot()
+    q.set_pin("Detents", 12)
+    strong = notch_path(q)
+    assert 'stroke="%s"' % muted in strong and 'stroke-width="2"' in strong and 'opacity="0.9"' in strong
+    q.set_pin("Detents", 0)                              # same count (12 idle marks), faint style
+    faint = notch_path(q)
+    assert 'stroke="%s"' % line in faint and 'stroke-width="1"' in faint and 'opacity="0.7"' in faint
+    assert faint != strong
+    q.set_pin("Detents", 12)
+    assert notch_path(q) == strong
+    other = boot()
+    other.set_pin("Detents", 0)
+    assert notch_path(other) == faint
+    other.set_pin("Detents", 12)
+    assert notch_path(other) == strong
+
+
+def test_dial_target_status_never_hides_or_outlives_other_status():
+    q = boot()
+    ok_text = q.status()
+    assert ok_text.startswith("OK") and q.pin("Status")["Value"] == 0
+    q.set_pin("DialTarget", "Nope~gain")
+    assert "no component named Nope" in q.status() and q.pin("Status")["Value"] == 1
+    q.set_pin("DialTarget", "")                          # nothing wrong any more
+    q.advance(0.5)
+    assert q.status() == ok_text and q.pin("Status")["Value"] == 0
+    q.add_component("Amp", "gain", controls={"gain": {"Value": 0, "Min": -100, "Max": 20}})
+    q.set_pin("DialTarget", "Amp~gain")
+    assert q.status().startswith("Dial target OK")
+    q.set_pin("DialTarget", "Amp~nope")                  # OK replaced by the warning...
+    assert "has no control nope" in q.status()
+    q.set_pin("DialTarget", "")                          # ...and the engine's text is back
+    assert q.status() == ok_text
+    # a worse status stands: no picker in the design
+    bare = boot(picker=None)
+    err = bare.status()
+    assert "No Color Picker" in err and bare.pin("Status")["Value"] == 2
+    bare.add_component("Amp", "gain", controls={"gain": {"Value": 0, "Min": -100, "Max": 20}})
+    bare.set_pin("DialTarget", "Amp~gain")
+    assert bare.status() == err and bare.pin("Status")["Value"] == 2
+    assert bare.run("return TouchPad.inst.target ~= nil") is True   # bound all the same
+    bare.set_pin("DialTarget", "Nope~gain")
+    assert bare.status() == err
+    bare.set_pin("DialTarget", "")
+    assert bare.status() == err
+
+
+def test_dial_restored_level_is_adopted_at_start():
+    # A DialValue the Core restored before the script ran is adopted, not
+    # overwritten with 0.
+    q = QSys(mode="Dial", picker="Color_Picker", plugin=PLUGIN, runtime=False)
+    q.set_pin("DialValue", 0.5)
+    q._dispatch("load", q._chunk)
+    q.advance(0.3)
+    assert near(level(q), 0.5) and near(q.run("return TouchPad.inst.v"), 0.5)
+    assert ">50%<" in q.icon()
+    turn(q, 98)                                          # the turn goes on from there
+    assert near(level(q), 0.625, 1e-6)
+    # a restored level also seeds a target bound at start
+    r = QSys(mode="Dial", picker="Color_Picker", plugin=PLUGIN, runtime=False)
+    r.add_component("Amp", "gain", controls={"gain": {"Value": -40, "Min": -100, "Max": 20}})
+    r.set_pin("DialValue", 0.25)
+    r.set_pin("DialTarget", "Amp~gain")
+    r._dispatch("load", r._chunk)
+    r.advance(0.3)
+    assert near(level(r), 0.5)                           # the target's level wins without a camera
+    assert r.errors == []
+
+
+def test_dial_fast_flick_pays_all_detent_clicks():
+    q = boot()
+    q.set_pin("Detents", 72)                             # 5 degrees per detent
+    q.set_pin("Turns", 10)
+    g = geometry(q)
+    r = g["R"] * 0.7
+    # one report covering 60 degrees after settling: 12 clicks, 8 at once
+    q.touch([polar(g, r, 90), polar(g, r, 90 - 8.001), polar(g, r, 90 - 68)], dt=0.03, lift=False)
+    assert q.pulses("StepUp") == 8
+    assert q.run("return TouchPad.inst.stepDebt") == 4 and q.run("return TouchPad.state.animating")
+    q.advance(0.1)                                       # the rest comes from the next frames
+    assert q.pulses("StepUp") == 12 and q.run("return TouchPad.inst.stepDebt") == 0
+    q.touch(arc_points(g, r, 90 - 68, 60)[1:], dt=0.05, lift=False)   # a slow 60 more
+    assert q.pulses("StepUp") == 24
+    q.lift()
+    # a flick back the other way right after a capped report nets out: 100 up
+    # (8 pulsed, 12 owed) then 50 down leaves 10 up in all, nothing pulsed twice
+    settle(q)
+    q.reset_pulses()
+    q.touch([polar(g, r, 90), polar(g, r, 90 - 8.001), polar(g, r, 90 - 108), polar(g, r, 90 - 58)],
+            dt=0.03, lift=False)
+    q.advance(0.2)
+    assert q.pulses("StepUp") == 10 and q.pulses("StepDown") == 0
+    assert q.run("return TouchPad.inst.stepDebt") == 0
+    q.lift()
+    assert q.errors == []
+
+
+def test_dial_small_pads_keep_the_drawing_inside_the_canvas():
+    for props in ({"Pad Width": 120, "Pad Height": 120}, {"Pad Width": 200, "Pad Height": 200},
+                  {"Pad Width": 300, "Pad Height": 300}, {"Pad Width": 120, "Pad Height": 120, "Show Hints": False},
+                  {"Pad Width": 1600, "Pad Height": 300}):
+        q = boot(props=props)
+        W, H = props["Pad Width"], props["Pad Height"]
+        hint = props.get("Show Hints", True)
+        cx, cy, R, Rtrack, trackW, cueR, cueSize, readW = q.run(
+            "local g = TouchPad.inst.geometry return g.cx, g.cy, g.R, g.Rtrack, g.trackW, g.cueR, g.cueSize, g.readW")
+        outer = Rtrack + trackW / 2
+        assert cy - outer >= 0 and cx - outer >= 0 and cx + outer <= W, props
+        assert cy + outer <= H - (20 if hint else 0), props          # above the hint line
+        assert cueR + cueSize / 2 < R * 0.8 and cueR - cueSize / 2 > R * 0.3, props   # inside the wheel
+        q.set_pin("DialValue", 1)
+        q.set_pin("Detents", 4)
+        q.advance(0.05)
+        texts = re.findall(r'>([^<]*)</text>', q.icon())
+        assert texts[0] == "100%", props                 # the readout is never shortened
+        assert not any("..." in t for t in texts if not t.startswith("Turn")), props
+        g = geometry(q)
+        q.touch(arc_points(g, g["R"] * 0.7, 90, -98), dt=0.03, lift=False)   # a step down
+        svg = q.icon()                                   # the cue is drawn inside the canvas
+        assert "STEP -" in svg, props
+        m = re.search(r'<g transform="translate\(([-\d.]+) ([-\d.]+)\) scale\(([\d.]+)\)', svg)
+        assert m, props
+        x0, y0, k = float(m.group(1)), float(m.group(2)), float(m.group(3))
+        assert 0 <= x0 and x0 + 24 * k <= W and 0 <= y0 and y0 + 24 * k <= H, props
+        q.lift()
+        assert q.errors == []
+
+
+def test_dial_binding_a_target_never_moves_the_camera():
+    q = boot(props={"Camera Control": DEMO})
+    amp = q.add_component("Amp", "gain", controls={"gain": {"Value": -40, "Min": -100, "Max": 20}})
+    q.set_pin("DialTarget", "Amp~gain")
+    assert q.run("return TouchPad.E.camera.target") is None          # no unrequested zoom move
+    assert level(q) == 0                                 # the camera's zoom seeds the level...
+    assert near(amp.get("gain")["Position"], 0)          # ...and the target follows it
+    turn(q, 98)                                          # the first turn does not jump the zoom
+    q.advance(1.0)
+    assert near(q.run("return TouchPad.E.camera.zoomPos"), 0.125, 1e-6)
+    assert near(amp.get("gain")["Position"], 0.125)
+    # at start-up with both saved in the design the camera seeds the level as well
+    r = QSys(mode="Dial", picker="Color_Picker", plugin=PLUGIN, runtime=False,
+             props={"Camera Control": DEMO})
+    g2 = r.add_component("Amp", "gain", controls={"gain": {"Value": -40, "Min": -100, "Max": 20}})
+    r.set_pin("DialTarget", "Amp~gain")
+    r._dispatch("load", r._chunk)
+    r.advance(0.3)
+    assert r.run("return TouchPad.E.camera.target") is None
+    assert level(r) == 0 and near(g2.get("gain")["Position"], 0)
+    g2.set("gain", 20)                                   # the target changed elsewhere still drives the zoom
+    assert near(level(r), 1) and near(r.run("return TouchPad.E.camera.target.zoom"), 1)
+    assert r.errors == []
