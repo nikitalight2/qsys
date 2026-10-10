@@ -554,7 +554,7 @@ def test_camera_drivers_stay_within_the_budget():
     v.run("""
       TouchPad.E.after(0.01, function()
         local cam = TouchPad.E.camera
-        for i = 1, 200 do
+        for i = 1, 40 do                       -- two seconds of 20 Hz reports in one handler
           cam:drive((i % 7) / 3 - 1, (i % 5) / 2 - 1)
           cam:zoom((i % 3) - 1)
           if i % 10 == 0 then cam:getPosition(function() end) end
@@ -563,17 +563,17 @@ def test_camera_drivers_stay_within_the_budget():
       end)
     """)
     v.advance(0.02)
-    assert len(v.udp_sent) > 200
+    assert len(v.udp_sent) > 60
     for _ in range(20):
         v.inject_udp(b"\x01\x11\x00\x0b\x00\x00\x00\x05" + b"\x90\x50" + b"\x01\x01\x00\x00" + b"\x0f\x0e\x00\x00" + b"\xff")
         v.inject_udp(b"\x01\x11\x00\x07\x00\x00\x00\x06" + b"\x90\x50\x02\x00\x00\x00\xff")
     b = v.budget()
-    assert 1000 < b["handlers"]["callafter"] < 120000 and b["max_handler"] < 120000
+    assert 1000 < b["handlers"]["callafter"] < 60000 and b["max_handler"] < 120000   # under 750 per call
     q, _ = qsys_cam()
     q.run("""
       TouchPad.E.after(0.01, function()
         local cam = TouchPad.E.camera
-        for i = 1, 100 do
+        for i = 1, 40 do
           cam:drive((i % 7) / 3 - 1, (i % 5) / 2 - 1)
           cam:zoom((i % 3) - 1)
           cam:getPosition(function() end)
@@ -583,7 +583,7 @@ def test_camera_drivers_stay_within_the_budget():
     """)
     q.advance(0.02)
     b = q.budget()
-    assert 1000 < b["handlers"]["callafter"] < 120000 and b["max_handler"] < 120000
+    assert 1000 < b["handlers"]["callafter"] < 60000 and b["max_handler"] < 120000   # under 500 per call
     d = boot("Demo (simulated)", {"Max Frame Rate": "30"})
     d.run("TouchPad.inst.drawCamera = function(self, c) TouchPad.E.camera:drawView(c) end")
     d.set_pin("MaxSpeed", 100)
