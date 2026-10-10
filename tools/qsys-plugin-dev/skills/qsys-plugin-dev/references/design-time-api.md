@@ -81,7 +81,7 @@ is `ctls`.
 | `ControlUnit` | string | Knobs: `"dB"`, `"Float"`, `"Hz"`, `"Integer"`, `"Pan"`, `"Percent"`, `"Position"`, `"Seconds"`. |
 | `Min`, `Max` | number | Knob range (also meters). |
 | `DefaultValue` | number | Initial value. A `Value` key here is ignored. |
-| `Count` | integer | Number of identical controls. 1 gives a single object at runtime, more gives an array. |
+| `Count` | integer | Number of identical controls, default 1. 1 gives a single object at runtime, more gives an array. |
 | `PinStyle` | string | `"Input"`, `"Output"`, `"Both"`, `"None"`: which control pins the block exposes. |
 | `UserPin` | boolean | `true` lists the pin under Control Pins in the Properties pane instead of always showing it. |
 | `Icon` | string | Designer icon name or base64 image for a button face. |
@@ -134,7 +134,7 @@ but is not drawn.
 | `StrokeColor`, `StrokeWidth` | all | Outline colour and width in pixels. |
 | `CornerRadius` (alias `Radius`) | all | Corner rounding in pixels. |
 | `Margin`, `Padding` | all | Pixels outside and inside the control frame. |
-| `Font`, `FontSize`, `FontStyle` | text-bearing | See the style reference. |
+| `Font`, `FontSize`, `FontStyle` | text-bearing | See the style reference. `IsBold = true` is a shorthand for a Bold style. |
 | `HTextAlign`, `VTextAlign` | text-bearing | `"Left"`, `"Center"`, `"Right"` and `"Top"`, `"Center"`, `"Bottom"`. |
 | `WordWrap` | text-bearing | `true` wraps long legends. |
 | `IconColor` | Button | Colour of a button icon. |
@@ -187,14 +187,23 @@ named after `Name`, with its controls reachable as `name["control.name"]`.
 | `Properties` | Table of the component's own properties, e.g. `{ ["n_inputs"] = 8, ["n_outputs"] = 2 }` for a mixer. |
 
 Type strings and control names are the least documented part of the
-framework. Known-good from this repository: `mixer` with `n_inputs` and
-`n_outputs`, and crosspoint gains named `input.<i>.output.<o>.gain`, output
-gains `output.<o>.gain` and mutes `output.<o>.mute`; `meter2` with a
-`meter.1` control; `compressor`; `crossover` (2-way by default);
-`effect_reverb`. A wrong `Type` is dropped without an error, so always probe
-at runtime and surface the result (see the runtime reference). When unsure
-of a component's control names, open the equivalent block in Designer, add a
-Named Control or hover the control, and read the name shown there.
+framework, and the trust levels differ:
+
+- Used by this repository's plugins and checked offline, but not confirmed
+  on a Core: `mixer` with `n_inputs` and `n_outputs` (crosspoint gains
+  `input.<i>.output.<o>.gain`, output gains `output.<o>.gain`, output mutes
+  `output.<o>.mute`), `meter2` (control `meter.1`), `compressor`,
+  `crossover` (2-way by default, band outputs named High and Low),
+  `effect_reverb`.
+- Named in the Q-SYS documentation but with no control names recorded here:
+  `gain`, `signal_presence`, `scriptable_controls`.
+
+Prefer a `mixer` for gain and mute duties (write -100 dB to a crosspoint to
+mute it) because its control names are the ones recorded here. A wrong
+`Type` is dropped without an error, so always probe at runtime and surface
+the result (see the runtime reference). When unsure of a component's control
+names, open the equivalent block in Designer, add a Named Control or hover
+the control, and read the name shown there.
 
 ## 9. GetWiring
 

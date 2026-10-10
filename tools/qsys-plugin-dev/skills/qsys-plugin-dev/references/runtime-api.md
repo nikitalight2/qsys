@@ -111,8 +111,13 @@ Control names known from this repository:
 |---|---|
 | `mixer` | `input.<i>.output.<o>.gain`, `output.<o>.gain`, `output.<o>.mute` |
 | `meter2` | `meter.1` |
+| `crossover` | cutoff frequency control exists; band outputs are wired as `<name> High` and `<name> Low` |
 | `compressor` | threshold, ratio and bypass controls exist; names were taken from the block's control list in Designer and not confirmed on hardware |
 | `effect_reverb` | reverb time, pre-delay, mix and bypass controls exist; same caveat |
+
+The mixer has no per-crosspoint mute control recorded here, which is why the
+skeleton above mutes a channel by writing -100 dB to its crosspoint gain and
+restores the fader value on unmute.
 
 When a name is uncertain, open the matching block in Designer, enable a
 Named Control on the control you need, and read the control name it shows.
@@ -127,9 +132,10 @@ t:Start(0.5)          -- seconds, repeats until t:Stop()
 Timer.CallAfter(function() ... end, 2.0)   -- one shot
 ```
 
-Use one timer for all meters (poll at about 15 Hz, `0.066` s) instead of a
-timer per meter. Stop timers you no longer need; they keep running until
-the design restarts.
+Use one `Timer.New()` for all meters (poll at about 15 Hz, `0.066` s)
+instead of a timer per meter, as the template does, so it can be stopped.
+Stop timers you no longer need; they keep running until the design
+restarts.
 
 ## 6. Status indicator
 

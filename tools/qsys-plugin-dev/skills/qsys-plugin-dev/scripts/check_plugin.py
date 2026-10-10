@@ -49,6 +49,19 @@ ENUMS = {
              "Noto Serif", "Poppins", "Droid Sans", "Adamina", "Slabo 27px"},
 }
 GRAPHIC_TYPES = {"Label", "GroupBox", "Header", "Image", "Svg"}
+FONT_STYLES = {
+    "Roboto": ["Thin", "Thin Italic", "Light", "Light Italic", "Regular", "Italic", "Medium", "Medium Italic", "Bold", "Bold Italic", "Black", "Black Italic"],
+    "Roboto Mono": ["Thin", "Thin Italic", "Light", "Light Italic", "Regular", "Italic", "Medium", "Medium Italic", "Bold", "Bold Italic"],
+    "Roboto Slab": ["Thin", "Light", "Regular", "Bold"],
+    "Open Sans": ["Light", "Light Italic", "Regular", "Italic", "Semibold", "Semibold Italic", "Bold", "Bold Italic", "Extrabold", "Extrabold Italic"],
+    "Lato": ["Light", "Light Italic", "Regular", "Italic", "Bold", "Bold Italic", "Black", "Black Italic"],
+    "Montserrat": ["Thin", "Thin Italic", "ExtraLight", "ExtraLight Italic", "Light", "Light Italic", "Regular", "Italic", "Medium", "Medium Italic", "SemiBold", "SemiBold Italic", "Bold", "Bold Italic", "ExtraBold", "ExtraBold Italic", "Black", "Black Italic"],
+    "Noto Serif": ["Regular", "Italic", "Bold", "BoldItalic"],
+    "Poppins": ["Light", "Regular", "Medium", "SemiBold", "Bold"],
+    "Droid Sans": ["Regular", "Bold"],
+    "Adamina": ["Regular"],
+    "Slabo 27px": ["Regular"],
+}
 PROPERTY_TYPES = {"string", "integer", "double", "boolean", "enum"}
 GUID_RE = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
 TEMPLATE_GUID = "5b1f2a3c-9d4e-4f60-8a71-2c3d4e5f6a7b"
@@ -69,6 +82,32 @@ def strip_comments(src: str) -> str:
     """Remove Lua comments so string scans do not trip on commented-out code."""
     src = re.sub(r"--\[(=*)\[.*?\]\1\]", "", src, flags=re.S)
     return re.sub(r"--[^\n]*", "", src)
+
+
+def enclosing_table(src: str, pos: int) -> str:
+    """Return the text of the innermost `{ ... }` Lua table that contains pos."""
+    depth = 0
+    start = None
+    for i in range(pos, -1, -1):
+        ch = src[i]
+        if ch == "}":
+            depth += 1
+        elif ch == "{":
+            if depth == 0:
+                start = i
+                break
+            depth -= 1
+    if start is None:
+        return src[max(0, pos - 200):pos + 200]
+    depth = 0
+    for j in range(start, len(src)):
+        if src[j] == "{":
+            depth += 1
+        elif src[j] == "}":
+            depth -= 1
+            if depth == 0:
+                return src[start:j + 1]
+    return src[start:]
 
 
 def line_of(src: str, pos: int) -> int:
@@ -194,6 +233,14 @@ def check_enums(code: str, rep: Report):
         val = m.group(1)
         if not re.fullmatch(r"(Thin|ExtraLight|Light|Regular|Italic|Medium|SemiBold|Semibold|Bold|ExtraBold|Extrabold|Black|BoldItalic)( Italic)?", val):
             rep.warn(f"line {line_of(code, m.start())}: FontStyle = {val!r} is not a known style; check the font table.")
+    # Font and FontStyle declared in the same table must be a supported pair.
+    for m in re.finditer(r'\bFont\s*=\s*"([^"]*)"', code):
+        font = m.group(1)
+        tbl = enclosing_table(code, m.start())
+        st = re.search(r'\bFontStyle\s*=\s*"([^"]*)"', tbl)
+        if st and font in FONT_STYLES and st.group(1) not in FONT_STYLES[font]:
+            rep.error(f"line {line_of(code, m.start())}: Font {font!r} has no style {st.group(1)!r}; "
+                      f"supported: {', '.join(FONT_STYLES[font])}.")
 
 
 def run_design_time(path: Path, rep: Report):

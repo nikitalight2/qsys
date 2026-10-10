@@ -87,7 +87,7 @@ function GetControlLayout(props)
   -- 8 px grid, 16 px margin, 48 px header band.
   local HEADER, M, G = 48, 16, 8
   local STRIP_W, STRIP_H = 72, 232
-  local W = M + n * STRIP_W + M
+  local W = math.max(M + n * STRIP_W + M, 320)   -- header needs room at small counts
   local H = HEADER + G + STRIP_H + M
 
   -- Layout key is the control Name, or "Name i" when Count > 1.
@@ -99,6 +99,7 @@ function GetControlLayout(props)
   table.insert(graphics, { Type = "Image", Image = NikitaAssets.Icon, Position = { M, 11 }, Size = { 26, 26 } })
   table.insert(graphics, { Type = "Label", Text = BrandName, FontSize = 13, FontStyle = "Bold", HTextAlign = "Left", Color = Nikita.Text, Position = { M + 32, 8 }, Size = { 180, 18 } })
   table.insert(graphics, { Type = "Label", Text = BrandSite, FontSize = 9, HTextAlign = "Left", Color = Nikita.Muted, Position = { M + 32, 26 }, Size = { 180, 14 } })
+  table.insert(graphics, { Type = "Label", Text = GetPrettyName(props), FontSize = 11, FontStyle = "Bold", HTextAlign = "Right", Color = Nikita.Muted, Position = { W - M - 200 - 24, 16 }, Size = { 200, 16 } })
   layout["Status"] = { Style = "Led", Position = { W - M - 16, 16 }, Size = { 16, 16 } }
 
   if page == "Main" then
@@ -195,13 +196,13 @@ if Controls then
   end
   if #meters < n then table.insert(problems, string.format("%d of %d meter engines missing", n - #meters, n)) end
   if #meters > 0 then
-    local function tick()
+    MeterTimer = Timer.New()
+    MeterTimer.EventHandler = function()
       for _, m in ipairs(meters) do
         pcall(function() m.ui.Value = m.comp["meter.1"].Value end)
       end
-      Timer.CallAfter(tick, 0.066)
     end
-    Timer.CallAfter(tick, 0.066)
+    MeterTimer:Start(0.066)
   end
 
   if #problems == 0 then
