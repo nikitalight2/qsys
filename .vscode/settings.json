@@ -1,0 +1,8 @@
+{
+  // Nikita Visual Arts – nikitavisual.art
+  // Treat .qplug files as Lua so syntax highlighting and the Q-SYS
+  // IntelliSense extension work on the plugin sources.
+  "files.associations": {
+    "*.qplug": "lua"
+  }
+}

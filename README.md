@@ -84,7 +84,19 @@ the debug output together with the Q-SYS Designer version.
 ```
 plugins/NikitaMicMixer.qplug   the plugin
 assets/brand/                  logo files used by the plugin and this README
+.vscode/                       editor settings and recommended extensions
 ```
+
+## Editing the plugins in VS Code
+
+Install **[Better Lua for Q-SYS Plugins](https://marketplace.visualstudio.com/items?itemName=integratorblocks.qsys-intellisense)**
+(`integratorblocks.qsys-intellisense`). It adds autocomplete and hover
+documentation for the Q-SYS plugin design-time functions and properties, based
+on the Q-SYS Developer Documentation, and works in `.lua` and `.qplug` files.
+
+Opening this folder in VS Code prompts you to install it (it is listed in
+`.vscode/extensions.json`), and `.vscode/settings.json` maps `*.qplug` to Lua
+so highlighting and IntelliSense apply to the plugin sources.
 
 ---
 Nikita Visual Arts – nikitavisual.art

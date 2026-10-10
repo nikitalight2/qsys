@@ -1,0 +1,9 @@
+{
+  // Nikita Visual Arts – nikitavisual.art
+  // Better Lua for Q-SYS Plugins: autocomplete and hover docs for the
+  // Q-SYS plugin design-time API in .lua and .qplug files.
+  // https://marketplace.visualstudio.com/items?itemName=integratorblocks.qsys-intellisense
+  "recommendations": [
+    "integratorblocks.qsys-intellisense"
+  ]
+}
