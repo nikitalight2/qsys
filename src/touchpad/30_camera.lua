@@ -424,11 +424,15 @@ do
           if v > 0 then want.up = true elseif v < 0 then want.down = true end
         end
       end
-      local k = knobScale(E, "MaxSpeed", 0.5)
-      if h ~= 0 or v ~= 0 then
-        speedPos("panspeed", abs(ps) * k)
-        speedPos("tiltspeed", abs(ts) * k)
+      if h == 0 and v == 0 then
+        -- a stop: every held direction goes false three times
+        release(3)
+        restoreSpeeds()
+        return
       end
+      local k = knobScale(E, "MaxSpeed", 0.5)
+      speedPos("panspeed", abs(ps) * k)
+      speedPos("tiltspeed", abs(ts) * k)
       -- release what is no longer wanted before pressing anything new
       for i = 1, #DIR_KEYS do
         local dk = DIR_KEYS[i]
@@ -436,11 +440,6 @@ do
           setBool(self.ctl[dk], false)
           self.pressed[dk] = nil
         end
-      end
-      if h == 0 and v == 0 then
-        release(3)
-        restoreSpeeds()
-        return
       end
       for i = 1, #DIR_KEYS do
         local dk = DIR_KEYS[i]
