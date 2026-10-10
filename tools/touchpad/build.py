@@ -11,8 +11,19 @@ Steps (every one must pass for exit code 0):
   5. Compile the result with Lua 5.3 (lupa) and fail on a syntax error.
   6. Execute it in the same Lua state (Controls is nil, so the runtime
      section stays dormant) and smoke-test the framework functions for
-     every Mode in MODE_NAMES with default property values. When the
-     framework functions do not exist yet this only reports it.
+     every Mode in MODE_NAMES with default property values, plus a few
+     property variants per mode (camera kinds, large source counts, the
+     Custom theme). When the framework functions do not exist yet this
+     only reports it.
+  7. Lint the layout of every page of every mode: every control from
+     GetControls is placed on at least one page, no control is placed
+     twice on one page, every layout key is a control, positions and
+     sizes stay inside the page (the first graphics entry is the page
+     background and gives its size), every graphics Text is ASCII except
+     the brand en dash, and every control with a UserPin carries a
+     PrettyName of the form "Group~Name" in one of the pin groups
+     (Setup, Live, Outputs, Actions, Camera, Zones, Sources, Routing,
+     Guest or the mode's own name), the same on every page it is on.
 
     python3 tools/touchpad/build.py            build + check + smoke
     python3 tools/touchpad/build.py --check    checks only, writes nothing
@@ -292,9 +303,9 @@ if #missing > 0 then
   return { status = "fail", msg = "framework incomplete, missing: " .. table.concat(missing, ", ") }
 end
 local function try(label, fn, ...)
-  local ok, res = pcall(fn, ...)
+  local ok, res, res2 = pcall(fn, ...)
   if not ok then error(label .. ": " .. tostring(res), 0) end
-  return res
+  return res, res2
 end
 local function defaults()
   local props = try("GetProperties", GetProperties)
@@ -307,30 +318,179 @@ local function defaults()
   if out["Mode"] == nil then error("GetProperties: no Mode property", 0) end
   return out
 end
-local function run_mode(mode)
+
+local EN_DASH = "\226\128\147"
+local PIN_GROUPS = { Setup = true, Live = true, Outputs = true, Actions = true, Camera = true,
+                     Zones = true, Sources = true, Routing = true, Guest = true }
+
+local function isAscii(s)
+  s = tostring(s):gsub(EN_DASH, "-")
+  return not s:find("[\128-\255]")
+end
+
+local function num(v) return type(v) == "number" and v == v end
+
+-- Lints one page; appends problem strings to out.
+local function lintPage(tag, page, layout, graphics, expected, placedAnywhere, prettySeen, modeName, out)
+  local function bad(msg) out[#out + 1] = tag .. " page '" .. page .. "': " .. msg end
+  if type(graphics) ~= "table" or #graphics == 0 then
+    bad("no graphics (the first entry must be the page background)")
+    return
+  end
+  local bg = graphics[1]
+  if type(bg) ~= "table" or type(bg.Position) ~= "table" or type(bg.Size) ~= "table"
+     or bg.Position[1] ~= 0 or bg.Position[2] ~= 0 then
+    bad("graphics[1] is not a background at 0,0")
+    return
+  end
+  local W, H = bg.Size[1], bg.Size[2]
+  if not (num(W) and num(H) and W > 0 and H > 0) then bad("background has no size"); return end
+  local function inside(what, e)
+    local p, s = e.Position, e.Size
+    if type(p) ~= "table" or type(s) ~= "table" then
+      if e.Style ~= "None" then bad(what .. ": no Position/Size") end
+      return
+    end
+    local x, y, w, h = p[1], p[2], s[1], s[2]
+    if not (num(x) and num(y) and num(w) and num(h)) then bad(what .. ": Position/Size not numbers"); return end
+    if w <= 0 or h <= 0 then bad(what .. string.format(": size %sx%s", tostring(w), tostring(h))); return end
+    if x < 0 or y < 0 or x + w > W or y + h > H then
+      bad(what .. string.format(": %d,%d %dx%d is outside the %dx%d page", x, y, w, h, W, H))
+    end
+  end
+  for key, e in pairs(layout) do
+    if type(e) ~= "table" then
+      bad("layout['" .. tostring(key) .. "'] is not a table")
+    else
+      local ctl = expected[key]
+      if not ctl then
+        bad("layout key '" .. tostring(key) .. "' is not a control from GetControls")
+      else
+        placedAnywhere[key] = true
+        if ctl.UserPin then
+          local pretty = e.PrettyName
+          if type(pretty) ~= "string" then
+            bad("pinned control '" .. key .. "' has no PrettyName")
+          else
+            local group, name = pretty:match("^([^~]+)~([^~]+)$")
+            if not group then
+              bad("pinned control '" .. key .. "' PrettyName '" .. pretty .. "' is not Group~Name")
+            elseif not (PIN_GROUPS[group] or group == modeName) then
+              bad("pinned control '" .. key .. "' PrettyName group '" .. group .. "' is not a pin group")
+            end
+            if prettySeen[key] and prettySeen[key] ~= pretty then
+              bad("pinned control '" .. key .. "' PrettyName differs between pages: '" .. prettySeen[key] .. "' / '" .. pretty .. "'")
+            end
+            prettySeen[key] = pretty
+          end
+        end
+        if e.Legend ~= nil and not isAscii(e.Legend) then bad("legend of '" .. key .. "' is not ASCII") end
+        inside("control '" .. key .. "'", e)
+      end
+    end
+  end
+  for i, e in ipairs(graphics) do
+    if type(e) ~= "table" then
+      bad("graphics[" .. i .. "] is not a table")
+    else
+      if e.Text ~= nil and not isAscii(e.Text) then
+        bad("graphics[" .. i .. "] text is not ASCII: " .. tostring(e.Text):sub(1, 40))
+      end
+      if i > 1 then inside("graphics[" .. i .. "] " .. tostring(e.Type), e) end
+    end
+  end
+  if type(LAYOUT_PROBLEMS) == "table" then
+    for _, p in ipairs(LAYOUT_PROBLEMS) do bad(p) end
+  end
+end
+
+local function run_variant(mode, tag, tweak)
   local props = defaults()
   props["Mode"].Value = mode
+  if tweak then tweak(props) end
   if type(RectifyProperties) == "function" then try("RectifyProperties", RectifyProperties, props) end
   local pages = try("GetPages", GetPages, props)
   local controls = try("GetControls", GetControls, props)
-  local layout, graphics = try("GetControlLayout", GetControlLayout, props)
   if type(pages) ~= "table" or #pages == 0 then error("GetPages returned no pages", 0) end
   if type(controls) ~= "table" or #controls == 0 then error("GetControls returned no controls", 0) end
-  if type(layout) ~= "table" then error("GetControlLayout returned " .. type(layout), 0) end
-  local n = 0
-  for _ in pairs(layout) do n = n + 1 end
+  local expected, names = {}, {}
+  for _, c in ipairs(controls) do
+    if type(c.Name) ~= "string" then error("GetControls: control without Name", 0) end
+    if names[c.Name] then error("GetControls: control '" .. c.Name .. "' twice", 0) end
+    names[c.Name] = true
+    local count = c.Count or 1
+    if count == 1 then expected[c.Name] = c
+    else for i = 1, count do expected[c.Name .. " " .. i] = c end end
+  end
+  local pretty = ""
   if type(GetPrettyName) == "function" then
-    local pretty = try("GetPrettyName", GetPrettyName, props)
+    pretty = try("GetPrettyName", GetPrettyName, props)
     if type(pretty) ~= "string" then error("GetPrettyName returned " .. type(pretty), 0) end
   end
-  return { pages = #pages, controls = #controls, layout = n }
-end
-for _, mode in ipairs(modes) do
-  local ok, res = pcall(run_mode, mode)
-  if not ok then
-    return { status = "fail", msg = "Mode '" .. mode .. "': " .. tostring(res) }
+  local problems = {}
+  local placed, prettySeen = {}, {}
+  local layoutCount = 0
+  for i, p in ipairs(pages) do
+    if type(p) ~= "table" or type(p.name) ~= "string" then error("GetPages entry " .. i .. " has no name", 0) end
+    props["page_index"] = { Value = i }
+    local layout, graphics = try("GetControlLayout (" .. p.name .. ")", GetControlLayout, props)
+    if type(layout) ~= "table" then error("GetControlLayout returned " .. type(layout), 0) end
+    if type(graphics) ~= "table" then error("GetControlLayout returned graphics " .. type(graphics), 0) end
+    for _ in pairs(layout) do layoutCount = layoutCount + 1 end
+    lintPage(tag, p.name, layout, graphics, expected, placed, prettySeen, mode, problems)
   end
-  report[#report + 1] = { mode = mode, pages = res.pages, controls = res.controls, layout = res.layout }
+  local missing = {}
+  for key in pairs(expected) do
+    if not placed[key] then missing[#missing + 1] = key end
+  end
+  table.sort(missing)
+  if #missing > 0 then
+    problems[#problems + 1] = tag .. ": controls on no page: " .. table.concat(missing, ", ", 1, math.min(#missing, 12))
+      .. (#missing > 12 and (" (+" .. (#missing - 12) .. " more)") or "")
+  end
+  return { pages = #pages, controls = #controls, layout = layoutCount, problems = problems }
+end
+
+-- Property variants exercised per mode besides the defaults.
+local function variants(mode)
+  local list = { { tag = "defaults" } }
+  if CAMERA_MODES and CAMERA_MODES[mode] then
+    list[#list + 1] = { tag = "demo camera", tweak = function(p) p["Camera Control"].Value = "Demo (simulated)" end }
+    list[#list + 1] = { tag = "visca camera", tweak = function(p) p["Camera Control"].Value = "VISCA over IP" end }
+    list[#list + 1] = { tag = "qsys camera", tweak = function(p) p["Camera Control"].Value = "Q-SYS Camera"; p["Camera Name"].Value = "Cam" end }
+  end
+  if mode == "Drag & Drop" or mode == "Matrix" then
+    list[#list + 1] = { tag = "20x20", tweak = function(p) p["Sources"].Value = 20; p["Destinations"].Value = 20 end }
+  end
+  if mode == "Zone Select" then
+    list[#list + 1] = { tag = "32 zones", tweak = function(p) p["Zones"].Value = 32 end }
+  end
+  list[#list + 1] = { tag = "custom theme, wide pad", tweak = function(p)
+    p["Theme"].Value = "Custom"; p["Background Color"].Value = "#1C232D"
+    p["Pad Width"].Value = 1600; p["Pad Height"].Value = 300; p["Background"].Value = "Panel" end }
+  return list
+end
+
+local allProblems = {}
+for _, mode in ipairs(modes) do
+  local row = { mode = mode }
+  for _, v in ipairs(variants(mode)) do
+    local tag = "Mode '" .. mode .. "' (" .. v.tag .. ")"
+    local ok, res = pcall(run_variant, mode, tag, v.tweak)
+    if not ok then
+      return { status = "fail", msg = tag .. ": " .. tostring(res) }
+    end
+    for _, p in ipairs(res.problems) do allProblems[#allProblems + 1] = p end
+    if v.tag == "defaults" then
+      row.pages, row.controls, row.layout = res.pages, res.controls, res.layout
+    end
+    row.variants = (row.variants or 0) + 1
+  end
+  report[#report + 1] = row
+end
+if #allProblems > 0 then
+  return { status = "fail", msg = "layout lint:\n  " .. table.concat(allProblems, "\n  ", 1, math.min(#allProblems, 40))
+    .. (#allProblems > 40 and ("\n  (+" .. (#allProblems - 40) .. " more)") or "") }
 end
 return { status = "ok", modes = report }
 """
@@ -360,13 +520,16 @@ def compile_and_smoke(source, starts, verbose):
         raise BuildError("smoke test failed: %s" % locate(starts, result["msg"]))
     lines = []
     count = 0
+    variants = 0
     for i in range(1, len(result["modes"]) + 1):
         row = result["modes"][i]
         count += 1
+        variants += int(row["variants"])
         if verbose:
-            lines.append("  %-16s pages %d  controls %3d  layout %3d"
-                         % (row["mode"], row["pages"], row["controls"], row["layout"]))
-    head = "smoke: %d modes passed GetProperties / GetPages / GetControls / GetControlLayout" % count
+            lines.append("  %-16s pages %d  controls %3d  layout %3d  variants %d"
+                         % (row["mode"], row["pages"], row["controls"], row["layout"], row["variants"]))
+    head = ("smoke: %d modes, %d property variants passed GetProperties / GetPages / GetControls / "
+            "GetControlLayout on every page and the layout lint" % (count, variants))
     return "\n".join([head] + lines)
 
 
