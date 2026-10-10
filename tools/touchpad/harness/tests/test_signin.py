@@ -7,7 +7,10 @@ posts the webhook (JSON or Teams card) and clears the form. A failed save
 shows "Not saved: please ask at reception" and counts nothing; TodayCount is
 read from the log at start and resets at midnight; three idle minutes clear
 the form; a second Submit right after a sign-in does nothing; strokes are
-polylines of at most 400 points, at most 60 of them, a dot for no movement."""
+polylines of at most 400 points, at most 60 of them, a dot for no movement.
+The ink is bounded by canvas characters as well as points, a scribble never
+breaks the instruction budget, huge field pins cost nothing, a trigger acts on
+its rising edge only and a touch cannot resume onto a cleared form."""
 import base64
 import json
 import math
@@ -477,7 +480,7 @@ def test_signin_fields_show_on_the_pad():
     q.advance(0.05)
     t = texts(q.icon())
     assert "Ana Lopez" in t and "Acme  -  visiting Nikita" in t
-    assert any(s.startswith("Lobby") and s.endswith("Today: 0") for s in t)
+    assert "Lobby" in t and "Today: 0" in t                  # the room and the count are separate texts
     assert "Your name" not in t
     q.set_pin("GuestCompany", "")
     q.advance(0.05)
@@ -543,3 +546,222 @@ def test_signin_pad_sizes_themes_and_budget():
     assert b["frames"] >= 40
     assert b["max_handler"] < 120000 and b["max_frame"] < 60000
     assert len(q.icon()) < 20000
+
+
+def zigzag(bx, by, n, x0=20, y0=40, step=3.0, amp=3.0, wrap=150, rowH=30):
+    """A scribble no simplifier can thin: x advances, y alternates +-amp."""
+    return [(bx + x0 + (i % wrap) * step, by + y0 + (i // wrap) * rowH + (amp if i % 2 else -amp)) for i in range(n)]
+
+
+def test_signin_scribble_stays_far_under_the_budget():
+    # Ramer-Douglas-Peucker keeps every point of an alternating scribble, so
+    # the chunk it runs over must stay small and the live stroke must not be
+    # re-formatted per frame (Svg.num on a fresh value is the costly step).
+    for fps in ("30", "20"):
+        q = boot(props={"Max Frame Rate": fps})
+        bx, by, bw, bh = box(q)
+        q.touch(zigzag(bx, by, 900), dt=0.034, lift=False)
+        assert len(paths(q.icon())) == 1                     # the live stroke is drawn throughout
+        assert q.status().startswith("OK")
+        q.lift()
+        assert strokes(q) == 1 and 8 < stroke_points(q, 1) <= 400
+        b = q.budget()
+        assert b["max_handler"] < 60000 and b["max_frame"] < 45000, b
+        assert len(q.icon()) < 12000
+    # a smooth stroke is still simplified well below its raw count
+    q = boot()
+    bx, by, bw, bh = box(q)
+    q.touch([(bx + 40 + i * 2, by + 120 + 40 * math.sin(i / 12.0)) for i in range(160)], dt=0.04)
+    assert strokes(q) == 1 and stroke_points(q, 1) < 80
+
+
+def test_signin_huge_field_pins_cost_one_handler_nothing():
+    q = boot()
+    q.set_pin("GuestName", "A" * 20000)
+    q.set_pin("GuestCompany", "é" * 10000)
+    q.set_pin("RoomName", "R" * 20000)
+    bx, by, bw, bh = box(q)
+    b = q.budget()
+    assert b["max_handler"] < 15000, b                      # each pin handler: bytes are cut before characters are walked
+    q.advance(0.1)                                          # the first redraw fits both 120-character lines once
+    q.tap(bx + 60, by + 60)                                 # later frames re-fit nothing and never re-read the room pin
+    b = q.budget()
+    assert b["max_frame"] < 45000 and b["handlers"]["timer"] < 15000, b
+    t = texts(q.icon())
+    assert any(s.endswith("...") for s in t) and len(q.icon()) < 8000
+    sign(q)
+    press(q, "Submit")
+    assert q.pulses("Submitted") == 1
+    row = q.read_file(base_dir(q) + "/SignIns/log.csv").split("\r\n")[1].split(",")
+    assert row[1] == "A" * 120 and row[2] == "é" * 120 and row[4] == "R" * 120   # bounded to 120 characters each
+    assert q.pin("LastGuest")["String"] == "A" * 120
+
+
+def test_signin_ink_is_bounded_by_canvas_characters():
+    # Fractional coordinates cost 13-14 chars per point: nine 400-point
+    # scribbles would overflow the 60000-char canvas, drop the live ink and
+    # set the sticky "Drawing too large" status. Finished ink stays under its
+    # character budget (a stroke is thinned, then new strokes are refused).
+    for props in ({"Pad Width": 1600, "Pad Height": 1200, "Max Frame Rate": "30"}, {"Max Frame Rate": "30"}):
+        q = boot(props=props)
+        bx, by, bw, bh = box(q)
+        rowH = max(10, int(bh / 11))
+        for s in range(9):
+            pts = [(bx + 20 + i * 3.37 + s * 5.1, by + 20 + s * rowH + (rowH * 0.4 if i % 2 else -rowH * 0.4)) for i in range(400)]
+            q.touch([(min(x, bx + bw - 1), y) for x, y in pts], dt=0.034)
+            assert q.status().startswith("OK") and len(q.icon()) < 58000
+        n9 = strokes(q)
+        assert 3 <= n9 <= 9
+        pts = zigzag(bx, by, 820, y0=bh - 40, step=1.7, amp=12.0, wrap=820)
+        q.touch([(min(x, bx + bw - 1), y) for x, y in pts], dt=0.034, lift=False)
+        svg = q.icon()
+        assert len(svg) < 58000 and q.status().startswith("OK")
+        assert len(paths(svg)) == strokes(q) + (1 if q.run("return TouchPad.inst.live ~= nil") else 0)
+        q.lift()
+        svg = q.icon()
+        assert len(svg) < 58000 and q.status().startswith("OK") and HINT in texts(svg)
+        assert len(paths(svg)) == strokes(q) <= 10
+        for i in range(12):                                 # dots beyond the budget are refused too, quietly
+            q.tap(bx + 30 + i * 9, by + 30)
+        assert len(q.icon()) < 58000 and q.status().startswith("OK")
+        b = q.budget()
+        assert b["max_handler"] < 60000 and b["max_frame"] < 45000, b
+    # the signature file is not bounded by the pad canvas: every stroke is in it
+    q = boot(props={"Max Frame Rate": "30"})
+    bx, by, bw, bh = box(q)
+    for s in range(5):
+        q.touch([(bx + 20 + i * 1.1, by + 30 + s * 30 + (6.3 if i % 2 else -6.3)) for i in range(400)], dt=0.034)
+    fill(q, "Ana")
+    press(q, "Submit")
+    assert q.pulses("Submitted") == 1
+    sig = q.read_file([f for f in q.list_files() if f.endswith(".svg")][0])
+    assert len(paths(sig)) == 5
+
+
+def test_signin_resume_after_submit_does_not_ink_the_next_form():
+    q = boot()
+    q.set_pin("GuestName", "Ana")
+    bx, by, bw, bh = box(q)
+    q.touch([(bx + 50, by + 100), (bx + 80, by + 120), (bx + 110, by + 100), (bx + 140, by + 120)], dt=0.05, lift=False)
+    q.advance(0.5)                                          # the lift is inferred; the drag is paused
+    assert strokes(q) == 1
+    press(q, "Submit")
+    assert q.pulses("Submitted") == 1 and strokes(q) == 0 and q.pin("GuestName")["String"] == ""
+    q.touch([(bx + 146, by + 122), (bx + 170, by + 130), (bx + 200, by + 110)], dt=0.05, lift=False)   # taken back
+    assert strokes(q) == 0 and not q.run("return TouchPad.inst.live ~= nil")   # the next guest's form stays clean
+    q.lift()
+    assert strokes(q) == 0 and not q.run("return TouchPad.inst.live ~= nil")
+    q.advance(6)                                            # the thank-you line (its check icon is a path) fades
+    assert not paths(q.icon())
+    q.tap(bx + 60, by + 60)                                 # a fresh touch draws again
+    assert strokes(q) == 1
+    # the same for Clear Signature and Clear
+    for name in ("ClearSignature", "Clear"):
+        q = boot()
+        bx, by, bw, bh = box(q)
+        q.touch([(bx + 50, by + 100), (bx + 80, by + 120), (bx + 110, by + 100)], dt=0.05, lift=False)
+        q.advance(0.5)
+        press(q, name)
+        q.touch([(bx + 116, by + 104), (bx + 150, by + 130)], dt=0.05, lift=False)
+        q.lift()
+        assert strokes(q) == 0, name
+    # a resume with nothing cleared in between still continues (as before)
+    q = boot()
+    bx, by, bw, bh = box(q)
+    q.touch([(bx + 50, by + 100), (bx + 80, by + 120), (bx + 110, by + 100)], dt=0.05, lift=False)
+    q.advance(0.5)
+    q.touch([(bx + 116, by + 104), (bx + 150, by + 130)], dt=0.05, lift=False)
+    q.lift()
+    assert strokes(q) == 2
+
+
+def test_signin_line_breaks_in_fields_become_spaces():
+    q = boot()
+    today = time.strftime("%Y-%m-%d", time.localtime(q.epoch))
+    sign_in(q, "Ana\n%s 09:00:00,x" % today, company="Acme\r\nInc", visiting="Bo\tCy")
+    assert q.pulses("Submitted") == 1 and q.pin("TodayCount")["String"] == "1"
+    assert q.pin("Gesture")["String"] == ("SIGNED IN: ANA %s 09:00:00,X" % today)
+    log = q.read_file(base_dir(q) + "/SignIns/log.csv")
+    assert log.count("\n") == 2                             # the header and one row: no line inside a cell
+    row = log.split("\r\n")[1]
+    assert '"Ana %s 09:00:00,x",Acme Inc,Bo Cy,' % today in row
+    assert "\n" not in q.icon() and "&#10;" not in q.icon()
+    # a restart on that log counts the one sign-in once
+    q2 = QSys(mode="Sign-In", picker="Color_Picker", plugin=plugin_path(), runtime=False)
+    q2.write_file("media/SignIns/log.csv", log)
+    q2._dispatch("load", q2._chunk)
+    q2.advance(0.2)
+    assert q2.pin("TodayCount")["String"] == "1"
+
+
+def test_signin_empty_log_file_gets_bom_and_header():
+    q = boot()
+    base = base_dir(q)
+    q.write_file(base + "/SignIns/log.csv", "")              # an administrator truncated the log
+    sign_in(q, "Ana", company="Acme", visiting="Nikita")
+    assert q.pulses("Submitted") == 1 and q.pin("TodayCount")["String"] == "1"
+    raw = q.read_file(base + "/SignIns/log.csv", text=False)
+    assert raw.startswith(b"\xef\xbb\xbftime,name,company,visiting,room,file\r\n")
+    assert raw.count(b"\xef\xbb\xbf") == 1 and raw.decode("utf-8").split("\r\n")[1].split(",")[1] == "Ana"
+    q.advance(3)
+    sign_in(q, "Bo")
+    raw = q.read_file(base + "/SignIns/log.csv", text=False)
+    assert raw.count(b"\xef\xbb\xbf") == 1 and raw.count(b"time,name,") == 1 and raw.count(b"\r\n") == 3
+
+
+def test_signin_long_room_name_keeps_the_day_count():
+    q = boot()
+    room = "Executive Boardroom, Level 12, West Wing, Building C, Headquarters Campus"
+    q.set_pin("RoomName", room)
+    q.advance(0.05)
+    t = texts(q.icon())
+    assert "Today: 0" in t
+    assert any(s.startswith("Executive Boardroom") and s.endswith("...") for s in t)
+    sign_in(q, "Ana")
+    q.advance(0.05)
+    t = texts(q.icon())
+    assert "Today: 1" in t and any(s.startswith("Executive Boardroom") for s in t)
+    assert ',"Executive Boardroom, Level 12, West Wing, Building C, Headquarters Campus",' in q.read_file(base_dir(q) + "/SignIns/log.csv")
+    # a short room name shows whole, on a small pad the count still wins
+    small = boot(props={"Pad Width": 160, "Pad Height": 120})
+    small.set_pin("RoomName", room)
+    small.advance(0.05)
+    assert "Today: 0" in texts(small.icon())
+
+
+def test_signin_trigger_release_does_not_rerun_the_action():
+    q = boot()
+    bx, by, bw, bh = box(q)
+    sign(q)
+    q.set_pin("ClearSignature", True)
+    assert strokes(q) == 0 and q.pin("Gesture")["String"] == "SIGNATURE CLEARED"
+    q.advance(0.05)
+    sign(q)                                                  # the guest signs again while the button is held
+    assert strokes(q) == 1
+    q.set_pin("ClearSignature", False)                      # the release, 0.3 s and more later
+    assert strokes(q) == 1 and q.pin("Gesture")["String"] != "SIGNATURE CLEARED"
+    # Clear held past the debounce
+    fill(q, "Ana")
+    q.set_pin("Clear", True)
+    assert q.pin("GuestName")["String"] == ""
+    q.advance(0.5)
+    q.set_pin("GuestName", "Bo")
+    q.set_pin("Clear", False)
+    assert q.pin("GuestName")["String"] == "Bo"
+    # Submit held past the resubmit guard does not run again on release
+    sign(q)
+    q.set_pin("Submit", True)
+    assert q.pulses("Submitted") == 1
+    q.advance(2.5)
+    q.set_pin("Submit", False)
+    assert q.pulses("Submitted") == 1
+    assert "Thank you, Bo" in texts(q.icon()) and "Please enter your name" not in texts(q.icon())
+    # a pin driven by Trigger() never reports true: it still acts, once per press
+    t = boot()
+    sign(t)
+    t.trigger("ClearSignature")
+    assert strokes(t) == 0
+    fill(t, "Cy")
+    sign(t)
+    t.trigger("Submit")
+    assert t.pulses("Submitted") == 1 and t.pin("LastGuest")["String"] == "Cy"

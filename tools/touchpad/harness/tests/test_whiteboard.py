@@ -411,6 +411,8 @@ def test_whiteboard_resume_far_from_the_lift_starts_a_new_stroke():
     # the engine settles the resume on the first or second report of the new touch
     assert lines[1][0][0] in [(180.0, 200.0), (200.0, 150.0)] and lines[1][0][-1] == (220.0, 200.0)
     # a resume within the continuity distance (20 px here) continues the stroke
+    # (2 s gaps: a touch inside the engine's 1.5 s window lands on its second report)
+    q.advance(2.0)
     q.touch([(300, 300), (350, 350)], lift=False)
     q.advance(0.5)
     assert strokes(q) == 3 and q.pin("Touching")["Boolean"] is False
@@ -419,11 +421,13 @@ def test_whiteboard_resume_far_from_the_lift_starts_a_new_stroke():
     joined = polylines(q.icon())[-1][0]
     assert joined[0] == (300.0, 300.0) and joined[-1] == (400.0, 400.0)
     # just outside it, a new stroke; a wide pen widens the distance (3 widths)
+    q.advance(2.0)
     q.touch([(100, 400), (150, 450)], lift=False)
     q.advance(0.5)
     q.touch([(166, 466), (166, 466), (200, 480)], dt=0.05)               # 22.6 px away
     assert strokes(q) == 5
     assert polylines(q.icon())[-2][0] == [(100.0, 400.0), (150.0, 450.0)]
+    q.advance(2.0)
     q.set_pin("PenWidth", 8)
     q.touch([(300, 100), (350, 100)], lift=False)
     q.advance(0.5)

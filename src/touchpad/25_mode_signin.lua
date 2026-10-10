@@ -26,7 +26,7 @@ Modes = Modes or {}
 do
   local HINT = "Sign above the line, then press Sign In"
   local MAX_STROKES, MAX_POINTS = 60, 400
-  local CHUNK = 24                    -- raw points simplified per step while drawing (RDP is quadratic on a scribble)
+  local CHUNK = 16                    -- raw points simplified per step while drawing (RDP is quadratic on a scribble)
   local LIVE_MAX = 480                -- live points kept before the live stroke is decimated back to MAX_POINTS
   local MAX_TOTAL = 4000              -- points over every finished stroke
   local CHAR_BUDGET = 46000           -- chars of finished path data: the 60000-char pad canvas keeps room for the live stroke and the chrome
@@ -44,7 +44,7 @@ do
   local BOM = "\239\187\191"
   local NOT_SAVED = "Not saved: please ask at reception"
   local INK, PAPER = "#1B1F24", "#FFFFFF"   -- the signature file's colours
-  local sformat, ssub, sfind, sgsub, concat = string.format, string.sub, string.find, string.gsub, table.concat
+  local ssub, sgsub, concat = string.sub, string.gsub, table.concat
 
   -- Field text as stored: one line, trimmed and bounded (the pins may carry
   -- anything). Line breaks and tabs become a space so a field never spans
@@ -70,19 +70,23 @@ do
     return (sgsub(s, "[%^%$%(%)%%%.%[%]%*%+%-%?]", "%%%0"))
   end
 
-  -- Keeps at most `target` points of a flat array (first and last always).
-  local function decimate(pts, target)
+  -- Keeps `target` evenly spread points of a flat array (first and last
+  -- always). `parts`, one formatted string per point, is thinned alike, so
+  -- no number is ever formatted twice (Svg.num on a fresh value is the
+  -- costliest step of the whole mode).
+  local function decimate(pts, target, parts)
     local n = #pts // 2
-    if n <= target then return pts end
-    local step = math.ceil(n / target)
-    local out = {}
-    for i = 1, n - 1, step do
+    if n <= target or target < 2 then return pts, parts end
+    local out, outParts = {}, {}
+    local span = (n - 1) / (target - 1)
+    for k = 0, target - 1 do
+      local i = 1 + math.floor(k * span + 0.5)
+      if i > n then i = n end
       out[#out + 1] = pts[2 * i - 1]
       out[#out + 1] = pts[2 * i]
+      outParts[#outParts + 1] = parts[i]
     end
-    out[#out + 1] = pts[2 * n - 1]
-    out[#out + 1] = pts[2 * n]
-    return out
+    return out, outParts
   end
 
   Modes["Sign-In"] = {
@@ -157,6 +161,7 @@ do
         message = nil,           -- { text, kind = "ok" | "bad" | "info" }
         messageHandle = nil,
         count = 0, today = "", room = "",
+        fit = {},                -- the header's fitted name and sub-line, dropped when a field changes
         lastSubmitAt = -100, activeAt = 0,
         actAt = {}, edge = {},   -- per trigger control: last action time; whether it ever reported true
         houseHandle = nil,
@@ -246,7 +251,7 @@ do
       -- handler (move or lift) simplifies more than one chunk. `parts` holds
       -- the kept points already formatted, so a frame only formats the raw
       -- tail. Past LIVE_MAX points the live stroke is decimated to MAX_POINTS
-      -- (the finished stroke never keeps more) and `parts` is rebuilt.
+      -- (the finished stroke never keeps more) and `parts` is thinned alike.
       local function closeChunk(live)
         local raw = live.raw
         if #raw < 4 then return end
@@ -258,10 +263,7 @@ do
           parts[#parts + 1] = pt(simple[i], simple[i + 1])
         end
         if #kept // 2 > LIVE_MAX then
-          kept = decimate(kept, MAX_POINTS)
-          parts = {}
-          for i = 1, #kept, 2 do parts[#parts + 1] = pt(kept[i], kept[i + 1]) end
-          live.kept, live.parts = kept, parts
+          live.kept, live.parts = decimate(kept, MAX_POINTS, parts)
         end
         local lx, ly = raw[#raw - 1], raw[#raw]
         live.raw = { lx, ly }
@@ -291,17 +293,10 @@ do
         E.invalidate()
       end
 
-      local function pathOf(pts, n)
-        local parts = {}
-        for i = 1, 2 * n, 2 do
-          parts[#parts + 1] = (i == 1 and "M" or "L") .. pt(pts[i], pts[i + 1])
-        end
-        return concat(parts, " ")
-      end
-
       -- The finished stroke is bounded three ways: MAX_POINTS, the points left
       -- under MAX_TOTAL and the canvas chars left under CHAR_BUDGET (a stroke
-      -- that would not fit is thinned to the share of points that does).
+      -- that would not fit is thinned to the share of points that does). Its
+      -- path data is joined from the points formatted while drawing.
       local function finishStroke()
         local live = self.live
         if not live then return end
@@ -315,19 +310,22 @@ do
           end
         else
           closeChunk(live)
-          local pts = live.kept
-          if #pts < 4 then pts = live.raw end
+          local pts, parts = live.kept, live.parts
+          if #parts < 2 then                        -- never after a moving stroke's closeChunk; kept safe
+            pts, parts = live.raw, {}
+            for i = 1, #pts, 2 do parts[#parts + 1] = pt(pts[i], pts[i + 1]) end
+          end
           local limit = math.min(MAX_POINTS, MAX_TOTAL - self.total)
           if limit >= 2 and room >= DOT_CHARS then
-            if #pts // 2 > limit then pts = decimate(pts, limit) end
-            local n = #pts // 2
-            local d = pathOf(pts, n)
+            if #parts > limit then pts, parts = decimate(pts, limit, parts) end
+            local n = #parts
+            local d = "M" .. concat(parts, " L")
             if #d > room then
               local keep = math.floor(n * room / #d) - 1
               if keep >= 2 then
-                pts = decimate(pts, keep)
-                n = #pts // 2
-                d = pathOf(pts, n)
+                pts, parts = decimate(pts, keep, parts)
+                n = #parts
+                d = "M" .. concat(parts, " L")
               end
             end
             if #d <= room then
@@ -384,6 +382,7 @@ do
       local function setField(key, name, value)
         if self.fields[key] ~= value then
           self.fields[key] = value
+          self.fit = {}
           E.out(name, value)
         end
       end
@@ -560,6 +559,7 @@ do
         self.fields.company = field(ctlStr("GuestCompany"))
         self.fields.visiting = field(ctlStr("Visiting"))
         self.room = field(ctlStr("RoomName"))
+        self.fit = {}
         self.today = Q.date("%Y-%m-%d")
         setCount(countToday(self.today))
         E.out("LastGuest", "")
@@ -605,11 +605,11 @@ do
 
       function self:onControl(name, index, ctl)
         if name == "GuestName" then
-          self.fields.name = field(ctl.String); activity()
+          self.fields.name = field(ctl.String); self.fit = {}; activity()
         elseif name == "GuestCompany" then
-          self.fields.company = field(ctl.String); activity()
+          self.fields.company = field(ctl.String); self.fit = {}; activity()
         elseif name == "Visiting" then
-          self.fields.visiting = field(ctl.String); activity()
+          self.fields.visiting = field(ctl.String); self.fit = {}; activity()
         elseif name == "Submit" then
           if fired(name, ctl) then submit() end
         elseif name == "Clear" then
@@ -622,7 +622,7 @@ do
             E.setGesture("SIGNATURE CLEARED")
           end
         elseif name == "RoomName" then
-          self.room = field(ctl.String)
+          self.room = field(ctl.String); self.fit = {}
         elseif name == "WebhookUrl" then
           return
         end
@@ -633,6 +633,7 @@ do
       local function drawHeader(c)
         local x0, y = m, m + titleSize
         c:text(x0, y, "Visitor sign-in", { size = titleSize, fill = T.muted, weight = "bold" })
+        local fit = self.fit        -- fitted lines, measured once per field or count change
         -- the day count always shows; the room name fits into what is left
         local today = "Today: " .. self.count
         local todayW = Font.width(today, titleSize)
@@ -641,22 +642,32 @@ do
         if room ~= "" then
           local gap = titleSize * 1.2
           local avail = W * 0.6 - todayW - gap
-          if avail >= titleSize * 2 then
-            c:textFit(W - m - todayW - gap, y, avail, room, { size = titleSize, fill = T.muted, anchor = "end" })
+          if fit.room == nil or fit.roomFor ~= self.count then
+            fit.room = (avail >= titleSize * 2) and Font.fit(room, titleSize, avail) or ""
+            fit.roomFor = self.count
+          end
+          if fit.room ~= "" then
+            c:text(W - m - todayW - gap, y, fit.room, { size = titleSize, fill = T.muted, anchor = "end" })
           end
         end
         y = y + nameSize + 4
         local f = self.fields
+        -- the fitted name and sub-line are measured once per field change,
+        -- not per frame (a 120-character field is costly to fit)
+        if fit.name == nil then
+          fit.name = (f.name ~= "") and Font.fit(f.name, nameSize, W - 2 * m, "bold") or ""
+          local sub = f.company
+          if f.visiting ~= "" then sub = (sub ~= "" and (sub .. "  -  ") or "") .. "visiting " .. f.visiting end
+          fit.sub = (sub ~= "") and Font.fit(sub, subSize, W - 2 * m) or ""
+        end
         if f.name ~= "" then
-          c:textFit(x0, y, W - 2 * m, f.name, { size = nameSize, fill = T.text, weight = "bold" })
+          if fit.name ~= "" then c:text(x0, y, fit.name, { size = nameSize, fill = T.text, weight = "bold" }) end
         else
           c:text(x0, y, "Your name", { size = nameSize, fill = T.line, weight = "bold" })
         end
         y = y + subSize + 6
-        local sub = f.company
-        if f.visiting ~= "" then sub = (sub ~= "" and (sub .. "  -  ") or "") .. "visiting " .. f.visiting end
-        if sub ~= "" then
-          c:textFit(x0, y, W - 2 * m, sub, { size = subSize, fill = T.muted })
+        if f.company ~= "" or f.visiting ~= "" then
+          if fit.sub ~= "" then c:text(x0, y, fit.sub, { size = subSize, fill = T.muted }) end
         else
           c:text(x0, y, "Company and who you are visiting", { size = subSize, fill = T.line })
         end
