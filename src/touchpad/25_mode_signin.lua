@@ -13,7 +13,10 @@
 -- lines of the log at start-up and resets at midnight; the form clears after
 -- three idle minutes; a second Submit right after a sign-in does nothing.
 -- Strokes are polylines simplified to at most 400 points, at most 60 of
--- them; a touch without movement draws a dot.
+-- them; a touch without movement draws a dot. The ink is also bounded by
+-- characters so the pad canvas never drops an element: finished path data
+-- stays under CHAR_BUDGET (a stroke that would not fit is thinned, then new
+-- strokes are refused) and the live stroke is decimated past LIVE_MAX points.
 --
 -- The whole body sits in a `do` block: the built plugin is one chunk with a
 -- 200-local limit, so only Modes["Sign-In"] is defined at the top level.
@@ -23,8 +26,11 @@ Modes = Modes or {}
 do
   local HINT = "Sign above the line, then press Sign In"
   local MAX_STROKES, MAX_POINTS = 60, 400
-  local CHUNK = 48                    -- raw points simplified per step while drawing
-  local MAX_TOTAL = 4000              -- points over every stroke (the pad SVG stays far under its limit)
+  local CHUNK = 24                    -- raw points simplified per step while drawing (RDP is quadratic on a scribble)
+  local LIVE_MAX = 480                -- live points kept before the live stroke is decimated back to MAX_POINTS
+  local MAX_TOTAL = 4000              -- points over every finished stroke
+  local CHAR_BUDGET = 46000           -- chars of finished path data: the 60000-char pad canvas keeps room for the live stroke and the chrome
+  local DOT_CHARS = 64                -- chars a dot costs on the canvas; also the least room a new stroke needs
   local FILE_LIMIT = 400000           -- chars: the signature file's canvas limit
   local SIMPLIFY_TOL = 0.6            -- px: Ramer-Douglas-Peucker tolerance
   local IDLE_CLEAR = 180              -- s without activity clears the form
@@ -40,11 +46,14 @@ do
   local INK, PAPER = "#1B1F24", "#FFFFFF"   -- the signature file's colours
   local sformat, ssub, sfind, sgsub, concat = string.format, string.sub, string.find, string.gsub, table.concat
 
-  -- Field text as stored: trimmed and bounded (the pins may carry anything).
+  -- Field text as stored: one line, trimmed and bounded (the pins may carry
+  -- anything). Line breaks and tabs become a space so a field never spans
+  -- lines of the log; the byte cut comes before the character walk so a huge
+  -- pin costs a handler nothing.
   local function field(s)
-    s = U.trim(tostring(s or ""))
-    if U.utf8len(s) > MAX_FIELD then s = U.truncateChars(s, MAX_FIELD) end
-    return s
+    s = U.trim(sgsub(tostring(s or ""), "%c+", " "))
+    if #s > 4 * MAX_FIELD then s = ssub(s, 1, 4 * MAX_FIELD) end
+    return U.truncateChars(s, MAX_FIELD)
   end
 
   -- "Ana Lopez-Smith" -> "Ana_Lopez-Smith": letters, digits and dashes only.
@@ -141,12 +150,15 @@ do
       local self = {
         fields = { name = "", company = "", visiting = "" },
         strokes = {},            -- finished: { d = "M..L..", dot = { x, y } or nil }
-        live = nil,              -- { kept = {flat, simplified}, raw = {flat, current chunk}, x0, y0, x1, y1 }
+        live = nil,              -- { kept = {flat, simplified}, parts = {"x y" per kept point}, raw = {flat, current chunk}, x0, y0, x1, y1 }
         total = 0,               -- points over every finished stroke
+        chars = 0,               -- canvas chars of every finished stroke
+        formGen = 0, touchGen = -1,   -- the form generation and the one the current touch began in
         message = nil,           -- { text, kind = "ok" | "bad" | "info" }
         messageHandle = nil,
-        count = 0, today = "",
-        lastSubmitAt = -100, actAt = -100, activeAt = 0,
+        count = 0, today = "", room = "",
+        lastSubmitAt = -100, activeAt = 0,
+        actAt = {}, edge = {},   -- per trigger control: last action time; whether it ever reported true
         houseHandle = nil,
         lastFile = "",
       }
@@ -177,16 +189,25 @@ do
         local c = E.ctl("PenWidth")
         return U.clamp(tonumber(c and c.Value) or 3, 1, 8)
       end
+      -- The room name is read from its pin when it changes, not per frame.
       local function roomName()
-        return field(ctlStr("RoomName"))
+        return self.room
       end
 
-      -- A trigger acts on its rising edge; a handler that runs with the value
-      -- already false acts too unless it just did.
-      local function fired(ctl)
+      -- A trigger acts on its rising edge. A control that has ever reported
+      -- true is edge-driven from then on: its false-valued calls (the release)
+      -- do nothing. A control that never reports true (a Trigger()-style pin)
+      -- acts on every call, at most once per TRIGGER_DEBOUNCE.
+      local function fired(name, ctl)
         local now = E.now()
-        if ctl.Boolean or now - self.actAt > TRIGGER_DEBOUNCE then
-          self.actAt = now
+        if ctl.Boolean then
+          self.edge[name] = true
+          self.actAt[name] = now
+          return true
+        end
+        if self.edge[name] then return false end
+        if now - (self.actAt[name] or -100) > TRIGGER_DEBOUNCE then
+          self.actAt[name] = now
           return true
         end
         return false
@@ -215,25 +236,42 @@ do
       end
 
       -- ---------- strokes ----------
+      -- One kept point formatted for a path ("x y").
+      local function pt(x, y)
+        return num(x) .. " " .. num(y)
+      end
+
       -- A stroke is simplified as it is drawn: every CHUNK raw points are run
       -- through Ramer-Douglas-Peucker and appended to `kept`, so no single
-      -- handler (move or lift) simplifies more than one chunk.
+      -- handler (move or lift) simplifies more than one chunk. `parts` holds
+      -- the kept points already formatted, so a frame only formats the raw
+      -- tail. Past LIVE_MAX points the live stroke is decimated to MAX_POINTS
+      -- (the finished stroke never keeps more) and `parts` is rebuilt.
       local function closeChunk(live)
         local raw = live.raw
         if #raw < 4 then return end
         local simple = U.simplify(raw, SIMPLIFY_TOL)
-        local kept = live.kept
+        local kept, parts = live.kept, live.parts
         local from = (#kept > 0) and 3 or 1          -- the chunk starts on the last kept point
-        for i = from, #simple do kept[#kept + 1] = simple[i] end
-        if #kept // 2 > 2 * MAX_POINTS then live.kept = decimate(kept, MAX_POINTS) end
+        for i = from, #simple, 2 do
+          kept[#kept + 1], kept[#kept + 2] = simple[i], simple[i + 1]
+          parts[#parts + 1] = pt(simple[i], simple[i + 1])
+        end
+        if #kept // 2 > LIVE_MAX then
+          kept = decimate(kept, MAX_POINTS)
+          parts = {}
+          for i = 1, #kept, 2 do parts[#parts + 1] = pt(kept[i], kept[i + 1]) end
+          live.kept, live.parts = kept, parts
+        end
         local lx, ly = raw[#raw - 1], raw[#raw]
         live.raw = { lx, ly }
       end
 
       local function startStroke(x, y)
         if #self.strokes >= MAX_STROKES or self.total >= MAX_TOTAL then return end
+        if self.chars + DOT_CHARS > CHAR_BUDGET then return end
         x, y = U.clamp(x, box.x, box.x + box.w), U.clamp(y, box.y, box.y + box.h)
-        self.live = { kept = {}, raw = { x, y }, x0 = x, y0 = y, x1 = x, y1 = y }
+        self.live = { kept = {}, parts = {}, raw = { x, y }, x0 = x, y0 = y, x1 = x, y1 = y }
         if self.message and self.message.kind == "bad" then clearMessage() end
         activity()
         E.invalidate()
@@ -256,28 +294,47 @@ do
       local function pathOf(pts, n)
         local parts = {}
         for i = 1, 2 * n, 2 do
-          parts[#parts + 1] = (i == 1 and "M" or "L") .. num(pts[i]) .. " " .. num(pts[i + 1])
+          parts[#parts + 1] = (i == 1 and "M" or "L") .. pt(pts[i], pts[i + 1])
         end
         return concat(parts, " ")
       end
 
+      -- The finished stroke is bounded three ways: MAX_POINTS, the points left
+      -- under MAX_TOTAL and the canvas chars left under CHAR_BUDGET (a stroke
+      -- that would not fit is thinned to the share of points that does).
       local function finishStroke()
         local live = self.live
         if not live then return end
         self.live = nil
+        local room = CHAR_BUDGET - self.chars
         if live.x1 - live.x0 < 2 and live.y1 - live.y0 < 2 then
-          self.strokes[#self.strokes + 1] = { dot = { live.raw[1], live.raw[2] } }
-          self.total = self.total + 1
+          if room >= DOT_CHARS then
+            self.strokes[#self.strokes + 1] = { dot = { live.raw[1], live.raw[2] } }
+            self.total = self.total + 1
+            self.chars = self.chars + DOT_CHARS
+          end
         else
           closeChunk(live)
           local pts = live.kept
           if #pts < 4 then pts = live.raw end
           local limit = math.min(MAX_POINTS, MAX_TOTAL - self.total)
-          if limit >= 2 then
+          if limit >= 2 and room >= DOT_CHARS then
             if #pts // 2 > limit then pts = decimate(pts, limit) end
             local n = #pts // 2
-            self.strokes[#self.strokes + 1] = { d = pathOf(pts, n), n = n }
-            self.total = self.total + n
+            local d = pathOf(pts, n)
+            if #d > room then
+              local keep = math.floor(n * room / #d) - 1
+              if keep >= 2 then
+                pts = decimate(pts, keep)
+                n = #pts // 2
+                d = pathOf(pts, n)
+              end
+            end
+            if #d <= room then
+              self.strokes[#self.strokes + 1] = { d = d, n = n }
+              self.total = self.total + n
+              self.chars = self.chars + #d
+            end
           end
         end
         activity()
@@ -300,11 +357,15 @@ do
           if #kept + #raw <= 2 then
             c:circle(raw[1], raw[2], pw * 0.9, { fill = ink })
           else
-            local parts = {}
-            for i = 1, #kept, 2 do parts[#parts + 1] = num(kept[i]) .. " " .. num(kept[i + 1]) end
+            -- the kept points come pre-formatted; only the raw tail (under
+            -- CHUNK points) is formatted per frame
+            local tail = {}
             local from = (#kept > 0) and 3 or 1
-            for i = from, #raw, 2 do parts[#parts + 1] = num(raw[i]) .. " " .. num(raw[i + 1]) end
-            c:path("M" .. concat(parts, " L"), { stroke = ink, sw = pw, cap = "round", join = "round" })
+            for i = from, #raw, 2 do tail[#tail + 1] = pt(raw[i], raw[i + 1]) end
+            local d = concat(live.parts, " L")
+            local t = concat(tail, " L")
+            if d == "" then d = t elseif t ~= "" then d = d .. " L" .. t end
+            c:path("M" .. d, { stroke = ink, sw = pw, cap = "round", join = "round" })
           end
         end
       end
@@ -332,11 +393,18 @@ do
           and #self.strokes == 0 and self.live == nil
       end
 
+      -- Dropping the ink starts a new form generation: a touch that began
+      -- before it may not resume onto the fresh form (onTouchResume).
+      local function clearInk()
+        self.strokes, self.live, self.total, self.chars = {}, nil, 0, 0
+        self.formGen = self.formGen + 1
+      end
+
       local function clearForm(quiet)
         setField("name", "GuestName", "")
         setField("company", "GuestCompany", "")
         setField("visiting", "Visiting", "")
-        self.strokes, self.live, self.total = {}, nil, 0
+        clearInk()
         if not quiet then
           clearMessage()
           E.setGesture("CLEARED")
@@ -448,7 +516,8 @@ do
         local row = concat({ U.csvCell(Q.date("%Y-%m-%d %H:%M:%S", t)), U.csvCell(rec.name), U.csvCell(rec.company),
                              U.csvCell(rec.visiting), U.csvCell(rec.room), U.csvCell(fileName) }, ",") .. "\r\n"
         local logPath = dir .. "/log.csv"
-        if E.file.read(logPath) == nil then
+        local data = E.file.read(logPath)
+        if data == nil or data == "" then      -- missing or truncated: start it with the BOM and the header
           ok, err = E.file.write(logPath, BOM .. LOG_HEADER .. "\r\n" .. row)
         else
           ok, err = E.file.append(logPath, row)
@@ -490,6 +559,7 @@ do
         self.fields.name = field(ctlStr("GuestName"))
         self.fields.company = field(ctlStr("GuestCompany"))
         self.fields.visiting = field(ctlStr("Visiting"))
+        self.room = field(ctlStr("RoomName"))
         self.today = Q.date("%Y-%m-%d")
         setCount(countToday(self.today))
         E.out("LastGuest", "")
@@ -502,6 +572,7 @@ do
 
       function self:onTouchStart(x, y, t)
         activity()
+        self.touchGen = self.formGen
         if inBox(x, y) then startStroke(x, y) end
       end
 
@@ -518,8 +589,12 @@ do
 
       -- A lift taken back by the engine: the ink of the first part is kept
       -- and a fresh stroke starts where the finger landed (no joining line).
+      -- A touch that began before the form was cleared (Submit, Clear, the
+      -- idle clear, Clear Signature) does not resume: the previous guest's
+      -- finger may not ink the next guest's form.
       function self:onTouchResume(x, y, t)
         activity()
+        if self.touchGen ~= self.formGen then return end
         if inBox(x, y) then startStroke(x, y) end
       end
 
@@ -536,16 +611,18 @@ do
         elseif name == "Visiting" then
           self.fields.visiting = field(ctl.String); activity()
         elseif name == "Submit" then
-          if fired(ctl) then submit() end
+          if fired(name, ctl) then submit() end
         elseif name == "Clear" then
-          if fired(ctl) then activity(); clearForm(false) end
+          if fired(name, ctl) then activity(); clearForm(false) end
         elseif name == "ClearSignature" then
-          if fired(ctl) then
+          if fired(name, ctl) then
             activity()
-            self.strokes, self.live, self.total = {}, nil, 0
+            clearInk()
             if self.message and self.message.kind ~= "ok" then clearMessage() end
             E.setGesture("SIGNATURE CLEARED")
           end
+        elseif name == "RoomName" then
+          self.room = field(ctl.String)
         elseif name == "WebhookUrl" then
           return
         end
@@ -556,10 +633,18 @@ do
       local function drawHeader(c)
         local x0, y = m, m + titleSize
         c:text(x0, y, "Visitor sign-in", { size = titleSize, fill = T.muted, weight = "bold" })
-        local right = "Today: " .. self.count
+        -- the day count always shows; the room name fits into what is left
+        local today = "Today: " .. self.count
+        local todayW = Font.width(today, titleSize)
+        c:text(W - m, y, today, { size = titleSize, fill = T.muted, anchor = "end" })
         local room = roomName()
-        if room ~= "" then right = room .. "   " .. right end
-        c:textFit(W - m, y, W * 0.6, right, { size = titleSize, fill = T.muted, anchor = "end" })
+        if room ~= "" then
+          local gap = titleSize * 1.2
+          local avail = W * 0.6 - todayW - gap
+          if avail >= titleSize * 2 then
+            c:textFit(W - m - todayW - gap, y, avail, room, { size = titleSize, fill = T.muted, anchor = "end" })
+          end
+        end
         y = y + nameSize + 4
         local f = self.fields
         if f.name ~= "" then

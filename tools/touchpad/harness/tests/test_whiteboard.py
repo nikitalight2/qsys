@@ -84,6 +84,23 @@ def zigzag(n, x0=40, y0=250, step=0.9, amp=14):
     return [(x0 + step * i, y0 + (amp if i % 2 else -amp)) for i in range(n)]
 
 
+def scribble(n, x0, y0, roww=60, step=0.9, amp=5, rowh=12):
+    """n points of a serpentine saw tooth filling rows `roww` wide, `rowh` apart:
+    a dense hatch RDP keeps almost entirely."""
+    per = int(roww / step)
+    pts = []
+    for i in range(n):
+        r, k = divmod(i, per)
+        x = x0 + k * step if r % 2 == 0 else x0 + roww - k * step
+        y = y0 + r * rowh + (amp if i % 2 else -amp)
+        pts.append((x, y))
+    return pts
+
+
+def total_points(q):
+    return q.run("local n = 0; for i = 1, #TouchPad.inst.strokes do n = n + #TouchPad.inst.strokes[i].pts // 2 end; return n")
+
+
 # ------------------------------------------------------------ controls, layout, idle drawing
 
 def test_whiteboard_controls_defaults_and_layout_lint():
@@ -202,14 +219,14 @@ def test_whiteboard_undo_and_clear_board():
     pulse(q, "Undo")                                          # a pin pulse: true then false
     assert strokes(q) == 2 and q.pin("Gesture")["String"] == "UNDO"
     assert stroke_circles(q.icon()) == [] and len(polylines(q.icon())) == 2
-    q.advance(1)
+    q.advance(0.3)
     q.trigger("Undo")                                         # the Pad page button: handler with Boolean false
     assert strokes(q) == 1 and len(polylines(q.icon())) == 1
     assert polylines(q.icon())[0][0][0] == (50.0, 50.0)       # the oldest stroke remains
-    q.advance(1)
+    q.advance(0.3)
     pulse(q, "Undo")
     assert strokes(q) == 0
-    q.advance(1)
+    q.advance(0.3)
     pulse(q, "Undo")
     assert strokes(q) == 0 and q.pin("Gesture")["String"] == "NOTHING TO UNDO"
     assert "Draw with one finger" in q.icon()                 # the hint returns on an empty board
@@ -267,6 +284,160 @@ def test_whiteboard_eraser_removes_crossed_strokes_only():
     q.set_pin("Eraser", True)
     q.touch([(400, 100 + 10 * i) for i in range(10)], dt=0.04)
     assert strokes(q) == 1
+
+
+def test_whiteboard_eraser_drag_onto_a_line_and_lift():
+    """An eraser drag that stops within reach of a segment's interior without
+    crossing it erases on the lift, and so does a finger resting on the line."""
+    q = boot()
+    q.drag([(100 + 20 * i, 300) for i in range(11)], seconds=0.5)        # (100,300)-(300,300), two kept points
+    assert polylines(q.icon())[0][0] == [(100.0, 300.0), (300.0, 300.0)]
+    q.set_pin("Eraser", True)
+    q.touch([(200, 200), (200, 290)], dt=0.05)                           # stops 10 px short (reach 16.5)
+    assert strokes(q) == 0 and q.pin("Gesture")["String"] == "ERASED 1 STROKE"
+    # the same approach that stops outside the reach leaves the stroke alone
+    q.set_pin("Eraser", False)
+    q.drag([(100 + 20 * i, 300) for i in range(11)], seconds=0.5)
+    q.set_pin("Eraser", True)
+    q.touch([(200, 200), (200, 280)], dt=0.05)                           # 20 px short
+    assert strokes(q) == 1
+    # the far end of a long report is tested too: the report ends on a dot
+    q.set_pin("Eraser", False)
+    q.tap(400, 100)
+    q.set_pin("Eraser", True)
+    q.touch([(100, 100), (400, 100)], dt=0.05)
+    assert strokes(q) == 1 and stroke_circles(q.icon()) == []
+    assert q.errors == []
+    # a finger resting exactly on the line (PanelTouch held) erases it; PanelTouch
+    # is sticky once used, so this runs on its own instance
+    p = boot()
+    p.drag([(100 + 20 * i, 300) for i in range(11)], seconds=0.5, panel_touch=True)
+    assert strokes(p) == 1
+    p.set_pin("Eraser", True)
+    p.touch([(200, 200), (200, 300)], dt=0.05, panel_touch=True, hold=1.0)
+    assert strokes(p) == 0 and p.errors == []
+
+
+def test_whiteboard_eraser_hit_test_stays_in_budget():
+    """A dense 400-point hatch in the corner of a long diagonal eraser report,
+    a board at the point cap crossed by one pad-wide report and realistic
+    sweeps all stay far under the handler budget."""
+    q = boot()
+    q.touch(scribble(395, 350, 232, roww=68, step=1.0, amp=5, rowh=11), dt=0.02)
+    q.advance(2.0)
+    assert strokes(q) == 1 and lua_points(q) >= 350
+    q.set_pin("Eraser", True)
+    q.reset_pulses()
+    before = q.budget()["handlers"].get("callafter", 0)
+    q.touch([(250, 300), (420, 130)], dt=0.033)                          # x + y = 550, 23+ px from the hatch
+    assert strokes(q) == 1                                               # nothing within reach
+    b = q.budget()
+    assert b["handlers"]["callafter"] < 40000, b["handlers"]["callafter"]
+    assert b["max_handler"] < 120000
+    # three such hatches, then a board at the cap of six corner scribbles with a full diagonal
+    q2 = boot()
+    for k in range(6):
+        q2.touch(scribble(395, 40 + (k % 3) * 70, 40 + (k // 3) * 90), dt=0.02)
+        q2.advance(2.0)
+    assert strokes(q2) == 6 and total_points(q2) > 2000
+    q2.set_pin("Eraser", True)
+    q2.touch([(20, 480), (480, 20)], dt=0.05)                            # one pad-wide jump
+    b = q2.budget()
+    assert b["handlers"]["callafter"] < 60000, b["handlers"]["callafter"]
+    # the same diagonal in 100 px reports over a spread board erases what it crosses
+    q3 = boot()
+    for k in range(6):
+        x0, y0 = 20 + (k % 3) * 153 + 10, 20 + (k // 3) * 230 + 10
+        q3.touch(scribble(395, x0, y0, roww=123, step=1.0, amp=6, rowh=14), dt=0.02)
+        q3.advance(2.0)
+    assert strokes(q3) == 6
+    q3.set_pin("Eraser", True)
+    q3.touch([(20 + 70 * i, 480 - 70 * i) for i in range(7)], dt=0.033)
+    assert strokes(q3) < 6
+    b = q3.budget()
+    assert b["max_handler"] < 60000 and b["max_frame"] < 60000, b
+    assert q.errors == [] and q2.errors == [] and q3.errors == []
+
+
+def test_whiteboard_trigger_presses_in_quick_succession_all_count():
+    """Pad page presses (handler with Boolean false) 0.3 s apart each count;
+    a pin pulse (true then false) counts once."""
+    q = boot()
+    for k in range(3):
+        q.drag([(50, 50 + 100 * k), (150, 60 + 100 * k), (250, 50 + 100 * k)], seconds=0.3)
+    assert strokes(q) == 3
+    q.trigger("Undo")
+    q.advance(0.3)
+    q.trigger("Undo")
+    assert strokes(q) == 1
+    q.trigger("Undo")                                                    # back to back
+    assert strokes(q) == 0
+    q.drag([(50, 50), (150, 60), (250, 50)], seconds=0.3)
+    q.drag([(50, 150), (150, 160), (250, 150)], seconds=0.3)
+    pulse(q, "Undo")                                                     # one press, not two
+    assert strokes(q) == 1
+    pulse(q, "Undo")                                                     # right after: a second press
+    assert strokes(q) == 0
+    q.set_pin("Undo", True)                                              # a true edge, false edge much later
+    q.advance(1.5)
+    q.drag([(50, 50), (150, 60), (250, 50)], seconds=0.3)
+    q.set_pin("Undo", False)                                             # no longer the trailing edge
+    assert strokes(q) == 0
+    q.trigger("Snapshot")
+    q.advance(0.3)
+    q.trigger("Snapshot")
+    assert len(q.list_files()) == 2
+    pulse(q, "Snapshot")
+    assert len(q.list_files()) == 3
+    q.drag([(50, 50), (150, 60), (250, 50)], seconds=0.3)
+    q.trigger("ClearBoard")
+    q.advance(0.3)
+    q.trigger("ClearBoard")
+    assert strokes(q) == 0 and q.pin("Gesture")["String"] == "BOARD EMPTY"
+    assert q.errors == []
+
+
+def test_whiteboard_resume_far_from_the_lift_starts_a_new_stroke():
+    """Without PanelTouch the engine resumes a drag that comes back within 1.5 s;
+    the stroke continues only when the finger lands close to where it left."""
+    q = boot()
+    q.touch([(100, 200), (120, 150), (140, 200)], dt=0.05)              # a letter; lift inferred
+    assert strokes(q) == 1 and q.pin("Touching")["Boolean"] is False
+    q.touch([(180, 200), (200, 150), (220, 200)], dt=0.05)              # the next letter 40 px away, 0.65 s later
+    assert strokes(q) == 2
+    lines = polylines(q.icon())
+    assert len(lines) == 2
+    assert lines[0][0] == [(100.0, 200.0), (120.0, 150.0), (140.0, 200.0)]
+    # the engine settles the resume on the first or second report of the new touch
+    assert lines[1][0][0] in [(180.0, 200.0), (200.0, 150.0)] and lines[1][0][-1] == (220.0, 200.0)
+    # a resume within the continuity distance (20 px here) continues the stroke
+    q.touch([(300, 300), (350, 350)], lift=False)
+    q.advance(0.5)
+    assert strokes(q) == 3 and q.pin("Touching")["Boolean"] is False
+    q.touch([(362, 362), (362, 362), (400, 400)], dt=0.05)               # 17 px from the lift point
+    assert strokes(q) == 3
+    joined = polylines(q.icon())[-1][0]
+    assert joined[0] == (300.0, 300.0) and joined[-1] == (400.0, 400.0)
+    # just outside it, a new stroke; a wide pen widens the distance (3 widths)
+    q.touch([(100, 400), (150, 450)], lift=False)
+    q.advance(0.5)
+    q.touch([(166, 466), (166, 466), (200, 480)], dt=0.05)               # 22.6 px away
+    assert strokes(q) == 5
+    assert polylines(q.icon())[-2][0] == [(100.0, 400.0), (150.0, 450.0)]
+    q.set_pin("PenWidth", 8)
+    q.touch([(300, 100), (350, 100)], lift=False)
+    q.advance(0.5)
+    q.touch([(372, 100), (372, 100), (400, 100)], dt=0.05)               # 22 px away, under 24
+    assert strokes(q) == 6
+    wide = polylines(q.icon())[-1][0]
+    assert wide[0] == (300.0, 100.0) and wide[-1] == (400.0, 100.0)
+    assert q.errors == []
+    # the Setup page carries the PanelTouch recommendation
+    found = q.run('local pages = GetPages(Properties); local p = {}; for k, v in pairs(Properties) do p[k] = v end; '
+                  'for i = 1, #pages do if pages[i].name == "Setup" then p.page_index = { Value = i } end end; '
+                  'local _, g = GetControlLayout(p); for _, e in ipairs(g or {}) do '
+                  'if type(e.Text) == "string" and e.Text:find("PanelTouch") then return true end end return false')
+    assert found is True
 
 
 # ------------------------------------------------------------ snapshot
