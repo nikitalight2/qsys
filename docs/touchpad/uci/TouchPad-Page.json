@@ -1,10 +1,11 @@
 {
   "title": "Touch Pad",
   "resolution": [1280, 800],
+  "script": "--[[ Nikita Touch Pad - UCI script\r\n     Nikita Visual Arts - nikitavisual.art\r\n\r\n     This page needs no script. The seven TP_ controls (TP_Home, TP_ZoomIn, TP_ZoomOut,\r\n     TP_FlipPan, TP_FlipTilt, TP_Lock, TP_Calibrate) are pins on this UCI's controller\r\n     component: wire them in the schematic to the plugin's Home / Zoom In / Zoom Out /\r\n     Flip Pan / Flip Tilt / Lock / Calibrate pins. The Color Picker surface and the\r\n     plugin's three Display copies are placed by hand; see README.md next to this file. ]]\r\n",
   "notes": [
     "Nikita Visual Arts - nikitavisual.art. One-page UCI for the Nikita Touch Pad plugin, 500 x 500 pad at (78, 112).",
     "Geometry: picker surface (40, 100) 955 x 524 = ceil(1.91 x 500) x (500 + 24); pad = picker top-left + (round(0.04 x 955), 12); cover = picker grown by 2 px on each side.",
-    "Keys x, y, w, h, type, variant, control, text, label, font_size, color are the build.py schema.",
+    "Keys title, resolution, script, x, y, w, h, type, variant, control, text, label, font_size, color are the build.py schema. The script replaces the template's meeting-room Lua (comment only: the page needs no script).",
     "Keys css_class, text_color, stroke_color, stroke_width, corner_radius are applied after build.py with the toolkit's library (uci.py): css_class -> Object+_CssClassName, text_color -> _Color/Object+_Color only (not _Fill), stroke_color -> _StrokeColor, stroke_width -> _StrokeWidth, corner_radius -> _CornerRadius.",
     "The Color Picker surface and the plugin's three Display copies are not in this file: the template has no Color Picker prototype and the Display control has no pin."
   ],

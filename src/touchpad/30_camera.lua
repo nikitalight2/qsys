@@ -455,7 +455,8 @@ do
       s = clamp(num(s, 0), -1, 1)
       local dir = sign(s)
       if dir ~= 0 then speedPos("zoomspeed", abs(s) * knobScale(E, "ZoomSpeed", 0.5)) end
-      if self.zoomDir ~= dir then
+      if dir ~= 0 and self.zoomDir ~= dir then
+        -- the old direction is released before the new one is pressed
         if self.zoomDir > 0 then setBool(self.ctl.zoomin, false)
         elseif self.zoomDir < 0 then setBool(self.ctl.zoomout, false) end
       end
@@ -557,6 +558,7 @@ do
         if vals[3] then text = text .. sformat(" %.4f", vals[3]) end
       end
       pcall(function() c.String = text end)
+      self.posTemplate = text       -- a later write without zoom keeps the zoom just sent
       return true
     end
 

@@ -1,3 +1,17 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1280" height="800" viewBox="0 0 1280 800" font-family="Roboto,Helvetica,Arial,sans-serif">
 <rect width="100%" height="100%" fill="rgba(18,11,8,1.000)"/>
+<rect x="38.0" y="98.0" width="959.0" height="528.0" rx="8" fill="none" stroke="#4a5058" stroke-width="2"/><text x="50.0" y="118.0" fill="#9aa3ad" font-size="18"></text>
+<rect x="78.0" y="112.0" width="500.0" height="500.0" rx="8" fill="none" stroke="#4a5058" stroke-width="2"/><text x="90.0" y="132.0" fill="#9aa3ad" font-size="18"></text>
+<text x="328.0" y="367.6" fill="#e8eaed" font-size="16.0" text-anchor="middle">TOUCH PAD: drop the Color Picker surface under the cover,
+then paste the plugin&#x27;s Display here 3 times</text>
+<text x="1130.0" y="98.9" fill="#e8eaed" font-size="14.0" text-anchor="middle">CAMERA</text>
+<g><rect x="1020.0" y="112.0" width="220.0" height="72.0" rx="6" fill="#2b3038" stroke="#565d66"/><text x="1130.0" y="155.0" fill="#e8eaed" font-size="20" text-anchor="middle">Home</text><title>TP_Home</title></g>
+<g><rect x="1020.0" y="200.0" width="220.0" height="72.0" rx="6" fill="#2b3038" stroke="#565d66"/><text x="1130.0" y="243.0" fill="#e8eaed" font-size="20" text-anchor="middle">Zoom In</text><title>TP_ZoomIn</title></g>
+<g><rect x="1020.0" y="288.0" width="220.0" height="72.0" rx="6" fill="#2b3038" stroke="#565d66"/><text x="1130.0" y="331.0" fill="#e8eaed" font-size="20" text-anchor="middle">Zoom Out</text><title>TP_ZoomOut</title></g>
+<g><rect x="1020.0" y="376.0" width="220.0" height="72.0" rx="6" fill="#2b3038" stroke="#565d66"/><text x="1130.0" y="419.0" fill="#e8eaed" font-size="20" text-anchor="middle">Flip Pan</text><title>TP_FlipPan</title></g>
+<g><rect x="1020.0" y="464.0" width="220.0" height="72.0" rx="6" fill="#2b3038" stroke="#565d66"/><text x="1130.0" y="507.0" fill="#e8eaed" font-size="20" text-anchor="middle">Flip Tilt</text><title>TP_FlipTilt</title></g>
+<g><rect x="1020.0" y="552.0" width="220.0" height="72.0" rx="6" fill="#2b3038" stroke="#565d66"/><text x="1130.0" y="595.0" fill="#e8eaed" font-size="20" text-anchor="middle">Lock</text><title>TP_Lock</title></g>
+<g><rect x="1020.0" y="640.0" width="220.0" height="72.0" rx="6" fill="#2b3038" stroke="#565d66"/><text x="1130.0" y="683.0" fill="#e8eaed" font-size="20" text-anchor="middle">Calibrate</text><title>TP_Calibrate</title></g>
+<text x="328.0" y="678.3" fill="#e8eaed" font-size="18.0" text-anchor="middle">Gesture</text>
+<text x="1120.0" y="780.55" fill="#e8eaed" font-size="13.0" text-anchor="middle">Nikita Visual Arts – nikitavisual.art</text>
 </svg>
