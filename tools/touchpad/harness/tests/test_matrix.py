@@ -5,8 +5,9 @@ toggles a crosspoint, a drag paints across crosspoints, a row header sends
 that source to every column, a column header clears the column. Cross n
 (index (r - 1) * cols + c) and Route n (per column) are pins both ways and
 stay in sync while ExclusiveColumns is on; ClearAll clears everything. The
-grid pages at 12 x 12 with arrow bars; Clear All on a large matrix spreads
-its pin writes over several engine turns."""
+grid pages at 12 x 12 with arrow bars (fewer per page on a pad too small
+for 4 px cells); Clear All on a large matrix spreads its pin writes over
+several engine turns."""
 import os
 
 from harness import QSys
@@ -475,14 +476,36 @@ def test_matrix_lock_hints_and_odd_pads():
     quiet = boot(4, 3, props={"Show Hints": False})
     assert "Tap a crosspoint" not in quiet.icon()
     assert quiet.pin("Gesture")["String"] == "TAP A CROSSPOINT, DRAG TO PAINT"
-    for w, h, s, d in ((120, 120, 1, 1), (1600, 300, 12, 20), (300, 1200, 40, 2), (500, 500, 64, 64)):
+    for w, h, s, d in ((120, 120, 1, 1), (1600, 300, 12, 20), (300, 1200, 40, 2), (500, 500, 64, 64),
+                       (120, 120, 64, 64), (120, 120, 12, 4), (140, 170, 64, 64)):
         odd = boot(s, d, props={"Pad Width": w, "Pad Height": h, "Theme": "Light"})
         svg = odd.icon()
         assert 'viewBox="0 0 %d %d"' % (w, h) in svg and len(svg) < 40000
         assert all(ord(ch) < 127 for ch in svg)
         tap(odd, cell(odd, 1, 1))
         assert is_on(odd, 1, 1) and odd.status().startswith("OK")
+        # the last cell of the first page lies inside the pad, clear of the
+        # arrow bar, and a tap on it toggles it (never a page turn)
+        pr, pc = page_info(odd, "R"), page_info(odd, "C")
+        lr, lc = pr[2][0], pc[2][0]
+        cx, cy, cw, ch = odd.run("return TouchPad.inst:cellCentre(%d, %d)" % (lr, lc))
+        assert cw >= 4 and ch >= 4
+        assert cx + cw / 2 <= w and cy + ch / 2 <= h - (16 + (28 if (pr[1] > 1 or pc[1] > 1) else 0))
+        tap(odd, (cx, cy))                                      # (toggles 1,1 off on a 1 x 1)
+        assert is_on(odd, lr, lc) is not (lr == 1 and lc == 1), (w, h, s, d, lr, lc)
+        assert "PAGE" not in odd.pin("Gesture")["String"]
         check(odd)
+    # a 64 x 64 on the smallest pad pages to what 4 px cells allow
+    tiny = boot(64, 64, props={"Pad Width": 120, "Pad Height": 120})
+    pr, pc = page_info(tiny, "R"), page_info(tiny, "C")
+    assert 1 < max(pr[2]) < 12 and 1 < max(pc[2]) < 12
+    assert sum(pr[2]) == 64 and sum(pc[2]) == 64
+    assert max(pr[2]) - min(pr[2]) <= 1 and max(pc[2]) - min(pc[2]) <= 1
+    for _ in range(pc[1]):
+        tap(tiny, arrow(tiny, "C", 1))
+    tap(tiny, cell(tiny, 1, 64))
+    assert is_on(tiny, 1, 64) and cross_pin(tiny, 1, 64, 64) is True
+    assert page_info(tiny, "C")[0] == pc[1]
 
 
 def test_matrix_budget_with_64_names_of_120_characters():
@@ -510,3 +533,165 @@ def test_matrix_budget_with_64_names_of_120_characters():
     b = check(q)
     assert b["frames"] >= 30
     assert len(icon(q)) < 40000
+
+
+def test_matrix_route_pin_from_outside_with_exclusive_off_routes_last():
+    """With Exclusive off, Route n is the source routed last: a Route pin
+    written from outside that names a source already on in that column, and a
+    row header over a column that already carries that source, both update
+    Route (and the mode's own route stays in step with the pin)."""
+    q = boot(4, 3)
+    q.set_pin("ExclusiveColumns", False)
+    tap(q, cell(q, 1, 1))
+    tap(q, cell(q, 3, 1))
+    assert routes(q, 3) == [3, 0, 0]
+    q.set_pin("Route", 1, 1)                                        # source 1 is on already
+    assert q.run("return TouchPad.inst:routeOf(1)") == 1 and q.pin("Route", 1)["Value"] == 1
+    assert is_on(q, 1, 1) and is_on(q, 3, 1)                        # nothing switched
+    tap(q, cell(q, 1, 1))                                           # off: the lowest remaining
+    assert not is_on(q, 1, 1) and is_on(q, 3, 1)
+    assert routes(q, 3) == [3, 0, 0] and q.run("return TouchPad.inst:routeOf(1)") == 3
+    # a row header: every column reports the source just routed
+    tap(q, cell(q, 2, 2))
+    tap(q, cell(q, 1, 2))
+    assert routes(q, 3) == [3, 1, 0]
+    tap(q, row_header(q, 2))
+    assert routes(q, 3) == [2, 2, 2]
+    assert all(is_on(q, 2, c) for c in (1, 2, 3)) and is_on(q, 3, 1) and is_on(q, 1, 2)
+    assert q.pin("Gesture")["String"] == "SOURCE 2 -> ALL"
+    # painting over an on cell routes it last too
+    drag(q, cell(q, 3, 3), cell(q, 3, 1))                           # ends on 3,1 which is on
+    assert routes(q, 3) == [3, 3, 3]
+    assert q.pin("Gesture")["String"] == "SET 2 CROSSPOINTS"        # 3,1 was on already
+    # with Exclusive on the same writes are no-ops
+    q.set_pin("ExclusiveColumns", True)
+    q.advance(0.5)
+    assert routes(q, 3) == [3, 3, 3]
+    q.set_pin("Route", 3, 2)
+    assert routes(q, 3) == [3, 3, 3] and is_on(q, 3, 2)
+
+
+def test_matrix_exclusive_off_mid_enforcement_stops_it():
+    """Exclusive on over a full 16 x 16 is enforced four columns per turn;
+    switching it off again while that runs leaves the remaining columns as
+    they are."""
+    q = boot(16, 16)
+    q.set_pin("ExclusiveColumns", False)
+    q.run("for idx = 1, 256 do Controls.Cross[idx].Boolean = true end")
+    q.set_pin("ExclusiveColumns", True)                             # columns 1-4 at once
+    q.advance(0.04)                                                 # two more steps
+    on = lambda: sum(1 for r in range(1, 17) for c in range(1, 17) if is_on(q, r, c))
+    before = on()
+    assert 16 < before < 256
+    q.set_pin("ExclusiveColumns", False)
+    q.advance(1.0)
+    assert on() == before
+    assert all(is_on(q, r, 16) for r in range(1, 17))               # the last column kept all 16
+    assert sum(1 for idx in range(1, 257) if q.pin("Cross", idx)["Boolean"]) == before
+    assert q.pin("Route", 16)["Value"] == 16
+    tap(q, arrow(q, "C", 1))                                        # 16 columns: two pages
+    tap(q, cell(q, 2, 16))                                          # several sources still allowed
+    assert not is_on(q, 2, 16) and is_on(q, 1, 16) and is_on(q, 16, 16)
+    # switching on again finishes the job
+    q.set_pin("ExclusiveColumns", True)
+    q.advance(1.0)
+    assert on() == 16
+    assert sum(1 for idx in range(1, 257) if q.pin("Cross", idx)["Boolean"]) == 16
+    check(q)
+
+
+def test_matrix_clear_during_the_start_up_scan():
+    """Clear All (or a column clear) while the start-up scan is still reading
+    a 64 x 64 of true pins: the pins not yet read are written false instead of
+    coming back on."""
+    q = boot(64, 64)
+    q.run("TouchPad.inst.onControl = function() end")               # the live instance looks away
+    q.run("for idx = 1, 4096 do Controls.Cross[idx].Boolean = true end")
+    q.run("TouchPad.fresh = Modes['Matrix'].create(TouchPad.E); TouchPad.fresh:onStart()")
+    q.advance(0.03)
+    assert q.run("return TouchPad.fresh:scanning()") is True
+    on = lambda r, c: bool(q.run("return TouchPad.fresh:isOn(%d, %d)" % (r, c)))
+    assert on(1, 1)
+    q.run("TouchPad.fresh:onControl('ClearAll', nil, {Boolean = true})")
+    assert q.run("return TouchPad.fresh:scanning()") is False
+    assert not on(1, 1) and not on(64, 64)
+    assert q.pin("Gesture")["String"] == "ALL CLEARED"
+    q.advance(1.5)
+    assert q.run("return TouchPad.fresh:pendingWrites()") == 0
+    assert sum(1 for r in range(1, 65) for c in range(1, 65) if on(r, c)) == 0
+    assert sum(1 for idx in range(1, 4097) if q.pin("Cross", idx)["Boolean"]) == 0
+    assert all(int(q.pin("Route", c)["Value"]) == 0 for c in range(1, 65))
+    check(q)
+    # a column cleared during the scan stays clear; the others follow their pins
+    q.run("for idx = 1, 4096 do Controls.Cross[idx].Boolean = true end")
+    q.run("TouchPad.fresh = Modes['Matrix'].create(TouchPad.E); TouchPad.fresh:onStart()")
+    q.advance(0.03)
+    assert q.run("return TouchPad.fresh:scanning()") is True
+    hx, hy = q.run("return TouchPad.fresh:colHeaderCentre(5)")
+    q.run("TouchPad.fresh:onTouchStart(%f, %f, 0); TouchPad.fresh:onTouchEnd(%f, %f, 0.1, {tap = true}); "
+          "TouchPad.fresh:onGesture({type = 'tap', x = %f, y = %f, t = 0.1})" % (hx, hy, hx, hy, hx, hy))
+    assert q.pin("Gesture")["String"] == "DEST 5 CLEARED"
+    q.advance(1.5)
+    assert q.run("return TouchPad.fresh:scanning()") is False
+    assert not any(on(r, 5) for r in range(1, 65))
+    assert all(cross_pin(q, r, 5, 64) is False for r in range(1, 65))
+    assert int(q.pin("Route", 5)["Value"]) == 0
+    assert on(1, 4) and on(1, 6) and on(1, 64)                      # Exclusive: one per column
+    assert int(q.pin("Route", 64)["Value"]) == 1
+    check(q)
+
+
+def test_matrix_tap_acts_on_the_pressed_cell():
+    """A tap that wobbles across a gap acts on the cell (or header) that was
+    pressed and drawn pressed, not on the neighbour under the lift."""
+    q = boot(4, 4)
+    cx, cy, cw, ch = q.run("return TouchPad.inst:cellCentre(1, 1)")
+    gap = cx + cw / 2 + 1.5                                         # middle of the gap to column 2
+    q.touch([(gap - 4, cy), (gap + 5, cy)], dt=0.05, panel_touch=True)
+    assert q.pulses("Tap") == 1
+    assert is_on(q, 1, 1) and not is_on(q, 1, 2)
+    assert q.pin("Gesture")["String"] == "SOURCE 1 -> DEST 1"
+    # down on a row header, lift just inside the first cell: the row is selected
+    hx, hy = row_header(q, 2)
+    left = cx - cw / 2
+    q.touch([(left - 5, hy), (left + 4, hy)], dt=0.05, panel_touch=True)
+    assert routes(q, 4) == [2, 2, 2, 2] and not is_on(q, 2, 1) is False
+    assert q.pin("Gesture")["String"] == "SOURCE 2 -> ALL"
+    # down on a column header, lift inside the cell below: the column clears
+    hx, hy = col_header(q, 3)
+    top = cy - ch / 2
+    q.touch([(hx, top - 5), (hx, top + 4)], dt=0.05, panel_touch=True)
+    assert not is_on(q, 2, 3) and routes(q, 4) == [2, 2, 0, 2]
+    assert q.pin("Gesture")["String"] == "DEST 3 CLEARED"
+    # a gap belongs to the cell above / left of it (no dead zones)
+    q.touch([(gap, cy + ch / 2 + 1.5)], panel_touch=True)
+    assert is_on(q, 1, 1) and routes(q, 4) == [1, 2, 0, 2]
+    # a tap in the margin hits nothing
+    q.touch([(2, 2)], panel_touch=True)
+    assert routes(q, 4) == [1, 2, 0, 2]
+    assert q.pin("Gesture")["String"] == "TAP"
+
+
+def test_matrix_paint_summary_counts_the_cells_left_painted():
+    """With Exclusive on a stroke down a column leaves one crosspoint on and
+    says so; across a row every column changes."""
+    q = boot(4, 2)
+    drag(q, cell(q, 1, 1), cell(q, 4, 1))
+    assert [is_on(q, r, 1) for r in (1, 2, 3, 4)] == [False, False, False, True]
+    assert q.pin("Gesture")["String"] == "SET 1 CROSSPOINT"
+    drag(q, cell(q, 2, 1), cell(q, 2, 2))
+    assert routes(q, 2) == [2, 2]
+    assert q.pin("Gesture")["String"] == "SET 2 CROSSPOINTS"
+    drag(q, cell(q, 2, 2), cell(q, 2, 1))                           # off
+    assert routes(q, 2) == [0, 0]
+    assert q.pin("Gesture")["String"] == "CLEARED 2 CROSSPOINTS"
+    # a stroke that zig-zags between two rows of one column ends on one cell
+    a, b = cell(q, 1, 2), cell(q, 2, 2)
+    q.drag([a, b, a, b, a], seconds=0.8, panel_touch=True)
+    assert is_on(q, 1, 2) and not is_on(q, 2, 2)
+    assert q.pin("Gesture")["String"] == "SET 1 CROSSPOINT"
+    # without Exclusive every painted cell counts
+    q.set_pin("ExclusiveColumns", False)
+    drag(q, cell(q, 1, 1), cell(q, 4, 1))
+    assert [is_on(q, r, 1) for r in (1, 2, 3, 4)] == [True] * 4
+    assert q.pin("Gesture")["String"] == "SET 4 CROSSPOINTS"

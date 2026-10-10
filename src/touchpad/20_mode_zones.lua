@@ -23,7 +23,7 @@ local MAX_ZONES = 32
 local MIN_SIZE = 0.04           -- smallest zone side, pad units
 local DRAG_START = 12           -- px: the engine's tap / drag boundary
 local LASSO_MAX = 160           -- points kept on a lasso trail
-local LASSO_TEST_MAX = 64       -- points used for the geometry tests
+local LASSO_TEST_MAX = 48       -- points used for the geometry tests
 local LASSO_CLOSE = 0.10        -- end within this fraction of the diagonal from the start
 local LASSO_MIN_PTS = 6
 local LASSO_AREA = 0.02         -- of the pad area
@@ -32,6 +32,7 @@ local EDIT_TIMEOUT = 300        -- s: edit mode switches off after this long unt
 local TRIGGER_DEBOUNCE = 0.5    -- s: a trigger's trailing edge does not act twice
 local PAINT_STEP = 8            -- px between samples along a painting move
 local PAINT_MAX = 16            -- samples per move at most
+local LAYOUT_WARN = "Zone Layout: not a JSON list of {x, y, w, h}"
 
 -- Zones property at design time (props[name] = {Value}) or at run time (E.props[name] = value).
 local function zoneCount(props)
@@ -118,8 +119,11 @@ Modes["Zone Select"] = {
       editTimer = nil, editDirty = false,
       cache = {},        -- [i] = { key, svg } rendered tile fragments
       grid = nil,        -- cached dotted grid
-      actAt = -1,        -- last trigger action time (debounce)
+      actAt = {},        -- [trigger name] = last action time (debounce)
+      lastTapZone = nil, prevTapZone = nil,   -- what the last two taps hit (zone index or false)
+      layoutWarned = false, statusPrev = nil, -- a ZoneLayout warning stands; Status before it
     }
+    local flushPending   -- defined with the lasso code; setEdit needs it
 
     -- ---------- helpers ----------
     local function labelOf(i)
@@ -146,18 +150,25 @@ Modes["Zone Select"] = {
       end
     end
 
-    -- Applies a ZoneLayout text; blank restores the grid. Returns false on bad JSON.
+    -- Applies a ZoneLayout text; blank (or "[]") restores the grid. Returns
+    -- false, leaving the zones alone, unless the text is a JSON list with at
+    -- least one {x, y, w, h} entry (an object or a list of other things is
+    -- a mistake worth a warning, not "the grid").
     local function applyLayout(text)
       text = U.trim(tostring(text or ""))
-      if text == "" then
+      local list = nil
+      if text ~= "" then
+        list = E.json.decode(text)
+        if type(list) ~= "table" then return false end
+        if next(list) == nil then list = nil end
+      end
+      if list == nil then
         self.custom = false
         gridZones()
         return true
       end
-      local list = E.json.decode(text)
-      if type(list) ~= "table" then return false end
-      gridZones()
-      local n = 0
+      if list[1] == nil then return false end        -- a JSON object, not a list
+      local parsed, n = {}, 0
       for i = 1, N do
         local z = list[i]
         if type(z) == "table" then
@@ -165,12 +176,17 @@ Modes["Zone Select"] = {
           if x and y and w and h then
             w, h = U.clamp(w, MIN_SIZE, 1), U.clamp(h, MIN_SIZE, 1)
             x, y = U.clamp(x, 0, 1 - w), U.clamp(y, 0, 1 - h)
-            self.zones[i] = { x = x, y = y, w = w, h = h }
+            parsed[i] = { x = x, y = y, w = w, h = h }
             n = n + 1
           end
         end
       end
-      self.custom = n > 0
+      if n == 0 then return false end
+      gridZones()                                     -- a short list keeps the grid for the rest
+      for i = 1, N do
+        if parsed[i] then self.zones[i] = parsed[i] end
+      end
+      self.custom = true
       return true
     end
 
@@ -283,11 +299,13 @@ Modes["Zone Select"] = {
     end
 
     -- A trigger acts on its rising edge; a handler that runs with the value
-    -- already false acts too unless it just did.
-    local function fired(ctl)
+    -- already false acts too unless that same trigger just did (each trigger
+    -- debounces only its own trailing edge).
+    local function fired(ctl, name)
       local now = E.now()
-      if ctl.Boolean or now - self.actAt > TRIGGER_DEBOUNCE then
-        self.actAt = now
+      local last = self.actAt[name] or -1
+      if ctl.Boolean or now - last > TRIGGER_DEBOUNCE then
+        self.actAt[name] = now
         return true
       end
       return false
@@ -307,6 +325,7 @@ Modes["Zone Select"] = {
     function self.setEdit(on, why)
       on = on and true or false
       if self.edit == on then return end
+      flushPending()        -- a lasso still waiting for its commit lands before the switch
       self.edit = on
       self.touch = nil
       self.parked = nil
@@ -349,9 +368,65 @@ Modes["Zone Select"] = {
       tc.lx, tc.ly = x, y
     end
 
+    -- The set of zones whose centres a polygon (flat array) encloses. The
+    -- bounding box rejects outliers first; centres that share a row share one
+    -- walk of the edges (the even-odd rule on the crossings of that row), so a
+    -- grid costs one walk per row and a free layout one per zone at most.
+    local function enclosed(poly)
+      local m = #poly // 2
+      local minx, maxx, miny, maxy = poly[1], poly[1], poly[2], poly[2]
+      for k = 2, m do
+        local px, py = poly[2 * k - 1], poly[2 * k]
+        if px < minx then minx = px elseif px > maxx then maxx = px end
+        if py < miny then miny = py elseif py > maxy then maxy = py end
+      end
+      local rows, order = {}, {}
+      for i = 1, N do
+        local z = self.zones[i]
+        local cx, cy = (z.x + z.w / 2) * W, (z.y + z.h / 2) * H
+        if cx >= minx and cx <= maxx and cy >= miny and cy <= maxy then
+          local row = rows[cy]
+          if not row then
+            row = {}
+            rows[cy] = row
+            order[#order + 1] = cy
+          end
+          row[#row + 1] = i
+        end
+      end
+      local inside, cross = {}, {}
+      for r = 1, #order do
+        local y = order[r]
+        local nc = 0
+        local jx, jy = poly[2 * m - 1], poly[2 * m]
+        for k = 1, m do
+          local ix, iy = poly[2 * k - 1], poly[2 * k]
+          if (iy > y) ~= (jy > y) then
+            nc = nc + 1
+            cross[nc] = (jx - ix) * (y - iy) / (jy - iy) + ix
+          end
+          jx, jy = ix, iy
+        end
+        local row = rows[y]
+        for q = 1, #row do
+          local i = row[q]
+          local z = self.zones[i]
+          local cx, odd = (z.x + z.w / 2) * W, false
+          for c = 1, nc do
+            if cx < cross[c] then odd = not odd end
+          end
+          if odd then inside[i] = true end
+        end
+      end
+      return inside
+    end
+
     -- Closed path (end near the start, at least 6 points, area over 2 % of
-    -- the pad): selects the zones whose centres it encloses.
-    local function commitLasso(tc)
+    -- the pad): selects the zones whose centres it encloses. deferDraw moves
+    -- the redraw to its own timer callback so a commit that runs inside the
+    -- 1.5 s retract timer (32 zones, 64 edges, 32 pin writes) is not also a
+    -- frame.
+    local function commitLasso(tc, deferDraw)
       local pts, n = tc.pts, tc.n
       if n < LASSO_MIN_PTS then return false end
       if U.dist(pts[1], pts[2], pts[2 * n - 1], pts[2 * n]) > LASSO_CLOSE * DIAG then return false end
@@ -366,10 +441,10 @@ Modes["Zone Select"] = {
         end
       end
       if U.polyArea(poly) < LASSO_AREA * W * H then return false end
+      local inside = enclosed(poly)
       local hits = 0
       for i = 1, N do
-        local z = self.zones[i]
-        if U.pointInPoly((z.x + z.w / 2) * W, (z.y + z.h / 2) * H, poly) then
+        if inside[i] then
           hits = hits + 1
           if self.exclusive then
             if hits == 1 then selectOnly(i) end
@@ -380,11 +455,15 @@ Modes["Zone Select"] = {
       end
       publish()
       E.setGesture("LASSO: " .. hits .. (hits == 1 and " ZONE" or " ZONES"))
-      E.invalidate()
+      if deferDraw then
+        E.after(0, function() E.invalidate() end)
+      else
+        E.invalidate()
+      end
       return true
     end
 
-    local function flushPending()
+    function flushPending()
       local p = self.pending
       if not p then return end
       self.pending = nil
@@ -502,6 +581,12 @@ Modes["Zone Select"] = {
       self.touch = nil
       if not tc then return end
       if info.aborted then
+        if tc.z0 and tc.zone and tc.changed then
+          -- An edit drag cut short (lock, rebind, calibration, a clock step):
+          -- the zone goes back where it was, so the drawing and ZoneLayout agree.
+          local z0 = tc.z0
+          self.zones[tc.zone] = { x = z0.x, y = z0.y, w = z0.w, h = z0.h }
+        end
         E.invalidate()
         return
       end
@@ -516,7 +601,7 @@ Modes["Zone Select"] = {
               self.pending = nil
               self.parked = nil
               if p then
-                if not commitLasso(p.touch) then E.invalidate() end
+                if not commitLasso(p.touch, true) then E.invalidate() end
               end
             end)
           else
@@ -566,6 +651,9 @@ Modes["Zone Select"] = {
     function self:onGesture(g)
       local i = zoneAt(g.x, g.y)
       if g.type == "tap" then
+        -- What each tap hit: a double tap acts only when both taps hit the
+        -- same thing (the engine pairs taps within 40 px, which spans a gap).
+        self.prevTapZone, self.lastTapZone = self.lastTapZone, i or false
         if self.edit then
           if i then
             self.last = i
@@ -577,15 +665,20 @@ Modes["Zone Select"] = {
           toggle(i)
         end
       elseif g.type == "double" then
-        if self.edit then return end
+        local first = self.prevTapZone                 -- the first tap's target
+        self.prevTapZone, self.lastTapZone = nil, nil  -- a third tap starts afresh
+        if self.edit or first == nil then return end
         if i then
-          -- The two taps toggled twice; a double tap on a zone toggles it once.
-          toggle(i)
-        else
+          -- Both taps on the same zone toggled it twice: a double tap toggles
+          -- it once. Taps on two zones (or a zone and a gap) each stand.
+          if first == i then toggle(i) end
+        elseif first == false then
           clearAll("DOUBLE TAP: ALL CLEARED")
         end
       elseif g.type == "long" then
         if self.edit or not i then return end
+        local tc = self.touch
+        if tc and tc.kind == "paint" then tc.kind = "none" end  -- a drift after the solo paints nothing
         selectOnly(i)
         publish()
         E.setGesture("SOLO " .. labelOf(i))
@@ -617,10 +710,10 @@ Modes["Zone Select"] = {
         self.names[index] = U.trim(tostring(ctl.String or ""))
         publish()
       elseif name == "SelectAll" then
-        if fired(ctl) then selectAll() end
+        if fired(ctl, name) then selectAll() end
         return
       elseif name == "ClearAll" then
-        if fired(ctl) then clearAll("ALL CLEARED") end
+        if fired(ctl, name) then clearAll("ALL CLEARED") end
         return
       elseif name == "Edit" then
         self.setEdit(ctl.Boolean)
@@ -631,8 +724,24 @@ Modes["Zone Select"] = {
         setExclusive(ctl.Boolean)
         return
       elseif name == "ZoneLayout" then
-        if not applyLayout(ctl.String) then
-          E.status("Zone Layout: not a JSON list of {x, y, w, h}", "warn")
+        if applyLayout(ctl.String) then
+          if self.layoutWarned then
+            -- The problem is gone: Status goes back to what it said before.
+            self.layoutWarned = false
+            local prev = self.statusPrev
+            self.statusPrev = nil
+            E.status(prev and prev.text or "OK - Ready", prev and prev.level or "ok")
+          end
+        else
+          if not self.layoutWarned then
+            local st = E.ctl("Status")
+            local lv = st and tonumber(st.Value) or 0
+            if st and lv < 2 then
+              self.statusPrev = { text = tostring(st.String or ""), level = lv == 1 and "warn" or "ok" }
+            end
+          end
+          self.layoutWarned = true
+          E.status(LAYOUT_WARN, "warn")
         end
       elseif name == "Columns" then
         self.cols = U.clamp(math.floor((tonumber(ctl.Value) or 4) + 0.5), 1, 8)

@@ -452,3 +452,159 @@ def test_zones_thirty_two_zones_stay_within_budget():
     b = q.budget()
     assert b["max_frame"] < 60000 and b["max_handler"] < 120000
     assert len(q.icon()) < 40000
+
+
+def test_zones_double_tap_needs_both_taps_on_the_same_target():
+    q = boot()
+    q.set_pin("ZoneSelected", True, 5)
+    q.set_pin("ZoneSelected", True, 7)
+    # a tap on zone 1 and a mis-landed second tap in the gap (the engine pairs
+    # taps within 40 px): zone 1 toggles, nothing clears
+    q.touch([(120, 125)], panel_touch=True, silence=0.15)
+    q.touch([(130, 125)], panel_touch=True)
+    assert selected(q) == [1, 5, 7] and q.pulses("DoubleTap") == 1
+    assert q.pin("Gesture")["String"] != "DOUBLE TAP: ALL CLEARED"
+    # zone 1 then the margin
+    q.touch([(20, 125)], panel_touch=True, silence=0.15)
+    q.touch([(10, 125)], panel_touch=True)
+    assert selected(q) == [5, 7]
+    # two quick taps on adjacent zones each stand
+    q.touch([(120, 125)], panel_touch=True, silence=0.15)
+    q.touch([(140, 125)], panel_touch=True)
+    assert selected(q) == [1, 2, 5, 7] and q.pulses("DoubleTap") == 3
+    # empty space then a zone: the zone toggles, nothing clears
+    q.touch([(130, 480)], panel_touch=True, silence=0.15)
+    q.touch([(140, 455)], panel_touch=True)
+    assert selected(q) == [1, 2, 5, 6, 7]
+    # both taps on empty space clear; both on one zone toggle it once
+    q.double_tap(130, 480, gap=0.15, panel_touch=True)
+    assert selected(q) == [] and q.pin("Gesture")["String"] == "DOUBLE TAP: ALL CLEARED"
+    q.double_tap(*centre(q, 3), gap=0.15, panel_touch=True)
+    assert selected(q) == [3]
+    # a third tap right after a double starts afresh (no chained double)
+    q.touch([(130, 480)], panel_touch=True, silence=0.15)
+    assert selected(q) == [3]
+
+
+def test_zones_long_press_solo_survives_a_drift():
+    q = boot()
+    q.set_pin("ZoneSelected", True, 1)
+    q.set_pin("ZoneSelected", True, 2)
+    cx, cy = centre(q, 3)
+    q.touch([(cx, cy)] * 6 + [(cx + 8, cy), (cx + 16, cy), (cx + 24, cy)], dt=0.15, panel_touch=True)
+    assert q.pulses("LongPress") == 1
+    assert selected(q) == [3]                                        # the solo stands
+    assert "PAINTED" not in q.pin("Gesture")["String"]
+    assert q.pin("SelectedList")["String"] == "Zone 3"
+
+
+def test_zones_triggers_debounce_each_their_own_edge():
+    q = boot()
+    q.trigger("SelectAll")                                           # Trigger() runs with Boolean false
+    assert selected(q) == list(range(1, 9))
+    q.advance(0.3)
+    q.trigger("ClearAll")                                            # a different trigger 0.3 s later acts
+    assert selected(q) == [] and q.pin("Gesture")["String"] == "ALL CLEARED"
+    q.advance(0.3)
+    q.trigger("SelectAll")
+    assert selected(q) == list(range(1, 9))
+    q.set_pin("ClearAll", True)
+    q.set_pin("ClearAll", False)
+    assert selected(q) == []
+    q.advance(0.6)
+    q.trigger("SelectAll")                                           # 0.6 s after its own last action
+    assert selected(q) == list(range(1, 9))
+    # the same trigger again within 0.5 s is its own trailing edge: no second action
+    q.set_pin("ZoneSelected", False, 1)
+    q.advance(0.2)
+    q.trigger("SelectAll")
+    assert selected(q) == list(range(2, 9))
+    q.trigger("ClearAll")                                            # the other one still acts
+    assert selected(q) == []
+    q.advance(0.6)
+    q.trigger("SelectAll")
+    assert selected(q) == list(range(1, 9))
+
+
+def test_zones_thirty_two_zone_lasso_with_inferred_lift_stays_within_budget():
+    q = boot(props={"Zones": 32})
+    n = 60
+    box = [(7 + 486 * k / n, 7) for k in range(n)] + [(493, 7 + 486 * k / n) for k in range(n)] \
+        + [(493 - 486 * k / n, 493) for k in range(n)] + [(7, 493 - 486 * k / n) for k in range(n)] + [(7, 11)]
+    q.drag(box, seconds=2.4)                                         # no PanelTouch: the lift is inferred
+    assert selected(q, 32) == []
+    q.advance(1.6)                                                   # the commit runs in the retract timer
+    assert selected(q, 32) == list(range(1, 33))
+    assert q.pin("Gesture")["String"] == "LASSO: 32 ZONES"
+    q.advance(0.4)                                                   # the tiles catch up, six per frame
+    assert q.icon().count('fill="#C513E8"') >= 32
+    assert "stroke-dasharray" not in q.icon()
+    b = q.budget()                                                   # raises above either budget
+    assert b["max_frame"] < 60000 and b["max_handler"] < 120000
+    assert b["handlers"]["callafter"] < 60000                        # the commit itself, redraw apart
+    # a lasso around the right column only, on a free layout (one edge walk per zone)
+    q.set_pin("ClearAll", True)
+    q.set_pin("ClearAll", False)
+    q.set_pin("ZoneLayout", json.dumps([{"x": 0.1 + 0.025 * i, "y": 0.02 + 0.029 * i, "w": 0.05, "h": 0.05} for i in range(32)]))
+    q.drag(box, seconds=2.4)
+    q.advance(1.6)
+    assert selected(q, 32) == list(range(1, 33))
+    b = q.budget()
+    assert b["max_frame"] < 60000 and b["handlers"]["callafter"] < 60000
+
+
+def test_zones_aborted_edit_drag_restores_the_zone():
+    q = boot()
+    q.set_pin("Edit", True)
+    q.touch([(70 + 10 * i, 125 + 5 * i) for i in range(8)], dt=0.08, panel_touch=True, lift=False)
+    assert abs(zone(q, 1)[0] - 0.17) < 1e-6                          # mid-drag
+    q.set_pin("Lock", True)                                          # aborts the touch
+    q.lift()
+    q.set_pin("Lock", False)
+    x, y, w, h = zone(q, 1)
+    assert abs(x - 0.03) < 1e-9 and abs(y - 0.03) < 1e-9 and abs(w - 0.22) < 1e-9
+    assert q.pin("ZoneLayout")["String"] == ""
+    assert q.run("return TouchPad.inst.custom") is False
+    assert "Zone 1" in q.icon()
+    q.set_pin("Edit", False)
+    assert q.pin("ZoneLayout")["String"] == ""                       # nothing changed: nothing written
+    q.set_pin("Columns", 2)
+    assert abs(zone(q, 1)[2] - 0.46) < 1e-9                          # the grid still applies
+
+
+def test_zones_edit_on_commits_a_pending_lasso_first():
+    q = boot()
+    q.drag([(130, 7), (250, 7), (250, 120), (250, 240), (130, 240), (7, 240), (7, 120), (7, 7), (70, 7), (126, 8)], seconds=1.0)
+    assert selected(q) == [] and q.run("return TouchPad.inst.pending ~= nil") is True
+    q.set_pin("Edit", True)
+    assert selected(q) == [1, 2]                                     # landed before the switch
+    assert q.pin("Gesture")["String"] == "EDIT ON"
+    assert q.run("return TouchPad.inst.pending") is None
+    assert 'stroke-dasharray="6 5"' not in q.icon()
+    q.advance(1.6)
+    assert selected(q) == [1, 2] and q.pin("Gesture")["String"] == "EDIT ON"
+    q.tap(*centre(q, 4), panel_touch=True)                           # editing never selects
+    assert selected(q) == [1, 2] and q.pin("Gesture")["String"] == "ZONE 4 PICKED"
+
+
+def test_zones_layout_warning_clears_and_wrong_shapes_warn():
+    q = boot(props={"Zones": 2})
+    ok = q.status()
+    assert ok.startswith("OK")
+    q.set_pin("ZoneLayout", "{not json")
+    assert q.status().startswith("Zone Layout") and q.pin("Status")["Value"] == 1
+    q.set_pin("ZoneLayout", json.dumps([{"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.3}]))
+    assert q.status() == ok and q.pin("Status")["Value"] == 0          # the warning is gone
+    assert zone(q, 1) == (0.1, 0.1, 0.3, 0.3)
+    # valid JSON of the wrong shape warns too and leaves the zones alone
+    for text in ('{"x":0.5,"y":0.5,"w":0.4,"h":0.4}', "[[0.5,0.5,0.4,0.4]]", "[1,2]", "[{}]", '"text"'):
+        q.set_pin("ZoneLayout", text)
+        assert q.status().startswith("Zone Layout"), text
+        assert zone(q, 1) == (0.1, 0.1, 0.3, 0.3) and q.run("return TouchPad.inst.custom") is True
+    q.set_pin("ZoneLayout", "")
+    assert q.status() == ok and abs(zone(q, 1)[0] - 0.03) < 1e-9
+    q.set_pin("ZoneLayout", "{not json")
+    assert q.status().startswith("Zone Layout")
+    q.set_pin("ZoneLayout", "[]")                                    # an empty list is the grid, not a mistake
+    assert q.status() == ok and abs(zone(q, 1)[0] - 0.03) < 1e-9
+    assert q.run("return TouchPad.inst.custom") is False

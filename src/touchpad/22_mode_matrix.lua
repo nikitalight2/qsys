@@ -9,9 +9,11 @@
 -- Route n (the source number of column n, 0 = none) is kept in sync both
 -- ways; with it off a column may carry several sources and Route n shows the
 -- source routed last (0 once the column is empty). The grid shows at most 12
--- rows and 12 columns at a time: larger matrices page with arrow bars under
--- the row headers (row pages) and under the cells (column pages); a swipe
--- that starts on a header or an arrow bar turns the pages too. Pin writes go
+-- rows and 12 columns at a time, fewer on a pad too small for 4 px cells:
+-- larger matrices page with arrow bars under the row headers (row pages) and
+-- under the cells (column pages); a swipe that starts on a header or an arrow
+-- bar turns the pages too. A tap acts on the cell or header that was pressed
+-- (and drawn pressed), not on whatever lies under the lift. Pin writes go
 -- through a queue: a handler writes at most SYNC_WRITES pins itself and the
 -- rest follow ASYNC_WRITES per engine turn, so a row select, a Clear All or
 -- the start-up scan of a 64 x 64 matrix never nears the budget.
@@ -27,7 +29,8 @@ do
 
   local HINT = "Tap a crosspoint, drag to paint"
   local TEXT_CLEARED = "All cleared"
-  local MAX_PAGE = 12                    -- rows and columns per page
+  local MAX_PAGE = 12                    -- rows and columns per page at most
+  local MIN_CELL = 4                     -- the page size shrinks before a cell gets smaller
   local ARROW_H = 28
   local CELL_GAP = 3
   local MAX_CELL_W, MAX_CELL_H = 180, 120
@@ -145,9 +148,11 @@ do
       local nameRev = { S = {}, D = {} }
       local fit = { S = {}, D = {} }   -- fitted labels per name, width and size
       local down = nil                 -- hit at touch start { kind, r, c, idx, x, y }
+      local tapHit = nil               -- the hit of the last touch start, for the tap gesture
       local painting = false
       local paintOn = false
-      local painted = 0
+      local painted = 0                -- cells this stroke changed that still hold the painted state
+      local paintSet = {}              -- paintSet[idx] = true for those cells
       local lastPaintIdx = nil
       local resumable = nil            -- paint state kept across an inferred lift
       local lastClear = nil
@@ -157,8 +162,10 @@ do
       local pendTimer = nil
       local staleList = {}             -- tables of on cells whose pins Clear All still has to write
       local staleKey = nil
+      local staleFrom, staleTo = nil, nil   -- Cross pins a Clear All during the scan never read: written false
       local scanPos = nil              -- next Cross pin the start-up scan reads
       local scanTimer = nil
+      local scanSkip = {}              -- columns cleared during the scan: their unread pins go false
       local enforcePos = nil           -- next column the Exclusive enforcement checks
       local enforceTimer = nil
       local self = {}
@@ -258,7 +265,13 @@ do
           staleKey = k
           if k == nil then table.remove(staleList, 1) end
         end
-        if pendHead <= pendN or staleList[1] then armFlush() end
+        while n < limit and staleFrom do
+          if not cross[staleFrom] then E.out("Cross", false, staleFrom) end
+          n = n + 1
+          staleFrom = staleFrom + 1
+          if staleFrom > staleTo then staleFrom, staleTo = nil, nil end
+        end
+        if pendHead <= pendN or staleList[1] or staleFrom then armFlush() end
       end
 
       local function queue(e)
@@ -289,9 +302,14 @@ do
         return 0
       end
 
+      -- Routing a source that is already on routes it "last": Route follows
+      -- (a no-op with Exclusive on, where the on cell is the route already).
       local function turnOn(r, c)
         local idx = idxOf(r, c)
-        if cross[idx] then return false end
+        if cross[idx] then
+          setRoute(c, r)
+          return false
+        end
         if exclusive then
           local prev = route[c]
           if prev > 0 and prev ~= r and cross[idxOf(prev, c)] then
@@ -336,6 +354,7 @@ do
         end
         colCount[c] = 0
         setRoute(c, 0)
+        if scanPos then scanSkip[c] = true end
       end
 
       -- Clear All drops the state at once; the old table joins the queue's
@@ -343,6 +362,14 @@ do
       local function clearAll()
         if next(cross) ~= nil then staleList[#staleList + 1] = cross end
         cross = {}
+        if scanPos then
+          -- the start-up scan ends here: the pins it has not read are written
+          -- false from the queue instead of being adopted as state
+          if scanTimer then scanTimer:cancel(); scanTimer = nil end
+          if not staleFrom or scanPos < staleFrom then staleFrom = scanPos end
+          staleTo = nCross
+          scanPos = nil
+        end
         for c = 1, nD do
           colCount[c] = 0
           setRoute(c, 0)
@@ -356,7 +383,7 @@ do
       -- one stays, the others go. ENFORCE_COLS columns per turn.
       local function enforceStep()
         enforceTimer = nil
-        if not enforcePos then return end
+        if not enforcePos or not exclusive then enforcePos = nil; return end
         local last = min(nD, enforcePos + ENFORCE_COLS - 1)
         for c = enforcePos, last do
           if colCount[c] > 1 then
@@ -388,11 +415,41 @@ do
         enforceStep()
       end
 
+      -- ---------- geometry constants ----------
+      local showHint = E.hint and true or false
+      local margin = U.clamp(floor(min(W, H) * 0.03), 6, 14)
+      local hintH = showHint and 16 or 0
+      local rowHdrW = U.clamp(floor(W * 0.22), 44, 140)
+      local gx0 = margin + rowHdrW + CELL_GAP            -- left edge of the cells
+      local cellsW0 = W - margin - gx0                   -- width available to the cells
+
+      local function hdrHeight(rotated)
+        if rotated then return U.clamp(floor(H * 0.2), 24, 96) end
+        return U.clamp(floor(H * 0.1), 24, 40)
+      end
+
       -- ---------- paging ----------
-      local rowPages = U.evenPages(nS, MAX_PAGE)
-      local colPages = U.evenPages(nD, MAX_PAGE)
-      if #rowPages == 0 then rowPages = { nS } end
+      -- At most MAX_PAGE rows and columns per page, fewer when the pad cannot
+      -- hold that many cells of MIN_CELL px: the columns per page follow the
+      -- width; the rows per page follow the height under the column headers
+      -- (whose height depends on the widest page's cell width) and above the
+      -- arrow bar once either axis pages.
+      local function perPage(space)
+        return U.clamp(floor((space + CELL_GAP) / (MIN_CELL + CELL_GAP)), 1, MAX_PAGE)
+      end
+      local function rowsFit(colsN, withArrows)
+        local cellW = min(MAX_CELL_W, (cellsW0 - (colsN - 1) * CELL_GAP) / colsN)
+        local gy = margin + hdrHeight(cellW < ROTATE_BELOW) + CELL_GAP
+        local bottom = H - margin - hintH
+        local cellsH = (withArrows and (bottom - ARROW_H - CELL_GAP) or bottom) - gy
+        return perPage(cellsH)
+      end
+      local colPages = U.evenPages(nD, perPage(cellsW0))
       if #colPages == 0 then colPages = { nD } end
+      local perRows = rowsFit(colPages[1], #colPages > 1)
+      if #colPages == 1 and nS > perRows then perRows = rowsFit(colPages[1], true) end
+      local rowPages = U.evenPages(nS, perRows)
+      if #rowPages == 0 then rowPages = { nS } end
       local rowFirst, colFirst = {}, {}
       do
         local acc = 1
@@ -417,11 +474,7 @@ do
       end
 
       -- ---------- geometry (cached per page shape) ----------
-      local showHint = E.hint and true or false
-      local margin = U.clamp(floor(min(W, H) * 0.03), 6, 14)
-      local hintH = showHint and 16 or 0
       local arrowH = paged and ARROW_H or 0
-      local rowHdrW = U.clamp(floor(W * 0.22), 44, 140)
       local geoms = {}
 
       local function geom()
@@ -429,11 +482,10 @@ do
         local key = rowsN * 100 + colsN
         local g = geoms[key]
         if g then return g end
-        local gx = margin + rowHdrW + CELL_GAP
-        local cellsW = W - margin - gx
-        local cellW = min(MAX_CELL_W, (cellsW - (colsN - 1) * CELL_GAP) / colsN)
+        local gx = gx0
+        local cellW = min(MAX_CELL_W, (cellsW0 - (colsN - 1) * CELL_GAP) / colsN)
         local rotated = cellW < ROTATE_BELOW
-        local colHdrH = rotated and U.clamp(floor(H * 0.2), 44, 96) or U.clamp(floor(H * 0.1), 24, 40)
+        local colHdrH = hdrHeight(rotated)
         local gy = margin + colHdrH + CELL_GAP
         local bottom = H - margin - hintH
         local ay = bottom - arrowH
@@ -501,17 +553,31 @@ do
       local function paintCell(h)
         if h.idx == lastPaintIdx then return end
         lastPaintIdx = h.idx
-        local changed
-        if paintOn then changed = turnOn(h.r, h.c) else changed = turnOff(h.r, h.c) end
-        if changed then painted = painted + 1 end
+        if paintOn then
+          -- with Exclusive on, this cell may switch a cell of the same stroke off
+          local prev = exclusive and route[h.c] or 0
+          local prevIdx = (prev > 0) and idxOf(prev, h.c) or nil
+          if turnOn(h.r, h.c) then
+            painted = painted + 1
+            paintSet[h.idx] = true
+            if prevIdx and paintSet[prevIdx] and not cross[prevIdx] then
+              paintSet[prevIdx] = nil
+              painted = painted - 1
+            end
+          end
+        elseif turnOff(h.r, h.c) then
+          painted = painted + 1
+          paintSet[h.idx] = true
+        end
       end
 
       function self:onTouchStart(x, y, t)
         resumable = nil
         down = hitTest(x, y)
+        tapHit = down
         lastDownKind = down and down.kind or nil
         if down then down.x, down.y = x, y end
-        painting, painted, lastPaintIdx = false, 0, nil
+        painting, painted, paintSet, lastPaintIdx = false, 0, {}, nil
         E.invalidate()
       end
 
@@ -534,7 +600,7 @@ do
       function self:onTouchEnd(x, y, t, info)
         if painting then
           if info and info.inferred and not info.aborted then
-            resumable = { paintOn = paintOn, painted = painted, lastPaintIdx = lastPaintIdx }
+            resumable = { paintOn = paintOn, painted = painted, paintSet = paintSet, lastPaintIdx = lastPaintIdx }
           end
           local n = painted
           say((paintOn and "Set " or "Cleared ") .. n .. ((n == 1) and " crosspoint" or " crosspoints"))
@@ -548,7 +614,7 @@ do
         local r = resumable
         resumable = nil
         if not r then return end
-        painting, paintOn, painted, lastPaintIdx = true, r.paintOn, r.painted, r.lastPaintIdx
+        painting, paintOn, painted, paintSet, lastPaintIdx = true, r.paintOn, r.painted, r.paintSet, r.lastPaintIdx
         down = { kind = "cell", x = x, y = y }
         local h = hitTest(x, y)
         if h and h.kind == "cell" then paintCell(h) end
@@ -583,7 +649,10 @@ do
 
       function self:onGesture(g)
         if g.type == "tap" then
-          onTap(hitTest(g.x, g.y))
+          -- the hit pressed (and drawn pressed) at touch start, not the lift spot
+          local h = tapHit or hitTest(g.x, g.y)
+          tapHit = nil
+          onTap(h)
         elseif g.type == "double" then
           -- the engine's "DOUBLE TAP" text follows the second tap: keep ours
           if lastText then E.setGesture(lastText) end
@@ -643,7 +712,13 @@ do
           end
         elseif name == "ExclusiveColumns" then
           exclusive = ctl.Boolean and true or false
-          if exclusive then enforceExclusive() end
+          if exclusive then
+            enforceExclusive()
+          else
+            -- an enforcement still running column by column stops here
+            if enforceTimer then enforceTimer:cancel(); enforceTimer = nil end
+            enforcePos = nil
+          end
         elseif name == "ClearAll" then
           local now = E.now()
           if (not ctl.Boolean) and lastClear and (now - lastClear) < 1 then return end
@@ -680,8 +755,8 @@ do
           local ctl = E.ctl("Cross", idx)
           if ctl and ctl.Boolean then
             local c = colOf(idx)
-            if exclusive and colCount[c] > 0 then
-              queue(idx)                       -- a second source in the column: off
+            if scanSkip[c] or (exclusive and colCount[c] > 0) then
+              queue(idx)                       -- a cleared column, or a second source in it: off
             elseif not cross[idx] then
               cross[idx] = true
               colCount[c] = colCount[c] + 1
@@ -692,6 +767,7 @@ do
         scanPos = last + 1
         if scanPos > nCross then
           scanPos = nil
+          scanSkip = {}
           scanDone()
         else
           flush(SYNC_WRITES)
@@ -843,7 +919,7 @@ do
       function self:isOn(r, c) return cross[idxOf(r, c)] == true end
       function self:routeOf(c) return route[c] end
       function self:isPainting() return painting end
-      function self:pendingWrites() return (pendN - pendHead + 1) + #staleList end
+      function self:pendingWrites() return (pendN - pendHead + 1) + #staleList + (staleFrom and 1 or 0) end
       function self:scanning() return scanPos ~= nil end
 
       return self
