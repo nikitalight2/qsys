@@ -142,16 +142,24 @@ function Q.controlList(name, cap)
   return out
 end
 
--- Component.New in pcall; nil when missing (not ok, nil, an empty table or
--- a component without readable controls).
+-- Component.New in pcall; nil when missing (spec 14.2): the call threw,
+-- returned nil, or the component lists no controls. Without a listing
+-- (a platform with no Component.GetControls) an empty table is missing;
+-- with one, the listing decides, as a valid handle may be an empty
+-- table whose controls live behind a metatable.
 function Q.component(name)
   if type(name) ~= "string" or name == "" then return nil end
   local ok, comp = pcall(Component.New, name)
   if not ok or comp == nil then return nil end
-  local okn, empty = pcall(function() return next(comp) == nil end)
-  if okn and empty then
-    if #Q.controlList(name, 1) == 0 then return nil end
+  local tc = type(comp)
+  if tc ~= "table" and tc ~= "userdata" then return nil end
+  local okl, list = pcall(Component.GetControls, name)
+  if okl and type(list) == "table" then
+    if #list == 0 then return nil end
+    return comp
   end
+  local okn, empty = pcall(function() return next(comp) == nil end)
+  if okn and empty then return nil end
   return comp
 end
 
@@ -184,6 +192,26 @@ local Y_EXACT = { "hsv.v", "hsv_v" }
 local X_PROBE = { "hsv.saturation", "saturation", "hsv_saturation", "Saturation", "hsv.s", "hsv_s" }
 local Y_PROBE = { "hsv.value", "value", "hsv_value", "Value", "hsv.v", "hsv_v" }
 local HEX_WORDS = { "output", "color", "hex" }
+local HEX_PROBE = { "rgb.output", "rgb_output", "output", "color", "hex" }
+
+-- The declared range of an enumeration entry (MinValue/MaxValue or
+-- ValueMin/ValueMax, whichever exists) as { lo, hi }, or nil.
+local function entryRange(e)
+  if type(e) ~= "table" then return nil end
+  local lo, hi = tonumber(e.MinValue), tonumber(e.MaxValue)
+  if lo == nil or hi == nil then lo, hi = tonumber(e.ValueMin), tonumber(e.ValueMax) end
+  if lo == nil or hi == nil or hi <= lo then return nil end
+  return { lo, hi }
+end
+
+-- comp[n] when its String is a "#rrggbb" colour, else nil.
+local function hexControl(comp, n)
+  local ok, c = pcall(function() return comp[n] end)
+  if not ok or c == nil then return nil end
+  local oks, str = pcall(function() return c.String end)
+  if oks and type(str) == "string" and smatch(str, "^#%x%x%x%x%x%x$") then return c end
+  return nil
+end
 
 -- Index of the first lower-cased name containing a word (word order wins),
 -- else equal to an exact form; skip(i) rejects an index.
@@ -211,30 +239,34 @@ local function readableControl(comp, n)
   return c
 end
 
--- Returns { x =, y =, xName =, yName =, surface =, names = } or, through the
--- colour output, { hex =, hexName =, coarse = true, names = }; on failure
--- nil, "no axes", names (the control names seen, for the Status text).
+-- Returns { x =, y =, xName =, yName =, xRange =, yRange =, surface =,
+-- names = } (the ranges only when the enumeration declared them) or,
+-- through the colour output, { hex =, hexName =, coarse = true, names = };
+-- on failure nil, "no axes", names (the control names seen, for Status).
 function Q.pickerAxes(comp, name)
   local list = Q.controlList(name, PICKER_CAP)
-  local names, lowers = {}, {}
+  local names, lowers, entries = {}, {}, {}
   for i = 1, #list do
     if list[i].Name ~= nil then
       local n = tostring(list[i].Name)
       names[#names + 1] = n
       lowers[#lowers + 1] = lower(n)
+      entries[#entries + 1] = list[i]
     end
   end
-  local xName, yName, x, y
+  local xName, yName, x, y, xRange, yRange
   if #names > 0 then
     local xi = firstMatch(lowers, X_WORDS, X_EXACT, function() return false end)
     local yi = firstMatch(lowers, Y_WORDS, Y_EXACT, function(i)
       return i == xi or sfind(lowers[i], "hue", 1, true) ~= nil
     end)
-    if xi then xName = names[xi]; x = readableControl(comp, xName) end
-    if yi then yName = names[yi]; y = readableControl(comp, yName) end
+    if xi then xName = names[xi]; x = readableControl(comp, xName); xRange = entryRange(entries[xi]) end
+    if yi then yName = names[yi]; y = readableControl(comp, yName); yRange = entryRange(entries[yi]) end
   end
   if not (x and y) then
-    x, y, xName, yName = nil, nil, nil, nil
+    -- No enumeration, or nothing recognised in it: the literal candidates,
+    -- dotted names first (spec 14.1b).
+    x, y, xName, yName, xRange, yRange = nil, nil, nil, nil, nil, nil
     for i = 1, #X_PROBE do
       local c = readableControl(comp, X_PROBE[i])
       if c then x, xName = c, X_PROBE[i]; break end
@@ -247,10 +279,12 @@ function Q.pickerAxes(comp, name)
     end
   end
   if x and y then
-    local axes = { x = x, y = y, xName = xName, yName = yName, names = names }
+    local axes = { x = x, y = y, xName = xName, yName = yName, xRange = xRange, yRange = yRange, names = names }
     axes.surface = readableControl(comp, "color_picker_surface")
     return axes
   end
+  -- Hex fallback (spec 14.1c): an enumerated name with a colour word, else
+  -- the literal candidates when there is no enumeration.
   for i = 1, #names do
     local l = lowers[i]
     local hit = false
@@ -258,14 +292,14 @@ function Q.pickerAxes(comp, name)
       if sfind(l, HEX_WORDS[w], 1, true) then hit = true end
     end
     if hit then
-      local n = names[i]
-      local ok, c = pcall(function() return comp[n] end)
-      if ok and c ~= nil then
-        local oks, str = pcall(function() return c.String end)
-        if oks and type(str) == "string" and smatch(str, "^#%x%x%x%x%x%x$") then
-          return { hex = c, hexName = n, coarse = true, names = names }
-        end
-      end
+      local c = hexControl(comp, names[i])
+      if c then return { hex = c, hexName = names[i], coarse = true, names = names } end
+    end
+  end
+  if #names == 0 then
+    for i = 1, #HEX_PROBE do
+      local c = hexControl(comp, HEX_PROBE[i])
+      if c then return { hex = c, hexName = HEX_PROBE[i], coarse = true, names = names } end
     end
   end
   return nil, "no axes", names
@@ -1500,6 +1534,18 @@ if Controls then (function()
     process(S.rawU, S.rawV, S.reportTime or Q.now())
   end
 
+  -- Position (0..1) of one axis; Value through its declared range when
+  -- Position is not a number (spec 14.1a: whichever range exists).
+  local function axisPosition(ctl, range)
+    local p = ctl.Position
+    if type(p) == "number" then return p end
+    if range then
+      local v = ctl.Value
+      if type(v) == "number" then return U.clamp((v - range[1]) / (range[2] - range[1]), 0, 1) end
+    end
+    return nil
+  end
+
   local function readAxes()
     if not picker then return nil end
     if picker.coarse then
@@ -1509,7 +1555,9 @@ if Controls then (function()
       if s == nil then return nil end
       return s, v
     end
-    local ok, u, v = pcall(function() return picker.x.Position, picker.y.Position end)
+    local ok, u, v = pcall(function()
+      return axisPosition(picker.x, picker.xRange), axisPosition(picker.y, picker.yRange)
+    end)
     if not ok or type(u) ~= "number" or type(v) ~= "number" then return nil end
     return u, v
   end
@@ -1863,6 +1911,9 @@ if Controls then (function()
       local u, v = readAxes()
       if u then S.knownU, S.knownV = u, v end
     end
+    -- A Lock edge swallowed while unarmed is caught up here.
+    local lockNow = Controls.Lock.Boolean and true or false
+    if lockNow ~= S.locked then onLock(Controls.Lock) end
   end))
   call("onStart")
   protect("frame", E.invalidate)

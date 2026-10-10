@@ -617,7 +617,9 @@ def test_engine_api_surface_is_exactly_the_contract():
     assert q.run('return TouchPad.E.props["Mode"], TouchPad.E.props["Max Frame Rate"]') == ("XY Pad", "20")
     assert q.run("return TouchPad.E.hint") is True
     assert q.run("return TouchPad.E.camera") is None
-    assert q.run('return TouchPad.E.cameraFactory("Demo (simulated)", {})') is None   # no camera module yet
+    has_camera = q.run("return type(Camera) == 'table' and type(Camera.new) == 'function'")
+    cam_type = q.run('return type(TouchPad.E.cameraFactory("Demo (simulated)", {}))')
+    assert cam_type == ("table" if has_camera else "nil"), cam_type   # the factory follows the camera module
     assert q.run("return TouchPad.E.font == Font") is True
     assert q.run('return #TouchPad.E.ctls("X"), TouchPad.E.ctl("X") == Controls.X, TouchPad.E.ctl("X", 1) == Controls.X') == (1, True, True)
     assert q.run('return TouchPad.E.out("X", 0.25)') is True
@@ -1043,3 +1045,232 @@ def test_bind_and_first_frame_errors_land_on_status():
     q2.run("Controls.Display = nil")                                   # the first frame cannot be written
     q2._dispatch("load", q2._chunk)
     assert q2.errors == [] and q2.status().startswith("Recovered from an error") and "nil" in q2.status()
+
+
+# ------------------------------------------------- spec 14 refinements
+# Picker discovery, Component.New failure shapes, the park-echo filter,
+# the start-up armed flag, the clock probe and the landing window.
+
+def no_enumeration(q):
+    """Hides Component.GetControls and makes Component.New answer a non-empty
+    handle (as a Core does), so the engine probes the literal names (spec 14.1b)."""
+    q.run('local orig = Component.New; Component.New = function(n) local c = orig(n); '
+          'return setmetatable({ Name = n }, { __index = function(_, k) return c[k] end }) end; '
+          'Component.GetControls = nil')
+
+
+def test_hex_only_picker_binds_through_rgb_output():
+    q = QSys(mode="XY Pad", picker=None, props={"Color Picker": "Hex", "Debug Print": "All"}, runtime=False)
+    hexpick = q.add_component("Hex", "color_picker", {"rgb.output": {"String": "#000000"}})
+    q._dispatch("load", q._chunk)
+    assert q.status() == "OK - Picker bound through its colour output (coarse): Hex / rgb.output"
+    assert q.pin("Status")["Value"] == 1
+    assert "picker Hex controls: rgb.output" in q.output()
+    q.advance(0.2)
+    hexpick.set("rgb.output", "#FF8080")                              # hue 0: S = 127/255, V = 1
+    q.advance(0.05)
+    assert q.pulses("Press") == 1 and q.pin("Touching")["Boolean"] is True
+    assert near(q.pin("X")["Value"], 0.5, 0.01) and near(q.pin("Y")["Value"], 1.0, 0.01)
+    q.advance(0.7)                                                    # silence: the lift is inferred
+    assert q.pulses("Tap") == 1 and q.pin("Touching")["Boolean"] is False
+    assert hexpick.get("rgb.output")["String"] == "#FF8080"           # a coarse picker is never parked
+    hexpick.set("rgb.output", "#204060")                              # S = 64/96, V = 96/255
+    q.advance(0.75)
+    assert q.pulses("Press") == 2 and q.pulses("Tap") == 2
+    assert near(q.pin("X")["Value"], 64.0 / 96.0, 0.01) and near(q.pin("Y")["Value"], 96.0 / 255.0, 0.01)
+    assert q.errors == []
+
+
+def test_hex_probe_without_enumeration():
+    q = QSys(mode="XY Pad", picker=None, props={"Color Picker": "Hex"}, runtime=False)
+    hexpick = q.add_component("Hex", "color_picker", {"rgb.output": {"String": "#000000"}})
+    no_enumeration(q)
+    q._dispatch("load", q._chunk)
+    assert q.status() == "OK - Picker bound through its colour output (coarse): Hex / rgb.output"
+    q.advance(0.2)
+    hexpick.set("rgb.output", "#FF8080")
+    q.advance(0.75)
+    assert q.pulses("Tap") == 1 and near(q.pin("X")["Value"], 0.5, 0.01)
+
+
+def test_probe_order_prefers_dotted_names_without_enumeration():
+    def both_families(q):
+        for n in ("hsv.saturation", "hsv.value"):
+            q.picker.controls[n] = q.F.add_control("Color_Picker", n, "Knob", 0, 100, 0)
+    q = QSys(mode="XY Pad", picker="Color_Picker", runtime=False)     # saturation / value listed first
+    both_families(q)
+    q._dispatch("load", q._chunk)
+    assert q.status() == "OK - Ready. Picker OK: saturation / value"  # enumeration: list order wins
+    q2 = QSys(mode="XY Pad", picker="Color_Picker", runtime=False)
+    both_families(q2)
+    no_enumeration(q2)
+    q2._dispatch("load", q2._chunk)
+    assert q2.status() == "OK - Ready. Picker OK: hsv.saturation / hsv.value"   # probe: dotted first
+    q2.picker.x_name, q2.picker.y_name = "hsv.saturation", "hsv.value"
+    q2.advance(0.2)
+    q2.tap(250, 125)
+    assert q2.pulses("Tap") == 1 and near(q2.pin("Y")["Value"], 0.75)
+    q2.advance(1.0)
+    assert q2.picker.position == (0.0, 0.0)                           # parked through the probed controls
+
+
+def test_axis_ranges_come_from_the_enumeration():
+    q = boot()
+    probe_axes = 'local a = Q.pickerAxes(Component.New("Color_Picker"), "Color_Picker"); '
+    assert q.run(probe_axes + "return a.xName, a.xRange[1], a.xRange[2], a.yRange[1], a.yRange[2]") == \
+        ("saturation", 0, 100, 0, 100)
+    no_enumeration(q)
+    assert q.run(probe_axes + "return a.xName, a.xRange, a.yRange") == ("saturation", None, None)
+
+
+def test_component_new_empty_table_is_missing():
+    q = QSys(mode="XY Pad", picker=None, props={"Color Picker": "Ghost"}, missing_component="empty")
+    assert q.status() == "No picker named Ghost" and q.pin("Status")["Value"] == 2
+    assert q.run('return Q.component("Ghost")') is None
+    q.advance(0.2)
+    q.set_pin("Picker", "Other")
+    assert q.status() == "No picker named Other"
+    assert q.errors == []
+
+
+def test_component_new_nil_or_throw_reads_as_missing():
+    stubs = ("Component.New = function() return nil end",
+             'Component.New = function() error("access denied") end')
+    for stub in stubs:
+        q = QSys(mode="XY Pad", picker="Color_Picker", runtime=False)
+        q.run(stub)
+        q._dispatch("load", q._chunk)
+        assert q.status() == "Set the picker's Script Access to All: Color_Picker", stub
+        assert q.pin("Status")["Value"] == 2 and q.errors == []
+        assert q.run('return Q.component("Color_Picker")') is None
+
+
+def test_component_with_an_empty_control_list_is_missing():
+    q = QSys(mode="XY Pad", picker="Color_Picker", runtime=False)
+    q.run('local orig = Component.New; Component.New = function(n) return { Name = n, handle = orig(n) } end; '
+          'Component.GetControls = function() return {} end')
+    q._dispatch("load", q._chunk)
+    assert q.run('return Q.component("Color_Picker")') is None        # a handle, but no readable controls
+    assert q.status() == "Set the picker's Script Access to All: Color_Picker"
+
+
+def test_picker_type_matches_exact_then_substring():
+    q = boot(picker_type="Color_Picker")                               # exact once lower-cased
+    assert q.status().startswith("OK - Ready. Picker OK")
+    q2 = boot(picker_type="ui.color_picker_v2")                       # "color" and "pick"
+    assert q2.status().startswith("OK - Ready. Picker OK")
+    q3 = boot(picker_type="colorful_gain")                            # "color" without "pick"
+    assert q3.status().startswith("No Color Picker in the design")
+    q3.set_pin("Picker", "Color_Picker")
+    assert q3.status() == "Color_Picker is not a Color Picker"
+
+
+def test_park_echo_guard_is_per_axis_for_one_second():
+    q = boot(echo_on_self_write=False, props={"Debug Print": "All"})  # a Core echoes a write in a later cycle
+    q.tap(100, 400)
+    assert q.pulses("Press") == 1 and q.picker.position == (0.0, 0.0)  # parked, no echo yet
+    park_at = [float(line.split("t=")[1]) for line in q.output() if line.startswith("park t=")][0]
+    late_echo = 'local c = Component.New("Color_Picker"); c["saturation"]:Trigger(); c["value"]:Trigger()'
+    q.advance(park_at + 0.8 - q.now)                                  # 0.8 s after the park: still filtered
+    q.run(late_echo)
+    q.advance(0.2)
+    assert q.pulses("Press") == 1 and q.pin("Touching")["Boolean"] is False
+    assert "park echo ignored (x)" in q.output() and "park echo ignored (y)" in q.output()
+    q.advance(park_at + 1.5 - q.now)                                  # 1.5 s after the park: the filter is over
+    q.run(late_echo)                                                  # the same values are now a real report
+    q.advance(0.2)
+    assert q.pulses("Press") == 2 and q.pin("Touching")["Boolean"] is True
+    assert near(q.pin("X")["Value"], 0.0) and near(q.pin("Y")["Value"], 0.0)
+    q.advance(0.7)
+    assert q.pulses("Tap") == 2 and q.errors == []
+
+
+def test_report_before_arming_is_swallowed_and_lock_is_caught_up():
+    q = QSys(mode="XY Pad", picker="Color_Picker")
+    probe(q, "onLock", "LOCKS")
+    q.picker.set(0.5, 0.5, force=True)                                # start-up echoes: the picker ...
+    q.set_pin("Lock", True)                                           # ... and a Lock edge inside the window
+    q.advance(0.05)
+    assert q.pulses("Press") == 0 and q.run("return LOCKS") == 0
+    assert "Locked" not in q.icon()
+    q.advance(0.2)                                                    # armed: the Lock is caught up, the report is not
+    assert q.run("return LOCKS") == 1 and "Locked" in q.icon()
+    assert q.pulses("Press") == 0 and q.pin("Touching")["Boolean"] is False
+    q.tap(250, 250)
+    assert q.pulses("Press") == 0                                     # locked
+    q.set_pin("Lock", False)
+    q.advance(1.0)
+    q.tap(250, 125)
+    assert q.pulses("Tap") == 1 and near(q.pin("Y")["Value"], 0.75)
+
+
+def test_timer_now_non_numeric_uses_the_fallback_clock():
+    q = QSys(mode="XY Pad", picker="Color_Picker", runtime=False)
+    q.run('Timer.Now = function() return "12:00:00" end')             # a clock that is not a number
+    q._dispatch("load", q._chunk)
+    assert q.run("return Q.probeClock() == false and NikitaTimers.clock ~= nil") is True
+    t0 = q.run("return Q.now()")
+    q.advance(1.0)
+    assert near(q.run("return Q.now()") - t0, 1.0, 0.05)              # the 0.02 s timer keeps time
+    q.tap(250, 125)                                                   # inferred lifts run on the fallback clock
+    assert q.pulses("Tap") == 1 and near(q.pin("Y")["Value"], 0.75)
+    assert q.errors == []
+
+
+def test_clock_step_resets_the_gesture_state():
+    q = boot()
+    q.run("ENDS, REASON = 0, nil; local o = TouchPad.inst.onTouchEnd; "
+          "TouchPad.inst.onTouchEnd = function(self, x, y, t, info) ENDS = ENDS + 1; REASON = info.reason; "
+          "if o then return o(self, x, y, t, info) end end")
+    q.touch([(100, 100), (150, 150)], panel_touch=True, lift=False)
+    assert q.pin("Touching")["Boolean"] is True
+    q.F.now = q.now + 10.0                                            # the clock jumps 10 s between two ticks
+    q.advance(0.1)
+    assert q.pin("Touching")["Boolean"] is False and q.pulses("Release") == 1
+    assert q.run("return ENDS, REASON") == (1, "clock")
+    assert q.picker.position != (0.0, 0.0)                            # the finger is still down: no park
+    q.lift()
+    assert q.picker.position == (0.0, 0.0)
+    q.tap(300, 300, panel_touch=True)
+    assert q.pulses("Press") == 2 and q.pulses("Tap") == 1
+    assert q.errors == []
+
+
+def test_landing_pairing_window_is_120_ms():
+    q = boot()                                                        # ticks run every 0.05 s from load
+    q.advance(0.04)                                                   # a landing at 0.24: ticks at +0.01, +0.06, +0.11, +0.16
+    q.picker.set_axis("x", 0.6)                                       # one axis; v stays parked at 0
+    q.advance(0.12)                                                   # the +0.11 tick ran: a 0.10 s window would have landed
+    assert q.pulses("Press") == 0
+    q.advance(0.05)                                                   # the +0.16 tick lands it
+    assert q.pulses("Press") == 1
+    assert near(q.pin("X")["Value"], 0.6) and near(q.pin("Y")["Value"], 0.0)
+    q.advance(0.7)
+    assert q.pulses("Tap") == 1
+
+
+def test_lone_axis_update_mid_drag_applies_at_once():
+    q = boot()
+    q.touch([(100, 100)], lift=False)
+    assert q.pulses("Press") == 1
+    q.picker.set_axis("x", 0.6)                                       # only Saturation moves
+    q.advance(0.01)
+    assert near(q.pin("X")["Value"], 0.6) and near(q.pin("Y")["Value"], 0.8)
+    q.picker.set_axis("y", 0.3)                                       # only Value moves
+    q.advance(0.01)
+    assert near(q.pin("X")["Value"], 0.6) and near(q.pin("Y")["Value"], 0.3)
+    assert q.pulses("Press") == 1 and q.pin("Touching")["Boolean"] is True
+    q.lift()
+
+
+def test_display_disabled_reasserted_on_style_channel_and_clear():
+    q = boot(props={"Icon Channel": "Style"})
+    q.run("Controls.Display.IsDisabled = false")
+    q.tap(200, 200)
+    assert q.pin("Display")["IsDisabled"] is True and q.icon().startswith("<svg")
+    q.run('Controls.Display.IsDisabled = false; Q.clearIcon(Controls.Display, "Style")')
+    d = q.pin("Display")
+    assert d["Style"] == '{"DrawChrome":false,"Legend":""}' and d["IsDisabled"] is True
+    q.run("Controls.Display.IsDisabled = false; Q.clearIcon(Controls.Display)")
+    d = q.pin("Display")
+    assert d["Legend"] == '{"DrawChrome":false}' and d["IsDisabled"] is True
