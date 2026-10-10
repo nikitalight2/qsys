@@ -46,7 +46,7 @@ def boot(sources=4, dests=3, props=None, **kw):
 def icon(q):
     """The pad drawing once the frame-rate cap has let the pending frame out."""
     q.advance(0.1)
-    return icon(q)
+    return q.icon()
 
 
 def centre(q, kind, i):
@@ -368,9 +368,9 @@ def test_dragdrop_icons_follow_whole_words_in_names():
     paths = q.run("return Shapes.WORD_ICON.teams, Shapes.WORD_ICON.wireless, Shapes.WORD_ICON.music")
     icon_d = lambda n: q.run("local s = Svg.new(100, 100); Shapes.icon(s, '%s', 50, 50, 24, '#fff'); "
                              "return table.concat(s.parts)" % n)
-    for icon in ("teams", "wireless", "doccam", "laptop", "music", "projector", "room"):
-        body = re.search(r'<path d="([^"]+)"', icon_d(icon)).group(1)
-        assert body in svg, icon                                    # "Zoomed" is not "zoom": laptop default
+    for name in ("teams", "wireless", "doccam", "laptop", "music", "projector", "room"):
+        body = re.search(r'<path d="([^"]+)"', icon_d(name)).group(1)
+        assert body in svg, name                                    # "Zoomed" is not "zoom": laptop default
     assert re.search(r'<path d="([^"]+)"', icon_d("zoom")).group(1) not in svg
     assert re.search(r'<path d="([^"]+)"', icon_d("display")).group(1) in svg   # unnamed screen 3
 
