@@ -1,0 +1,64 @@
+{
+  "title": "Touch Pad",
+  "resolution": [1280, 800],
+  "notes": [
+    "Nikita Visual Arts - nikitavisual.art. One-page UCI for the Nikita Touch Pad plugin, 500 x 500 pad at (78, 112).",
+    "Geometry: picker surface (40, 100) 955 x 524 = ceil(1.91 x 500) x (500 + 24); pad = picker top-left + (round(0.04 x 955), 12); cover = picker grown by 2 px on each side.",
+    "Keys x, y, w, h, type, variant, control, text, label, font_size, color are the build.py schema.",
+    "Keys css_class, text_color, stroke_color, stroke_width, corner_radius are applied after build.py with the toolkit's library (uci.py): css_class -> Object+_CssClassName, text_color -> _Color/Object+_Color only (not _Fill), stroke_color -> _StrokeColor, stroke_width -> _StrokeWidth, corner_radius -> _CornerRadius.",
+    "The Color Picker surface and the plugin's three Display copies are not in this file: the template has no Color Picker prototype and the Display control has no pin."
+  ],
+  "pages": [
+    {
+      "title": "Touch Pad",
+      "color": "#120B08",
+      "layers": [
+        {
+          "name": "TouchPad",
+          "elements": [
+            {"type": "groupbox", "x": 38, "y": 98, "w": 959, "h": 528,
+             "color": "#120B08", "stroke_color": "#120B08", "stroke_width": 0, "corner_radius": 0,
+             "css_class": "",
+             "role": "cover: page-coloured group box over the Color Picker surface (40, 100) 955 x 524"},
+
+            {"type": "groupbox", "x": 78, "y": 112, "w": 500, "h": 500,
+             "color": "#120B08", "stroke_color": "#45301F", "stroke_width": 1, "corner_radius": 18,
+             "css_class": "",
+             "role": "pad placeholder in the Sunset pad colour: the three Display copies go exactly here"},
+
+            {"type": "text", "x": 94, "y": 318, "w": 468, "h": 88,
+             "text": "TOUCH PAD: drop the Color Picker surface under the cover,\r\nthen paste the plugin's Display here 3 times",
+             "font_size": 16, "text_color": "#C7AE9C", "css_class": "",
+             "role": "instruction text; delete it once the Display copies are in place"},
+
+            {"type": "text", "x": 1020, "y": 84, "w": 220, "h": 20,
+             "text": "CAMERA", "font_size": 14, "text_color": "#C7AE9C", "css_class": "pp-section-label"},
+
+            {"type": "button", "variant": "Momentary", "x": 1020, "y": 112, "w": 220, "h": 72,
+             "control": "TP_Home", "label": "Home", "css_class": "pp-ptz pp-ptz-home"},
+            {"type": "button", "variant": "Momentary", "x": 1020, "y": 200, "w": 220, "h": 72,
+             "control": "TP_ZoomIn", "label": "Zoom In", "css_class": "pp-ptz pp-ptz-zoom-in"},
+            {"type": "button", "variant": "Momentary", "x": 1020, "y": 288, "w": 220, "h": 72,
+             "control": "TP_ZoomOut", "label": "Zoom Out", "css_class": "pp-ptz pp-ptz-zoom-out"},
+            {"type": "button", "variant": "Toggle", "x": 1020, "y": 376, "w": 220, "h": 72,
+             "control": "TP_FlipPan", "label": "Flip Pan", "css_class": "pp-cam"},
+            {"type": "button", "variant": "Toggle", "x": 1020, "y": 464, "w": 220, "h": 72,
+             "control": "TP_FlipTilt", "label": "Flip Tilt", "css_class": "pp-cam"},
+            {"type": "button", "variant": "Toggle", "x": 1020, "y": 552, "w": 220, "h": 72,
+             "control": "TP_Lock", "label": "Lock", "css_class": "pp-cam"},
+            {"type": "button", "variant": "Toggle", "x": 1020, "y": 640, "w": 220, "h": 72,
+             "control": "TP_Calibrate", "label": "Calibrate", "css_class": "pp-cam"},
+
+            {"type": "text", "x": 78, "y": 644, "w": 500, "h": 56,
+             "text": "Gesture", "font_size": 18, "text_color": "#C7AE9C", "css_class": "pp-hint",
+             "role": "Gesture readout placeholder: replace with a Text Box linked to the plugin's Gesture pin"},
+
+            {"type": "text", "x": 1000, "y": 764, "w": 240, "h": 24,
+             "text": "Nikita Visual Arts – nikitavisual.art",
+             "font_size": 13, "text_color": "#C7AE9C", "css_class": ""}
+          ]
+        }
+      ]
+    }
+  ]
+}
