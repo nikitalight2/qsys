@@ -200,7 +200,8 @@ q.output()      # captured print() lines (uncaught Lua errors are appended as "L
 q.clear_output()
 q.log           # [(kind, text)] from Log.Message / Log.Error
 q.errors        # [(label, traceback)] of uncaught errors inside Lua callbacks
-q.budget(strict=None)   # {"max_handler", "max_frame", "handlers": {label: max}, "frames", "dispatches"}
+q.budget(strict=None)   # {"max_handler", "max_frame", "load", "handlers": {label: max}, "frames", "dispatches"}
+                        # max_handler leaves the load dispatch out; "load" reports it (it draws the first frame but is not a frame)
 q.instructions(label)
 q.run(lua_code)         # execute Lua in the plugin's state
 q.lua, q.G, q.F         # the lupa runtime, its globals, the fake's internal table (__FAKE)
@@ -215,7 +216,8 @@ runtime section), `ctl:<key>` (a control EventHandler; component controls are
 those are C on a Core. A handler fired by a script write runs nested: its
 count is recorded under its own label and also included in the outer one. A
 dispatch in which `Display`'s icon changed is a *frame*: it is also recorded
-as `frame:<label>` and compared with the frame budget.
+as `frame:<label>` and compared with the frame budget. The `load` dispatch is
+the exception: it draws the first frame but is reported only as the load.
 
 ### Files
 
@@ -280,6 +282,24 @@ the largest graphic placed at (0, 0)), non-ASCII text in Legend / PrettyName
 Because `GetControlLayout` returns a dictionary, placing a control twice on
 one page cannot be observed (the second entry replaces the first); the check
 is not possible from outside.
+
+### Testing against the engine (50_runtime.lua)
+
+`tests/test_engine.py` and `tests/test_xy.py` drive the built plugin. Things
+the engine does that a test must allow for:
+
+- handlers are armed 0.1 s after load (spec 14.4): `q.advance(0.2)` before the
+  first touch (the tests' `boot()` helper does this);
+- once `PanelTouch` has changed, the engine treats it as wired for good: press
+  and release then follow it and silence no longer infers a lift, so keep an
+  instance to one style of touch (`panel_touch=True` everywhere, or nowhere);
+- an inferred lift after a drag can be taken back by a report near the last
+  spot within 1.5 s (`onTouchResume`); the picker is parked 0.3 s after the
+  lift is certain (1.8 s after a drag's last report, 0.55 s after a tap's);
+- frames are capped at `Max Frame Rate`: after an event that follows another
+  within 1/fps, `q.advance(0.05)` before reading `q.icon()`;
+- `TouchPad` is a Lua global with `E` (the engine API), `inst` (the mode
+  instance; replace a method to probe or to raise), `state` and `mode`.
 
 ### Known approximations
 

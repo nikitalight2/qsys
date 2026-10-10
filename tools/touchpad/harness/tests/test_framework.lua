@@ -85,8 +85,13 @@ function test_properties_order_and_types()
   local expected = { "Mode", "Pad Width", "Pad Height", "Color Picker", "Swap Axes", "Flip X", "Flip Y",
     "Theme", "Accent Color", "Background Color", "Text Color", "Background", "Corner Radius", "Font",
     "Show Hints", "Max Frame Rate", "Icon Channel", "Camera Control", "Camera Name", "VISCA Brand",
-    "Zones", "Sources", "Destinations", "Speakers", "Orientation", "Sign-In Webhook", "Debug Print", "Show Debug" }
+    "Zones", "Sources", "Destinations", "Speakers", "Orientation", "Sign-In Webhook", "Debug Print" }
   T.deq(names(props), expected, "property names in order")
+  local reserved = { ["is managed"] = true, ["is required"] = true, ["location"] = true, ["show debug"] = true,
+    ["showdebug"] = true, ["page_index"] = true, ["name"] = true, ["script access"] = true, ["code name"] = true }
+  for _, p in ipairs(props) do
+    T.ok(not reserved[p.Name:lower()], "no reserved property name: " .. p.Name)
+  end
   local valid = { string = true, integer = true, double = true, boolean = true, enum = true }
   for _, p in ipairs(props) do
     T.ok(valid[p.Type], "valid type for " .. p.Name)
@@ -498,7 +503,7 @@ function test_xy_mode_table()
   T.eq(xy.hint, "Drag anywhere", "hint")
   T.eq(type(xy.controls), "function", "controls function")
   T.eq(type(xy.layout), "function", "layout function")
-  T.eq(xy.create, nil, "create left to the engine")
+  T.eq(type(xy.create), "function", "create is the runtime half")
   T.eq(xy.padColour(THEMES["Nikita"]), "#17151C", "pad colour is the theme background")
   T.eq(#GetControls(defaults("XY Pad")), 26, "no extra controls")
   local _, g = layoutOf(defaults("XY Pad"), "Pad")

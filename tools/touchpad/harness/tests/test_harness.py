@@ -472,7 +472,9 @@ def test_budget_and_labels():
     q.tap(100, 100)
     b = q.budget()
     assert set(["load", "ctl:Color_Picker~saturation", "ctl:Color_Picker~value", "timer", "callafter"]) <= set(b["handlers"])
-    assert b["max_handler"] >= b["handlers"]["load"] and b["dispatches"] > 5
+    assert b["load"] == b["handlers"]["load"] and b["dispatches"] > 5
+    assert "frame:load" not in b["handlers"]                  # the load draws the first frame but is not one
+    assert b["max_handler"] == max(v for k, v in b["handlers"].items() if k != "load" and not k.startswith("frame:"))
     q.allow_budget = True                                     # tells run_tests the breach is deliberate
     q.run('Controls.Save.EventHandler = function() local s = 0 for i = 1, 100000 do s = s + i end end')
     q.set_pin("Save", True)

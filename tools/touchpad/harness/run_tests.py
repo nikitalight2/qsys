@@ -10,7 +10,8 @@
 
 Discovers tests/test_*.py, imports each, runs every function named test_* in
 file order and prints a table with the result and the instruction maxima of
-every QSys instance the test created (max per handler, max per frame). A
+every QSys instance the test created (max per handler apart from the load,
+max per frame, the load dispatch itself). A
 test fails when it raises, when a QSys instance breached a budget (120,000
 instructions per handler, 60,000 per frame) or when a Lua callback raised an
 error the plugin did not catch. A test that provokes those on purpose sets
@@ -77,7 +78,7 @@ def test_functions(module):
 
 
 def run_one(fn):
-    """Returns (ok, message, max_handler, max_frame, instances)."""
+    """Returns (ok, message, max_handler, max_frame, max_load, secs)."""
     qsys_fake.reset_registry()
     t0 = time.time()
     ok, message = True, ""
@@ -88,7 +89,7 @@ def run_one(fn):
     except Exception:
         ok, message = False, traceback.format_exc().rstrip()
     instances = qsys_fake.active()
-    max_handler = max_frame = 0
+    max_handler = max_frame = max_load = 0
     for q in instances:
         try:
             b = q.budget(strict=False)
@@ -97,6 +98,7 @@ def run_one(fn):
             continue
         max_handler = max(max_handler, b["max_handler"])
         max_frame = max(max_frame, b["max_frame"])
+        max_load = max(max_load, b["load"])
         if ok:
             over = [(k, v) for k, v in b["handlers"].items()
                     if (k.startswith("frame:") and v > FRAME_BUDGET) or (not k.startswith("frame:") and v > HANDLER_BUDGET)]
@@ -108,7 +110,7 @@ def run_one(fn):
                 ok, message = False, "uncaught Lua error: %s" % q.errors[-1][1].splitlines()[0]
     for q in instances:
         q.close()
-    return ok, message, max_handler, max_frame, time.time() - t0
+    return ok, message, max_handler, max_frame, max_load, time.time() - t0
 
 
 def lint_plugin(path, verbose):
@@ -160,24 +162,24 @@ def main(argv):
         try:
             module = load_module(path)
         except Exception:
-            rows.append((rel, "<import>", False, "import failed:\n" + traceback.format_exc().rstrip(), 0, 0, 0.0))
+            rows.append((rel, "<import>", False, "import failed:\n" + traceback.format_exc().rstrip(), 0, 0, 0, 0.0))
             failures += 1
             continue
         for name, fn in test_functions(module):
             if args.pattern and args.pattern not in name:
                 continue
             total += 1
-            ok, message, mh, mf, secs = run_one(fn)
+            ok, message, mh, mf, ml, secs = run_one(fn)
             if ok:
                 passed += 1
             else:
                 failures += 1
-            rows.append((rel, name, ok, message, mh, mf, secs))
+            rows.append((rel, name, ok, message, mh, mf, ml, secs))
 
     print()
-    print("%-5s %-44s %10s %10s %7s" % ("", "test", "handler", "frame", "secs"))
-    for rel, name, ok, message, mh, mf, secs in rows:
-        print("%-5s %-44s %10d %10d %7.2f" % ("PASS" if ok else "FAIL", name[:44], mh, mf, secs))
+    print("%-5s %-44s %9s %9s %9s %6s" % ("", "test", "handler", "frame", "load", "secs"))
+    for rel, name, ok, message, mh, mf, ml, secs in rows:
+        print("%-5s %-44s %9d %9d %9d %6.2f" % ("PASS" if ok else "FAIL", name[:44], mh, mf, ml, secs))
         if not ok:
             text = message if args.verbose else message.splitlines()[-1] if message else ""
             print("      " + text.replace("\n", "\n      "))

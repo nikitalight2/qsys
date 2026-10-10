@@ -167,7 +167,7 @@ function F.dispatch(label, fn, ...)
   F.depth = F.depth - 1
   local used = (F.ticks - start) * HOOK_GRAN
   record(label, used)
-  if F.display_writes ~= d0 then
+  if F.display_writes ~= d0 and label ~= "load" then
     F.frames = F.frames + 1
     if used > F.frame_max then F.frame_max = used end
     record("frame:" .. label, used)
@@ -1779,15 +1779,19 @@ class QSys:
 
     # ------------------------------------------------------------- budget
     def budget(self, strict=None):
-        """{"max_handler", "max_frame", "handlers": {label: max}, "frames", "dispatches"}.
-        Raises BudgetError above the budgets unless strict (default q.strict) is False."""
+        """{"max_handler", "max_frame", "load", "handlers": {label: max}, "frames", "dispatches"}.
+        max_handler is the largest handler apart from the load dispatch (reported as "load");
+        the load draws the first frame but is never counted as one. Raises BudgetError
+        above the budgets unless strict (default q.strict) is False."""
         handlers = {}
         for row in _lua_list(self.F.maxima_list()):
             handlers[row[1]] = int(row[2])
         plain = {k: v for k, v in handlers.items() if not k.startswith("frame:")}
+        steady = {k: v for k, v in plain.items() if k != "load"}
         result = {
-            "max_handler": max(plain.values()) if plain else 0,
+            "max_handler": max(steady.values()) if steady else 0,
             "max_frame": int(self.F.frame_max),
+            "load": int(handlers.get("load", 0)),
             "handlers": handlers,
             "frames": int(self.F.frames),
             "dispatches": int(self.F.dispatches),

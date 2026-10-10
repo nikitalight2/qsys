@@ -197,11 +197,8 @@ function GetProperties()
     { Name = "Sign-In Webhook", Type = "enum", Choices = { "Off", "JSON", "Teams Card" }, Value = "Off" },
     { Name = "Debug Print", Type = "enum", Choices = { "None", "Gestures", "All" }, Value = "None" },
   }
-  -- "Show Debug" is the name Designer gives its own property when
-  -- PluginInfo.ShowDebug is true; ours exists only while that is off.
-  if not (PluginInfo and PluginInfo.ShowDebug) then
-    props[#props + 1] = { Name = "Show Debug", Type = "boolean", Value = false }
-  end
+  -- No "Show Debug" property: Designer reserves that name for its own
+  -- Debug Output window (API reference 3.3); "Debug Print" covers the use.
   return props
 end
 
