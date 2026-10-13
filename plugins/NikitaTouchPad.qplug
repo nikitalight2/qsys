@@ -13165,11 +13165,18 @@ local function newLayout(page, props, meta, order, prettyName, baseW)
   -- sets. Margin, Padding and StrokeWidth are 0 (Padding defaults to 1) so
   -- the icon's viewBox maps onto the control's pixels exactly and no face
   -- edge shows before the first frame; the stroke is white like the face.
+  -- The drawing surface. In Designer it shows as a labelled, outlined button so
+  -- it can be found and dragged onto a UCI; at run time the script replaces its
+  -- face with the pad drawing (DrawChrome = false), so colour and legend do not
+  -- matter there. Same key shape as the Mic Mixer's buttons, which are known to
+  -- render in Designer.
   function L.display(key, pos, size)
+    local legend = (key == "CameraView") and "CAMERA VIEW" or "TOUCH PAD"
     return L.put(key, { Style = "Button", ButtonStyle = "Momentary", ButtonVisualStyle = "Flat",
-                        IsReadOnly = true, Legend = "", Color = WHITE, UnlinkOffColor = true,
-                        OffColor = WHITE, StrokeColor = WHITE, StrokeWidth = 0, Margin = 0, Padding = 0,
-                        CornerRadius = 0, Position = pos, Size = size })
+                        Legend = legend .. "\n(the drawing appears when the design runs)",
+                        FontSize = 12, Color = Nikita.Panel, UnlinkOffColor = true, OffColor = Nikita.Panel,
+                        StrokeColor = Nikita.Magenta, StrokeWidth = 2, CornerRadius = 8,
+                        Position = pos, Size = size })
   end
 
   -- Picks the style from the control definition.
