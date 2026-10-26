@@ -1,0 +1,308 @@
+<!doctype html>
+<!-- Nikita Visual Arts – nikitavisual.art -->
+<!-- Q-SYS Audio Uploader web page. Served by the NikitaAudioUploader plugin,
+     or opened from disk as a standalone page. Build: tools/build_audio_uploader.py -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="author" content="Nikita Visual Arts – nikitavisual.art">
+<title>Q-SYS Audio Uploader</title>
+<style>
+:root {
+  --bg: #f6f5f8; --panel: #ffffff; --stroke: #e3e0e8; --text: #1d1b22; --muted: #6f6879;
+  --purple: #7a1be8; --magenta: #c513e8; --pink: #f0328c; --orange: #ff8a1e;
+  --ok: #1fa774; --fault: #d93636; --warn: #c98a00;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--text);
+  font: 15px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, Arial, sans-serif; }
+header { background: #fff; border-bottom: 1px solid var(--stroke); }
+.brandbar { max-width: 880px; margin: 0 auto; padding: 14px 16px; display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
+.brandbar img { height: 44px; width: auto; display: block; }
+.brandbar .who { font-size: 13px; color: var(--muted); }
+.brandbar h1 { margin: 0 0 0 auto; font-size: 18px; font-weight: 700; }
+.rule { height: 3px; background: linear-gradient(90deg, var(--purple), var(--pink), var(--orange)); }
+main { max-width: 880px; margin: 0 auto; padding: 16px; display: grid; gap: 14px; }
+section { background: var(--panel); border: 1px solid var(--stroke); border-radius: 8px; padding: 16px; }
+h2 { margin: 0 0 12px; font-size: 12px; letter-spacing: .14em; text-transform: uppercase; color: var(--muted); }
+.row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.row > * { min-width: 0; }
+input[type=text], input[type=password], select {
+  font: inherit; padding: 8px 10px; border: 1px solid var(--stroke); border-radius: 6px; background: #fff; color: var(--text); }
+input[type=text], input[type=password] { flex: 1 1 180px; }
+select { flex: 1 1 220px; }
+button { font: inherit; font-weight: 600; padding: 8px 14px; border-radius: 6px; border: 1px solid transparent; cursor: pointer;
+  background: var(--purple); color: #fff; }
+button.secondary { background: #fff; color: var(--text); border-color: var(--stroke); }
+button.danger { background: #fff; color: var(--fault); border-color: #f0c8c8; padding: 4px 10px; font-size: 13px; }
+button:disabled { opacity: .5; cursor: default; }
+.hint { font-size: 13px; color: var(--muted); margin: 8px 0 0; }
+.path { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 13px; background: var(--bg); padding: 2px 6px; border-radius: 4px; }
+#drop { border: 2px dashed #cfc8da; border-radius: 8px; padding: 28px 16px; text-align: center; cursor: pointer; transition: background .15s, border-color .15s; }
+#drop.over { border-color: var(--magenta); background: #fbf3fe; }
+#drop strong { display: block; font-size: 16px; margin-bottom: 4px; }
+.list { list-style: none; margin: 12px 0 0; padding: 0; display: grid; gap: 6px; }
+.list li { display: flex; align-items: center; gap: 10px; padding: 8px 10px; border: 1px solid var(--stroke); border-radius: 6px; }
+.list .name { flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.list .size { color: var(--muted); font-size: 13px; white-space: nowrap; }
+.bar { flex: 0 0 140px; height: 8px; background: var(--bg); border-radius: 4px; overflow: hidden; }
+.bar > i { display: block; height: 100%; width: 0; background: linear-gradient(90deg, var(--purple), var(--pink), var(--orange)); }
+.state { font-size: 13px; white-space: nowrap; min-width: 70px; text-align: right; }
+.state.ok { color: var(--ok); } .state.err { color: var(--fault); }
+#status { font-size: 14px; }
+#status.ok { color: var(--ok); } #status.err { color: var(--fault); } #status.wait { color: var(--warn); }
+.hidden { display: none !important; }
+footer { max-width: 880px; margin: 0 auto; padding: 8px 16px 24px; display: flex; align-items: center; gap: 10px; color: var(--muted); font-size: 13px; }
+footer img { height: 22px; width: auto; }
+@media (max-width: 560px) { .bar { flex-basis: 70px; } .brandbar h1 { margin-left: 0; } }
+</style>
+</head>
+<body>
+<header>
+  <div class="brandbar">
+    <img src="data:image/png;base64,{{LOGO}}" alt="Nikita Visual Arts">
+    <div class="who">Nikita Visual Arts – nikitavisual.art</div>
+    <h1>Q-SYS Audio Uploader</h1>
+  </div>
+  <div class="rule"></div>
+</header>
+
+<main>
+  <section id="connSection">
+    <h2>Core</h2>
+    <div class="row" id="coreRow">
+      <input type="text" id="coreAddr" placeholder="Core address and port, e.g. 192.168.1.50:8080" autocomplete="off">
+      <button id="connectBtn">Connect</button>
+    </div>
+    <div class="row" id="pinRow" style="margin-top:8px">
+      <input type="password" id="pin" placeholder="Upload PIN" autocomplete="off">
+    </div>
+    <p class="hint"><span id="status" class="wait">Not connected</span></p>
+  </section>
+
+  <section>
+    <h2>Folder on the Core</h2>
+    <div class="row">
+      <select id="folder"></select>
+      <button class="secondary" id="refreshBtn">Refresh</button>
+    </div>
+    <div class="row" style="margin-top:8px">
+      <input type="text" id="newFolder" placeholder="New folder, e.g. Background Music or Events/Gala">
+      <button class="secondary" id="createBtn">Create folder</button>
+    </div>
+    <p class="hint">Files go to <span class="path" id="pathView">Audio/</span> — choose this folder in the Audio Player.</p>
+  </section>
+
+  <section>
+    <h2>Upload</h2>
+    <div id="drop" tabindex="0" role="button" aria-label="Choose audio files">
+      <strong>Drop audio files here</strong>
+      <span class="hint">or click to choose · <span id="extView"></span> · up to <span id="maxView"></span> MB each</span>
+    </div>
+    <input type="file" id="picker" multiple class="hidden">
+    <ul class="list" id="queue"></ul>
+  </section>
+
+  <section>
+    <h2>Files in this folder</h2>
+    <ul class="list" id="files"></ul>
+    <p class="hint" id="filesEmpty">No files yet.</p>
+  </section>
+</main>
+
+<footer>
+  <img src="data:image/png;base64,{{LOGO}}" alt="">
+  <span>Nikita Visual Arts – nikitavisual.art · <span id="ver"></span></span>
+</footer>
+
+<script>
+(function () {
+  "use strict";
+  var $ = function (id) { return document.getElementById(id); };
+  var served = location.protocol === "http:" || location.protocol === "https:";
+  var base = "";            // "" when served by the Core, "http://ip:port" when opened from disk
+  var info = null;
+  var busy = false;
+
+  function store(k, v) { try { localStorage.setItem(k, v); } catch (e) {} }
+  function recall(k) { try { return localStorage.getItem(k) || ""; } catch (e) { return ""; } }
+
+  function setStatus(text, cls) { var s = $("status"); s.textContent = text; s.className = cls || ""; }
+  function fmtSize(n) {
+    if (n == null || n < 0) return "";
+    if (n < 1024) return n + " B";
+    if (n < 1048576) return (n / 1024).toFixed(0) + " KB";
+    return (n / 1048576).toFixed(1) + " MB";
+  }
+  function ext(name) { var m = /\.([^.]+)$/.exec(name); return m ? m[1].toLowerCase() : ""; }
+  function q(params) {
+    var p = [];
+    for (var k in params) p.push(k + "=" + encodeURIComponent(params[k]));
+    var pin = $("pin").value;
+    if (pin) p.push("pin=" + encodeURIComponent(pin));
+    return p.length ? "?" + p.join("&") : "";
+  }
+  function request(method, path, params, body, onProgress) {
+    return new Promise(function (resolve, reject) {
+      var x = new XMLHttpRequest();
+      x.open(method, base + path + q(params || {}));
+      if (onProgress && x.upload) x.upload.onprogress = function (e) { if (e.lengthComputable) onProgress(e.loaded / e.total); };
+      x.onload = function () {
+        var data = null;
+        try { data = JSON.parse(x.responseText); } catch (e) {}
+        if (x.status >= 200 && x.status < 300) resolve(data || {});
+        else reject({ status: x.status, message: (data && data.error) || ("HTTP " + x.status) });
+      };
+      x.onerror = function () { reject({ status: 0, message: "Connection lost" }); };
+      x.ontimeout = x.onerror;
+      if (body) x.setRequestHeader("Content-Type", "application/octet-stream");
+      x.send(body || null);
+    });
+  }
+
+  function folder() { return $("folder").value || ""; }
+  function updatePath() { $("pathView").textContent = "Audio/" + (folder() ? folder() + "/" : ""); }
+
+  function loadFolders(select) {
+    return request("GET", "/api/folders").then(function (d) {
+      var sel = $("folder"), keep = select != null ? select : (sel.value || recall("aud.folder") || (info && info.defaultFolder) || "");
+      sel.innerHTML = "";
+      var list = d.folders || [];
+      if (list.indexOf("") < 0) list.unshift("");
+      list.forEach(function (f) {
+        var o = document.createElement("option");
+        o.value = f; o.textContent = f ? "Audio/" + f : "Audio (root)";
+        sel.appendChild(o);
+      });
+      if (list.indexOf(keep) >= 0) sel.value = keep;
+      updatePath();
+      return loadFiles();
+    });
+  }
+
+  function loadFiles() {
+    return request("GET", "/api/files", { folder: folder() }).then(function (d) {
+      var ul = $("files"); ul.innerHTML = "";
+      (d.files || []).forEach(function (f) {
+        var li = document.createElement("li");
+        var n = document.createElement("span"); n.className = "name"; n.textContent = f.name; n.title = f.name;
+        var s = document.createElement("span"); s.className = "size"; s.textContent = fmtSize(f.size);
+        li.appendChild(n); li.appendChild(s);
+        if (info && info.allowDelete) {
+          var b = document.createElement("button"); b.className = "danger"; b.textContent = "Delete";
+          b.onclick = function () {
+            if (!confirm("Delete " + f.name + " from the Core?")) return;
+            request("POST", "/api/delete", { folder: folder(), name: f.name }).then(loadFiles, function (e) { alert(e.message); });
+          };
+          li.appendChild(b);
+        }
+        ul.appendChild(li);
+      });
+      $("filesEmpty").classList.toggle("hidden", (d.files || []).length > 0);
+    });
+  }
+
+  function connect() {
+    if (!served) {
+      var a = $("coreAddr").value.trim().replace(/^https?:\/\//, "").replace(/\/+$/, "");
+      if (!a) { setStatus("Enter the Core address", "err"); return; }
+      store("aud.core", a);
+      base = "http://" + a;
+    }
+    setStatus("Connecting…", "wait");
+    request("GET", "/api/info").then(function (d) {
+      info = d;
+      $("extView").textContent = (d.extensions || []).map(function (e) { return "." + e; }).join(" ");
+      $("maxView").textContent = d.maxMB;
+      $("ver").textContent = "Q-SYS plugin v" + d.version;
+      $("picker").accept = (d.extensions || []).map(function (e) { return "." + e; }).join(",");
+      $("pinRow").classList.toggle("hidden", !d.pinRequired);
+      if (d.pinRequired && !$("pin").value) { setStatus("Enter the upload PIN", "wait"); $("pin").focus(); return; }
+      return loadFolders().then(function () { setStatus("Connected to " + (d.name || "Core"), "ok"); });
+    }).catch(function (e) {
+      setStatus(e.status === 401 ? "Wrong or missing PIN" : "Cannot reach the Core: " + e.message +
+        (served ? "" : " – check the address, the port and that the plugin is enabled"), "err");
+    });
+  }
+
+  function addRow(file) {
+    var li = document.createElement("li");
+    li.innerHTML = '<span class="name"></span><span class="size"></span><span class="bar"><i></i></span><span class="state">Waiting</span>';
+    li.querySelector(".name").textContent = file.name;
+    li.querySelector(".size").textContent = fmtSize(file.size);
+    $("queue").appendChild(li);
+    return {
+      progress: function (p) { li.querySelector(".bar i").style.width = Math.round(p * 100) + "%"; li.querySelector(".state").textContent = Math.round(p * 100) + "%"; },
+      done: function (ok, text) {
+        if (ok) li.querySelector(".bar i").style.width = "100%";
+        var s = li.querySelector(".state"); s.textContent = text; s.className = "state " + (ok ? "ok" : "err");
+      }
+    };
+  }
+
+  function uploadOne(file, row, overwrite) {
+    var params = { folder: folder(), name: file.name };
+    if (overwrite) params.overwrite = "1";
+    return request("POST", "/api/upload", params, file, row.progress).then(function () {
+      row.done(true, "Uploaded");
+    }, function (e) {
+      if (e.status === 409 && !overwrite) {
+        if (confirm(file.name + " already exists in this folder. Replace it?")) return uploadOne(file, row, true);
+        row.done(false, "Skipped");
+        return;
+      }
+      row.done(false, e.message);
+    });
+  }
+
+  function enqueue(fileList) {
+    if (!info) { setStatus("Connect to the Core first", "err"); return; }
+    var files = Array.prototype.slice.call(fileList);
+    var chain = Promise.resolve();
+    files.forEach(function (f) {
+      var row = addRow(f);
+      if ((info.extensions || []).indexOf(ext(f.name)) < 0) { row.done(false, "Type not allowed"); return; }
+      if (f.size > info.maxMB * 1048576) { row.done(false, "Too large"); return; }
+      chain = chain.then(function () { return uploadOne(f, row, false); });
+    });
+    busy = true;
+    chain.then(function () { busy = false; return loadFiles(); }).catch(function () { busy = false; });
+  }
+
+  // Wiring
+  var drop = $("drop"), picker = $("picker");
+  drop.onclick = function () { picker.click(); };
+  drop.onkeydown = function (e) { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); picker.click(); } };
+  picker.onchange = function () { enqueue(picker.files); picker.value = ""; };
+  ["dragenter", "dragover"].forEach(function (t) { drop.addEventListener(t, function (e) { e.preventDefault(); drop.classList.add("over"); }); });
+  ["dragleave", "drop"].forEach(function (t) { drop.addEventListener(t, function (e) { e.preventDefault(); drop.classList.remove("over"); }); });
+  drop.addEventListener("drop", function (e) { if (e.dataTransfer && e.dataTransfer.files) enqueue(e.dataTransfer.files); });
+  window.addEventListener("beforeunload", function (e) { if (busy) { e.preventDefault(); e.returnValue = ""; } });
+
+  $("folder").onchange = function () { store("aud.folder", folder()); updatePath(); loadFiles(); };
+  $("refreshBtn").onclick = function () { loadFolders(); };
+  $("createBtn").onclick = function () {
+    var name = $("newFolder").value.trim();
+    if (!name) return;
+    request("POST", "/api/folder", { folder: name }).then(function (d) {
+      $("newFolder").value = "";
+      store("aud.folder", d.folder);
+      return loadFolders(d.folder);
+    }).catch(function (e) { alert(e.message); });
+  };
+  $("connectBtn").onclick = connect;
+  $("coreAddr").onkeydown = function (e) { if (e.key === "Enter") connect(); };
+  $("pin").onchange = function () { if (served || base) connect(); };
+
+  if (served) {
+    $("coreRow").classList.add("hidden");
+    connect();
+  } else {
+    $("coreAddr").value = recall("aud.core");
+    $("pinRow").classList.add("hidden");
+  }
+})();
+</script>
+</body>
+</html>

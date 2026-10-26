@@ -13,6 +13,7 @@ Q-SYS Designer plugins by Nikita Visual Arts.
 | Mic Mixer | `plugins/NikitaMicMixer.qplug` | 2.0.0 |
 | RGBW Fixture Selector | `plugins/NikitaRGBWSelector.qplug` | 1.0.0 |
 | NEC NP-PA04UL-B Projector | `plugins/NikitaNECProjector.qplug` | 1.1.0 |
+| Audio File Uploader | `plugins/NikitaAudioUploader.qplug` | 1.0.0 |
 
 ## Mic Mixer
 
@@ -146,7 +147,12 @@ loaded in Q-SYS Designer or run on a Core. Points to confirm there:
 ```
 plugins/NikitaMicMixer.qplug       Mic Mixer plugin
 plugins/NikitaRGBWSelector.qplug   RGBW Fixture Selector plugin
-assets/brand/                      logo files used by the plugin and this README
+plugins/NikitaNECProjector.qplug   NEC NP-PA04UL-B Projector plugin
+plugins/NikitaAudioUploader.qplug  Audio File Uploader plugin (web page built in)
+web/AudioUploader.html             standalone upload page (open from disk)
+web/AudioUploader.template.html    source of the upload page
+tools/build_audio_uploader.py      embeds the page and logos into the plugin
+assets/brand/                      logo files used by the plugins and this README
 ```
 
 ---
@@ -264,3 +270,109 @@ been run on the projector. To confirm on site:
 
 If something does not behave as expected, turn on the *Debug* property and
 send the debug output together with the Q-SYS Designer version.
+
+## Audio File Uploader
+
+Upload music and other audio files to the Core from any computer, tablet or
+phone on the same network. The plugin runs a small web page inside the Core:
+open it in a browser, pick or create a folder and drop the files in. They
+are written to the Core's `Audio` folder, where the Audio Player,
+Multi-Track Player and Playlist blocks can play them.
+
+### Install
+
+1. Copy `plugins/NikitaAudioUploader.qplug` to your Q-SYS plugin folder.
+2. Restart Q-SYS Designer and drag **Nikita Visual Arts → Audio File
+   Uploader** into the schematic.
+3. Save to the Core and run. The **URL** box on the panel shows the address,
+   for example `http://192.168.1.50:8080/`.
+
+### Uploading
+
+**Option 1 – page on the Core (recommended).** Open the address from the
+panel in a browser on the same network. Nothing has to be installed.
+
+**Option 2 – standalone page.** Open `web/AudioUploader.html` straight from
+your computer, type the Core address with the port (`192.168.1.50:8080`)
+and press **Connect**. It talks to the same plugin, so the plugin must be
+running in the design either way.
+
+On the page:
+
+- **Folder on the Core** – choose a folder under `Audio/`, or type a new
+  name and press **Create folder** (`Events/Gala` makes a sub-folder).
+- **Upload** – drop files on the box or click it to choose them. Each file
+  shows its own progress bar. If a file with the same name exists, the page
+  asks before replacing it.
+- **Files in this folder** – what is already there, with **Delete** buttons
+  (only when *Allow Delete* is on).
+
+Then, in the Audio Player, choose the folder shown on the page (for example
+`Audio/Uploads/`) and the file.
+
+### Panel
+
+| Section | Controls |
+|---|---|
+| Web upload page | **PAGE ON** (starts / stops the page), status, the address to open |
+| Folder | folder name + **CREATE**, the path to choose in the Audio Player |
+| Upload | **ACTIVE** LED, progress meter, last file received |
+| Files | list of files in the folder, **REFRESH**, **DELETE SELECTED** (press twice within 3 s) |
+
+### Properties
+
+| Property | Default | What it does |
+|---|---|---|
+| Web Port | 8080 | TCP port of the web page. Pick another one if 8080 is used on your Core. |
+| Default Folder | Uploads | Folder under `Audio/` created and selected at start. |
+| Max File Size (MB) | 500 | Larger files are refused. |
+| Allowed Extensions | wav,mp3,flac,aac,m4a,ogg,aif,aiff | Comma-separated list of accepted file types. |
+| Upload PIN | empty | When set, the page asks for this PIN before listing, uploading or deleting. |
+| Allow Delete | on | Allows deleting files from the page and the panel. |
+| Debug | off | Prints every request to the debug output. |
+
+### Pins
+
+| Direction | Pins |
+|---|---|
+| Output | `FolderPath`, `Uploading`, `LastUpload` |
+| Optional (enable in the control pins list) | `Enable`, `Status`, `URL`, `FolderName`, `CreateFolder`, `Files`, `FileCount`, `Refresh`, `DeleteFile`, `Progress` |
+
+### Safety
+
+- Local network only: the page has no encryption (plain `http`) and is meant
+  for a trusted control network. Set an **Upload PIN** if other people share
+  that network, and do not forward the port to the internet.
+- File and folder names are cleaned on the Core: `..`, `/`, `\` and other
+  reserved characters are removed, so nothing can be written outside
+  `Audio/`. Folders go at most 4 levels deep.
+- A file that stops halfway (browser closed, network lost) is deleted, so no
+  broken files are left behind.
+
+### Rebuilding
+
+The page is edited in `web/AudioUploader.template.html`. After a change run
+`python3 tools/build_audio_uploader.py`: it embeds the page and the logos in
+the plugin and writes the standalone `web/AudioUploader.html`.
+
+### Not verified on hardware
+
+Checked with a Lua 5.3 syntax check, a design-time check (every control
+placed, nothing outside the page), and an offline emulation of the Core
+(the Q-SYS socket, timer, file and control functions mocked on a PC, real
+network sockets). With that emulation both pages were driven in a real
+browser (Chromium): PIN, creating folders, uploading several files with
+byte-for-byte comparison, replacing a file, refusing wrong types and
+oversize files, deleting, path-traversal attempts, an upload cut off
+halfway, turning the page off and on, and the panel controls. It was not
+loaded in Q-SYS Designer or run on a Core. To confirm there:
+
+- that the Core firmware lets a plugin open a listening port
+  (`TcpSocketServer`) and write files with `io.open` / `dir.create` under
+  `media/Audio`;
+- the field names returned by `dir.get` (`name`, `type`, `size`); if the
+  file list stays empty, enable *Debug* and send the debug output;
+- the address shown in the **URL** box (taken from `Network.Interfaces`);
+- which file types your Audio Player version accepts – adjust *Allowed
+  Extensions* to match;
+- upload speed and Core memory use with very large files.
