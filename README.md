@@ -12,6 +12,7 @@ Q-SYS Designer plugins by Nikita Visual Arts.
 |---|---|---|
 | Mic Mixer | `plugins/NikitaMicMixer.qplug` | 2.0.0 |
 | RGBW Fixture Selector | `plugins/NikitaRGBWSelector.qplug` | 1.0.0 |
+| NEC NP-PA04UL-B Projector | `plugins/NikitaNECProjector.qplug` | 1.0.0 |
 
 ## Mic Mixer
 
@@ -150,3 +151,89 @@ assets/brand/                      logo files used by the plugin and this README
 
 ---
 Nikita Visual Arts – nikitavisual.art
+
+## NEC NP-PA04UL-B Projector
+
+Network control of an NEC NP-PA04UL-B projector: power on and off, shutter,
+picture mute, zoom, focus and lens shift, with live feedback. When the
+projector cannot be reached, the panel says so and asks the user to check
+that it is plugged in to power and to the network.
+
+### Install
+
+1. Copy `plugins/NikitaNECProjector.qplug` to your Q-SYS plugin folder.
+2. Restart Q-SYS Designer and drag **Nikita Visual Arts → NEC NP-PA04UL-B
+   Projector** into the schematic.
+3. Enter the projector's IP address in the **IP ADDRESS** box and keep
+   **CONNECT** on.
+
+### Projector setup
+
+- Give the projector a fixed IP address (or a DHCP reservation).
+- Set **Standby Mode** to **Network Standby** (the name depends on the
+  firmware). In the deepest power-saving standby the projector's network
+  port is switched off: it cannot be turned on over the network and the
+  plugin will show it as *not reachable*.
+- The plugin talks to TCP port **7142** (NEC control port). Change the
+  *Port* property only if your projector uses a different one.
+
+### Panel
+
+| Section | Controls |
+|---|---|
+| Connection | IP address, CONNECT, status, ONLINE LED, user message |
+| Power | ON, OFF, LEDs for On / Warm-up / Cool-down / Error, power and error text, SHUTTER, PICTURE MUTE |
+| Lens | ZOOM − / +, FOCUS − / +, lens-shift pad ▲ ▼ ◀ ▶, STOP |
+
+Lens buttons are hold-to-move: the lens moves while the button is pressed
+and stops when it is released. **STOP** stops every lens motor.
+
+### Properties
+
+| Property | Default | What it does |
+|---|---|---|
+| Port | 7142 | TCP control port. |
+| Poll Interval (s) | 2 | How often the projector state is read. |
+| Offline After (s) | 8 | Time without an answer before the projector is shown as not reachable. |
+| Message Language | English | Language of the user message and power text (English or Hebrew). |
+| Invert Horizontal Shift / Invert Vertical Shift | off | Swap the shift directions, for ceiling mounting or rear projection. |
+| Debug | off | Prints every command and reply to the debug output. |
+
+### Pins
+
+| Direction | Pins |
+|---|---|
+| Input | `PowerOn`, `PowerOff` |
+| Input / output | `Shutter`, `PictureMute` |
+| Output | `Online`, `Message`, `PowerState` |
+| Optional (enable in the control pins list) | `IPAddress`, `Connect`, `Status`, `PowerToggle`, `WarmingUp`, `CoolingDown`, `PowerText`, `ShutterClose`, `ShutterOpen`, `Error`, `ErrorText`, `ZoomPlus`, `ZoomMinus`, `FocusPlus`, `FocusMinus`, `ShiftUp`, `ShiftDown`, `ShiftLeft`, `ShiftRight`, `LensStop` |
+
+### Offline detection
+
+The projector is shown as **online** while it answers status requests.
+If the TCP connection fails, or the projector stops answering for longer
+than *Offline After*, the **Status** turns red, **ONLINE** goes off and the
+message reads *"Projector not reachable – check it is plugged in to power
+and network"* (or the Hebrew text). Wire the `Online` or `Message` pin to a
+UCI to show this to the user.
+
+### Not verified on hardware
+
+This release was checked with a Lua 5.3 syntax check and an offline mock of
+the plugin host and the projector (layout and control consistency, command
+bytes and checksums, reply parsing including split frames, lens move and
+stop order, offline detection, Hebrew messages). It was not loaded in Q-SYS
+Designer and was not tested on a real projector. These points come from the
+NEC projector control command reference and should be confirmed on site:
+
+- the position of the power and operation-status bytes in the RUNNING
+  STATUS reply, which drive the On / Warm-up / Cool-down feedback;
+- that the picture-mute state is the first byte of the MUTE STATUS reply;
+- which way "+" moves zoom and focus, and which way shift goes on your
+  mounting (use the invert properties if needed);
+- the shutter state is taken from the projector's answer to the shutter
+  command; it is not read back by polling, so a shutter changed from the
+  projector's own remote is not shown.
+
+If something does not behave as expected, turn on the *Debug* property and
+send the debug output together with the Q-SYS Designer version.
