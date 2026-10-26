@@ -12,7 +12,7 @@ Q-SYS Designer plugins by Nikita Visual Arts.
 |---|---|---|
 | Mic Mixer | `plugins/NikitaMicMixer.qplug` | 2.0.0 |
 | RGBW Fixture Selector | `plugins/NikitaRGBWSelector.qplug` | 1.0.0 |
-| NEC NP-PA04UL-B Projector | `plugins/NikitaNECProjector.qplug` | 1.0.0 |
+| NEC NP-PA04UL-B Projector | `plugins/NikitaNECProjector.qplug` | 1.1.0 |
 
 ## Mic Mixer
 
@@ -174,15 +174,17 @@ that it is plugged in to power and to the network.
   firmware). In the deepest power-saving standby the projector's network
   port is switched off: it cannot be turned on over the network and the
   plugin will show it as *not reachable*.
-- The plugin talks to TCP port **7142** (NEC control port). Change the
-  *Port* property only if your projector uses a different one.
+- The plugin sends commands on TCP port **7142** (NEC control port) and
+  reads power, picture mute and errors over **PJLink** (TCP 4352). PJLink
+  is on by default on NEC projectors. If a PJLink password is set in the
+  projector, enter the same password in the *PJLink Password* property.
 
 ### Panel
 
 | Section | Controls |
 |---|---|
 | Connection | IP address, CONNECT, status, ONLINE LED, user message |
-| Power | ON, OFF, LEDs for On / Warm-up / Cool-down / Error, power and error text, SHUTTER, PICTURE MUTE |
+| Power | ON, OFF buttons, LEDs for On / Off / Warm-up / Cool-down / Error, power and error text, SHUTTER, PICTURE MUTE |
 | Lens | ZOOM − / +, FOCUS − / +, lens-shift pad ▲ ▼ ◀ ▶, STOP |
 
 Lens buttons are hold-to-move: the lens moves while the button is pressed
@@ -192,7 +194,10 @@ and stops when it is released. **STOP** stops every lens motor.
 
 | Property | Default | What it does |
 |---|---|---|
-| Port | 7142 | TCP control port. |
+| Port | 7142 | NEC control port (commands, and the fallback feedback). |
+| Power Feedback | PJLink + NEC (recommended) | Where power, picture-mute and error feedback come from. *NEC only* reads the NEC status reply instead. |
+| PJLink Port | 4352 | PJLink port. |
+| PJLink Password | empty | The projector's PJLink password, if one is set. |
 | Poll Interval (s) | 2 | How often the projector state is read. |
 | Offline After (s) | 8 | Time without an answer before the projector is shown as not reachable. |
 | Message Language | English | Language of the user message and power text (English or Hebrew). |
@@ -205,8 +210,8 @@ and stops when it is released. **STOP** stops every lens motor.
 |---|---|
 | Input | `PowerOn`, `PowerOff` |
 | Input / output | `Shutter`, `PictureMute` |
-| Output | `Online`, `Message`, `PowerState` |
-| Optional (enable in the control pins list) | `IPAddress`, `Connect`, `Status`, `PowerToggle`, `WarmingUp`, `CoolingDown`, `PowerText`, `ShutterClose`, `ShutterOpen`, `Error`, `ErrorText`, `ZoomPlus`, `ZoomMinus`, `FocusPlus`, `FocusMinus`, `ShiftUp`, `ShiftDown`, `ShiftLeft`, `ShiftRight`, `LensStop` |
+| Output | `Online`, `Message`, `PowerState`, `OffState` |
+| Optional (enable in the control pins list) | `IPAddress`, `Connect`, `Status`, `PowerToggle`, `WarmingUp`, `CoolingDown`, `PowerText`, `ShutterClose`, `ShutterOpen`, `Error`, `ErrorText`, `FeedbackSource`, `ZoomPlus`, `ZoomMinus`, `FocusPlus`, `FocusMinus`, `ShiftUp`, `ShiftDown`, `ShiftLeft`, `ShiftRight`, `LensStop` |
 
 ### Offline detection
 
@@ -217,18 +222,40 @@ message reads *"Projector not reachable – check it is plugged in to power
 and network"* (or the Hebrew text). Wire the `Online` or `Message` pin to a
 UCI to show this to the user.
 
+### Power feedback
+
+The **FEEDBACK** line at the bottom of the panel shows where the state
+comes from: *PJLink* when PJLink answers, otherwise *NEC status*. With
+PJLink the power text reads Off (standby), Warming up, On or Cooling down,
+and the matching LED lights. If PJLink stops answering, the plugin falls
+back to the NEC status reply.
+
+The raw NEC status bytes are printed to the debug output whenever they
+change (`NEC running status: …`). If the state is still wrong, send those
+lines, taken once with the projector on and once off.
+
+### What changed in 1.1.0
+
+- Power feedback is read over PJLink, a standard protocol, because the
+  power byte in the NEC status reply is not in the same place on every
+  NEC model. In 1.0.0 this caused the power state to stay on *Unknown*.
+- New **OFF** LED and `OffState` pin; the power text shows *Off (standby)*.
+- NEC replies are matched by their command byte, so a late reply can no
+  longer be taken for the answer to another command.
+- Picture mute and errors are read over PJLink (AVMT and ERST).
+- Picture mute and shutter feedback reset when the projector turns off.
+
 ### Not verified on hardware
 
-This release was checked with a Lua 5.3 syntax check and an offline mock of
-the plugin host and the projector (layout and control consistency, command
-bytes and checksums, reply parsing including split frames, lens move and
-stop order, offline detection, Hebrew messages). It was not loaded in Q-SYS
-Designer and was not tested on a real projector. These points come from the
-NEC projector control command reference and should be confirmed on site:
+Version 1.0.0 was loaded on a Core and connected to the projector; its power
+feedback stayed on *Unknown*, which 1.1.0 fixes. Version 1.1.0 itself was
+checked with a Lua 5.3 syntax check and an offline mock of
+the plugin host and the projector (NEC and PJLink, including PJLink
+password authentication, checked against a reference MD5). It has not yet
+been run on the projector. To confirm on site:
 
-- the position of the power and operation-status bytes in the RUNNING
-  STATUS reply, which drive the On / Warm-up / Cool-down feedback;
-- that the picture-mute state is the first byte of the MUTE STATUS reply;
+- that PJLink is enabled on the projector (Network settings);
+- the NEC status-byte layout, only if PJLink is not used;
 - which way "+" moves zoom and focus, and which way shift goes on your
   mounting (use the invert properties if needed);
 - the shutter state is taken from the projector's answer to the shutter
