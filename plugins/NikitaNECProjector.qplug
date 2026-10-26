@@ -12,8 +12,8 @@
 
 PluginInfo = {
   Name = "Nikita Visual Arts~NEC NP-PA04UL-B Projector",
-  Version = "1.0.0",
-  BuildVersion = "1.0.0.0",
+  Version = "1.1.0",
+  BuildVersion = "1.1.0.0",
   Id = "b3f0d6e2-7a41-4c39-9e55-2d8a61c4f0a7",
   Author = "Nikita Visual Arts – nikitavisual.art",
   Description = "Network control of the NEC NP-PA04UL-B projector: power, shutter, picture mute, zoom, focus, lens shift and online status. Nikita Visual Arts – nikitavisual.art",
@@ -51,6 +51,10 @@ NikitaAssets = {
 -- Shared constants (design time AND runtime)
 -- ============================================================
 DEFAULT_PORT = 7142
+PJLINK_PORT = 4352
+
+FEEDBACK_PJLINK = "PJLink + NEC (recommended)"
+FEEDBACK_NEC = "NEC only"
 
 LANG_EN = "English"
 LANG_HE = "Hebrew"
@@ -78,6 +82,9 @@ end
 function GetProperties()
   return {
     { Name = "Port", Type = "integer", Min = 1, Max = 65535, Value = DEFAULT_PORT },
+    { Name = "Power Feedback", Type = "enum", Choices = { FEEDBACK_PJLINK, FEEDBACK_NEC }, Value = FEEDBACK_PJLINK },
+    { Name = "PJLink Port", Type = "integer", Min = 1, Max = 65535, Value = PJLINK_PORT },
+    { Name = "PJLink Password", Type = "string", Value = "" },
     { Name = "Poll Interval (s)", Type = "integer", Min = 1, Max = 30, Value = 2 },
     { Name = "Offline After (s)", Type = "integer", Min = 3, Max = 120, Value = 8 },
     { Name = "Message Language", Type = "enum", Choices = { LANG_EN, LANG_HE }, Value = LANG_EN },
@@ -107,6 +114,7 @@ function GetControls(props)
     { Name = "PowerOff", ControlType = "Button", ButtonType = "Trigger", Count = 1, PinStyle = "Input" },
     { Name = "PowerToggle", ControlType = "Button", ButtonType = "Toggle", Count = 1, UserPin = true, PinStyle = "Both" },
     { Name = "PowerState", ControlType = "Indicator", IndicatorType = "Led", Count = 1, PinStyle = "Output" },
+    { Name = "OffState", ControlType = "Indicator", IndicatorType = "Led", Count = 1, PinStyle = "Output" },
     { Name = "WarmingUp", ControlType = "Indicator", IndicatorType = "Led", Count = 1, UserPin = true, PinStyle = "Output" },
     { Name = "CoolingDown", ControlType = "Indicator", IndicatorType = "Led", Count = 1, UserPin = true, PinStyle = "Output" },
     { Name = "PowerText", ControlType = "Indicator", IndicatorType = "Text", Count = 1, UserPin = true, PinStyle = "Output" },
@@ -120,6 +128,7 @@ function GetControls(props)
     -- Fault feedback
     { Name = "Error", ControlType = "Indicator", IndicatorType = "Led", Count = 1, UserPin = true, PinStyle = "Output" },
     { Name = "ErrorText", ControlType = "Indicator", IndicatorType = "Text", Count = 1, UserPin = true, PinStyle = "Output" },
+    { Name = "FeedbackSource", ControlType = "Indicator", IndicatorType = "Text", Count = 1, UserPin = true, PinStyle = "Output" },
   }
 
   -- Lens: momentary buttons, the lens moves while the button is held.
@@ -217,14 +226,18 @@ function GetControlLayout(props)
   button("PowerOff", "OFF", "Trigger", Nikita.Fault, { LX + 12 + half + G, powerY + 30 }, { half, 32 }, 12)
 
   local fy = powerY + 70
-  led("PowerState", Nikita.OK, { LX + 12, fy + 2 })
-  caption("ON", { LX + 30, fy + 4 }, { 18, 10 }, "Left")
-  led("WarmingUp", Nikita.Warn, { LX + 54, fy + 2 })
-  caption("WARM", { LX + 72, fy + 4 }, { 30, 10 }, "Left")
-  led("CoolingDown", Nikita.Violet, { LX + 108, fy + 2 })
-  caption("COOL", { LX + 126, fy + 4 }, { 30, 10 }, "Left")
-  led("Error", Nikita.Fault, { LX + 162, fy + 2 })
-  caption("ERROR", { LX + 180, fy + 4 }, { 40, 10 }, "Left")
+  local leds = {
+    { "PowerState", Nikita.OK, "ON" },
+    { "OffState", Nikita.Muted, "OFF" },
+    { "WarmingUp", Nikita.Warn, "WARM" },
+    { "CoolingDown", Nikita.Violet, "COOL" },
+    { "Error", Nikita.Fault, "ERROR" },
+  }
+  for k, l in ipairs(leds) do
+    local lx = LX + 12 + (k - 1) * 48
+    led(l[1], l[2], { lx, fy + 2 })
+    caption(l[3], { lx + 18, fy + 4 }, { 30, 10 }, "Left")
+  end
   textOut("PowerText", { LX + 12, fy + 22 }, { COL_W - 24, 20 }, 10, "Center")
   textOut("ErrorText", { LX + 12, fy + 46 }, { COL_W - 24, 20 }, 9, "Center")
 
@@ -258,7 +271,8 @@ function GetControlLayout(props)
   panel({ LX, brandY }, { COL_W, BRAND_H })
   table.insert(graphics, { Type = "Image", Image = NikitaAssets.Logo, Position = { LX + 12, brandY + 14 }, Size = { 100, 36 } })
   table.insert(graphics, { Type = "Label", Text = BrandName .. " – " .. BrandSite, FontSize = 9, HTextAlign = "Left", Color = Nikita.Muted, Position = { LX + 12, brandY + 56 }, Size = { COL_W - 24, 14 } })
-  table.insert(graphics, { Type = "Label", Text = "NEC binary protocol · TCP " .. tostring(props["Port"].Value), FontSize = 8, HTextAlign = "Left", Color = Nikita.Muted, Position = { LX + 12, brandY + 74 }, Size = { COL_W - 24, 12 } })
+  caption("FEEDBACK", { LX + 12, brandY + 76 }, { 56, 10 }, "Left")
+  textOut("FeedbackSource", { LX + 68, brandY + 73 }, { COL_W - 24 - 56 - 44, 16 }, 8, "Left")
   table.insert(graphics, { Type = "Label", Text = "v" .. PluginInfo.Version, FontSize = 8, HTextAlign = "Right", Color = Nikita.Muted, Position = { LX + 12, brandY + 74 }, Size = { COL_W - 24, 12 } })
 
   return layout, graphics
@@ -273,6 +287,9 @@ if Controls then
   print(string.format("%s NEC NP-PA04UL-B Projector %s – %s", BrandName, PluginInfo.Version, BrandSite))
 
   local PORT = Properties["Port"].Value
+  local USE_PJLINK = Properties["Power Feedback"].Value == FEEDBACK_PJLINK
+  local PJ_PORT = Properties["PJLink Port"].Value
+  local PJ_PASSWORD = Properties["PJLink Password"].Value or ""
   local POLL = Properties["Poll Interval (s)"].Value
   local OFFLINE_AFTER = Properties["Offline After (s)"].Value
   local HEBREW = Properties["Message Language"].Value == LANG_HE
@@ -290,19 +307,165 @@ if Controls then
     connecting = { "Connecting to the projector…", "מתחבר למקרן…" },
     offline    = { "Projector not reachable – check it is plugged in to power and network", "המקרן לא מחובר – יש לוודא שהוא מחובר לחשמל ולרשת" },
     online     = { "Projector online", "המקרן מחובר" },
-    standby    = { "Standby", "המתנה" },
-    netStandby = { "Network standby", "המתנה (רשת)" },
-    powerOn    = { "On", "דולק" },
+    off        = { "Off (standby)", "כבוי (המתנה)" },
+    on         = { "On", "דולק" },
     warming    = { "Warming up…", "מתחמם…" },
     cooling    = { "Cooling down…", "מתקרר…" },
-    errStandby = { "Standby (error)", "המתנה (תקלה)" },
+    errStandby = { "Off (error)", "כבוי (תקלה)" },
     unknown    = { "Unknown", "לא ידוע" },
     projError  = { "Projector reports an error", "המקרן מדווח על תקלה" },
-    noError    = { "", "" },
+    pjAuth     = { "PJLink password is wrong", "סיסמת PJLink שגויה" },
   }
   local function T(key) return TEXT[key][HEBREW and 2 or 1] end
 
-  -- ---------- NEC protocol ----------
+  local function now() return os.clock() end
+
+  local function hex(s)
+    return (s:gsub(".", function(c) return string.format("%02X ", c:byte()) end))
+  end
+
+  -- ---------- MD5 (PJLink password authentication) ----------
+  local md5hex
+  do
+    local K, S = {}, {
+      7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22,
+      5,  9, 14, 20, 5,  9, 14, 20, 5,  9, 14, 20, 5,  9, 14, 20,
+      4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23,
+      6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21,
+    }
+    for i = 0, 63 do K[i + 1] = math.floor(math.abs(math.sin(i + 1)) * 2^32) & 0xFFFFFFFF end
+    local function rotl(x, n) return ((x << n) | (x >> (32 - n))) & 0xFFFFFFFF end
+    md5hex = function(msg)
+      local len = #msg
+      msg = msg .. "\128" .. string.rep("\0", (55 - len) % 64) .. string.pack("<I8", (len * 8) & 0xFFFFFFFFFFFFFFFF)
+      local a0, b0, c0, d0 = 0x67452301, 0xEFCDAB89, 0x98BADCFE, 0x10325476
+      for chunk = 1, #msg, 64 do
+        local M = { string.unpack("<" .. string.rep("I4", 16), msg, chunk) }
+        local A, B, C, D = a0, b0, c0, d0
+        for i = 0, 63 do
+          local F, g
+          if i < 16 then F = (B & C) | (~B & D); g = i
+          elseif i < 32 then F = (D & B) | (~D & C); g = (5 * i + 1) % 16
+          elseif i < 48 then F = B ~ C ~ D; g = (3 * i + 5) % 16
+          else F = C ~ (B | ~D); g = (7 * i) % 16 end
+          F = (F + A + K[i + 1] + M[g + 1]) & 0xFFFFFFFF
+          A, D, C = D, C, B
+          B = (B + rotl(F, S[i + 1])) & 0xFFFFFFFF
+        end
+        a0 = (a0 + A) & 0xFFFFFFFF; b0 = (b0 + B) & 0xFFFFFFFF
+        c0 = (c0 + C) & 0xFFFFFFFF; d0 = (d0 + D) & 0xFFFFFFFF
+      end
+      return (string.pack("<I4I4I4I4", a0, b0, c0, d0):gsub(".", function(c) return string.format("%02x", c:byte()) end))
+    end
+  end
+
+  -- ---------- Feedback ----------
+  local STATUS_OK, STATUS_FAULT, STATUS_NOT_PRESENT, STATUS_INIT = 0, 2, 3, 5
+
+  local power = nil              -- "on", "off", "warming", "cooling", "errStandby", "unknown"
+  local shutterClosed = false
+
+  local function setStatus(code, text)
+    Controls.Status.Value = code
+    Controls.Status.String = text
+  end
+
+  local function setMessage(text)
+    if Controls.Message.String ~= text then Controls.Message.String = text end
+  end
+
+  local function setShutterFeedback(closed)
+    shutterClosed = closed
+    Controls.Shutter.Boolean = closed
+    Controls.Shutter.Legend = closed and "SHUTTER CLOSED" or "SHUTTER OPEN"
+  end
+
+  local function setPower(state)
+    if power ~= state then dbg("Power state: %s", tostring(state)) end
+    local wasOn = power == "on" or power == "warming"
+    power = state
+    local on = state == "on"
+    local warming = state == "warming"
+    Controls.PowerState.Boolean = on
+    Controls.OffState.Boolean = state == "off" or state == "errStandby"
+    Controls.WarmingUp.Boolean = warming
+    Controls.CoolingDown.Boolean = state == "cooling"
+    Controls.PowerText.String = state and T(state) or "—"
+    -- The toggle follows the projector (on or warming = on).
+    Controls.PowerToggle.Boolean = on or warming
+    -- Picture mute and shutter are released when the projector turns off.
+    if wasOn and not (on or warming) then
+      Controls.PictureMute.Boolean = false
+      setShutterFeedback(false)
+    end
+  end
+
+  local function setError(any, text)
+    Controls.Error.Boolean = any
+    Controls.ErrorText.String = any and text or ""
+  end
+
+  local function clearFeedback()
+    setPower(nil)
+    setError(false)
+    Controls.FeedbackSource.String = ""
+  end
+
+  -- ---------- Link state ----------
+  local necConnected = false
+  local necLastReply = nil
+  local necConnectedSince = 0
+  local pjLastOk = nil           -- last complete PJLink exchange
+  local pjAuthError = false
+  local everReplied = false
+
+  local function recent(t) return t ~= nil and (now() - t) < OFFLINE_AFTER end
+  local function pjActive() return USE_PJLINK and recent(pjLastOk) end
+  local function isOnline() return (necConnected and recent(necLastReply)) or pjActive() end
+
+  local function refreshOnline()
+    local ip = Controls.IPAddress.String
+    if ip == "" then
+      Controls.Online.Boolean = false
+      setStatus(STATUS_NOT_PRESENT, "No IP address")
+      setMessage(T("noIp"))
+      return
+    end
+    if not Controls.Connect.Boolean then
+      Controls.Online.Boolean = false
+      setStatus(STATUS_NOT_PRESENT, "Disabled")
+      setMessage(T("disabled"))
+      return
+    end
+    if isOnline() then
+      Controls.Online.Boolean = true
+      if pjAuthError then
+        setStatus(STATUS_FAULT, "PJLink password")
+        setMessage(T("pjAuth"))
+      elseif Controls.Error.Boolean then
+        setStatus(STATUS_FAULT, "Projector error")
+        setMessage(T("projError"))
+      else
+        setStatus(STATUS_OK, "Online")
+        setMessage(T("online"))
+      end
+      Controls.FeedbackSource.String = pjActive() and ("PJLink · TCP " .. PJ_PORT) or ("NEC status · TCP " .. PORT)
+    else
+      Controls.Online.Boolean = false
+      if not everReplied and necConnected and now() - necConnectedSince < OFFLINE_AFTER then
+        setStatus(STATUS_INIT, "Connecting")
+        setMessage(T("connecting"))
+      else
+        setStatus(STATUS_FAULT, "Offline – check power and network")
+        setMessage(T("offline"))
+        clearFeedback()
+      end
+    end
+  end
+
+  -- ============================================================
+  -- NEC binary protocol (control, and fallback feedback)
+  -- ============================================================
   -- Every frame: header, command, ID1, ID2, data length, data..., checksum.
   -- The checksum is the low byte of the sum of all preceding bytes.
   local function frame(bytes)
@@ -321,7 +484,6 @@ if Controls then
     shutterClose   = frame({ 0x02, 0x16, 0x00, 0x00, 0x00 }),
     shutterOpen    = frame({ 0x02, 0x17, 0x00, 0x00, 0x00 }),
     runningStatus  = frame({ 0x00, 0x85, 0x00, 0x00, 0x01, 0x01 }),
-    muteStatus     = frame({ 0x00, 0x85, 0x00, 0x00, 0x01, 0x03 }),
     errorStatus    = frame({ 0x00, 0x88, 0x00, 0x00, 0x00 }),
   }
 
@@ -331,131 +493,22 @@ if Controls then
     return frame({ 0x02, 0x18, 0x00, 0x00, 0x02, target, drive })
   end
 
-  local function hex(s)
-    return (s:gsub(".", function(c) return string.format("%02X ", c:byte()) end))
-  end
-
-  -- ---------- State ----------
   local sock = TcpSocket.New()
   sock.ReadTimeout = 0
   sock.WriteTimeout = 5
   sock.ReconnectTimeout = 5
 
-  local connected = false
-  local lastReply = nil          -- os.clock() of the last valid frame
-  local everReplied = false
-  local connectedSince = 0
   local rxBuf = ""
-  local queue = {}               -- pending commands { data, name }
+  local queue = {}               -- pending commands { name, data, cmd, urgent }
   local inFlight = nil           -- command waiting for its reply
   local inFlightSince = 0
-  local REPLY_TIMEOUT = 3
+  local REPLY_TIMEOUT = 5
   local pollStep = 0
-  local shutterClosed = false
-  local opStatus = nil           -- last operation status code
   local lensHeld = {}            -- target -> drive while a button is held
+  local lastRawStatus = nil
 
-  local function now() return os.clock() end
-
-  -- ---------- Feedback helpers ----------
-  local STATUS_OK, STATUS_FAULT, STATUS_NOT_PRESENT, STATUS_INIT = 0, 2, 3, 5
-
-  local function setStatus(code, text)
-    Controls.Status.Value = code
-    Controls.Status.String = text
-  end
-
-  local function setMessage(text)
-    if Controls.Message.String ~= text then Controls.Message.String = text end
-  end
-
-  local function setPowerFeedback(on, warming, cooling, text)
-    Controls.PowerState.Boolean = on
-    Controls.WarmingUp.Boolean = warming
-    Controls.CoolingDown.Boolean = cooling
-    Controls.PowerText.String = text
-    -- The toggle follows the projector (on or warming = on).
-    Controls.PowerToggle.Boolean = on or warming
-  end
-
-  local function setShutterFeedback(closed)
-    shutterClosed = closed
-    Controls.Shutter.Boolean = closed
-    Controls.Shutter.Legend = closed and "SHUTTER CLOSED" or "SHUTTER OPEN"
-  end
-
-  local function clearFeedback()
-    opStatus = nil
-    setPowerFeedback(false, false, false, "—")
-    Controls.Error.Boolean = false
-    Controls.ErrorText.String = ""
-  end
-
-  local function isOnline()
-    return connected and lastReply ~= nil and (now() - lastReply) < OFFLINE_AFTER
-  end
-
-  local function refreshOnline()
-    local ip = Controls.IPAddress.String
-    if ip == "" then
-      Controls.Online.Boolean = false
-      setStatus(STATUS_NOT_PRESENT, "No IP address")
-      setMessage(T("noIp"))
-      return
-    end
-    if not Controls.Connect.Boolean then
-      Controls.Online.Boolean = false
-      setStatus(STATUS_NOT_PRESENT, "Disabled")
-      setMessage(T("disabled"))
-      return
-    end
-    if isOnline() then
-      Controls.Online.Boolean = true
-      if Controls.Error.Boolean then
-        setStatus(STATUS_FAULT, "Projector error")
-        setMessage(T("projError"))
-      else
-        setStatus(STATUS_OK, "Online")
-        setMessage(T("online"))
-      end
-    else
-      Controls.Online.Boolean = false
-      if not everReplied and connected and now() - connectedSince < OFFLINE_AFTER then
-        setStatus(STATUS_INIT, "Connecting")
-        setMessage(T("connecting"))
-      else
-        setStatus(STATUS_FAULT, "Offline – check power and network")
-        setMessage(T("offline"))
-        clearFeedback()
-      end
-    end
-  end
-
-  -- Operation status codes from the RUNNING STATUS reply.
-  local function applyOpStatus(code, powerByte, coolingByte, onOffByte)
-    opStatus = code
-    if code == 0x04 then
-      -- Power on; the power-on process byte tells a projector still warming up.
-      local warming = onOffByte == 0x01
-      setPowerFeedback(not warming, warming, false, warming and T("warming") or T("powerOn"))
-    elseif code == 0x05 or coolingByte == 0x01 then
-      setPowerFeedback(false, false, true, T("cooling"))
-    elseif code == 0x06 then
-      setPowerFeedback(false, false, false, T("errStandby"))
-    elseif code == 0x10 then
-      setPowerFeedback(false, false, false, T("netStandby"))
-    elseif code == 0x00 or code == 0x0F then
-      setPowerFeedback(false, false, false, T("standby"))
-    elseif powerByte == 0x01 then
-      setPowerFeedback(true, false, false, T("powerOn"))
-    else
-      setPowerFeedback(false, false, false, T("unknown"))
-    end
-  end
-
-  -- ---------- Sending ----------
   local function sendNext()
-    if inFlight or #queue == 0 or not connected then return end
+    if inFlight or #queue == 0 or not necConnected then return end
     inFlight = table.remove(queue, 1)
     inFlightSince = now()
     dbg("TX %-14s %s", inFlight.name, hex(inFlight.data))
@@ -465,12 +518,12 @@ if Controls then
   -- urgent = jump ahead of polls (lens moves and stops must not wait),
   -- while staying in order with the other urgent commands.
   local function send(name, data, urgent)
-    if not connected then return end
-    -- Drop duplicate polls so the queue never grows while the link is slow.
+    if not necConnected then return end
+    -- Drop duplicates so the queue never grows while the link is slow.
     for _, c in ipairs(queue) do
       if c.name == name and c.data == data then return end
     end
-    local c = { name = name, data = data, urgent = urgent }
+    local c = { name = name, data = data, cmd = data:byte(2), urgent = urgent }
     if urgent then
       local pos = 1
       while queue[pos] and queue[pos].urgent do pos = pos + 1 end
@@ -481,7 +534,32 @@ if Controls then
     sendNext()
   end
 
-  -- ---------- Receiving ----------
+  -- RUNNING STATUS reply. The byte layout differs between NEC models, so
+  -- the operation-status byte is used only when it holds a known value;
+  -- otherwise the power byte decides. The raw bytes are printed whenever
+  -- they change so the layout can be checked on site.
+  local OP_STATUS = { [0x00] = "off", [0x04] = "on", [0x05] = "cooling", [0x06] = "errStandby", [0x0F] = "off", [0x10] = "off" }
+
+  local function necRunningStatus(data)
+    local raw = hex(string.char(table.unpack(data)))
+    if raw ~= lastRawStatus then
+      print("NEC running status: " .. raw)
+      lastRawStatus = raw
+    end
+    if pjActive() then return end
+    local state = OP_STATUS[data[6]]
+    if data[4] == 0x01 then
+      state = "cooling"
+    elseif state == "on" and data[5] == 0x01 then
+      state = "warming"
+    elseif state == nil then
+      if data[3] == 0x01 then state = "on"
+      elseif data[3] == 0x00 then state = "off"
+      else state = "unknown" end
+    end
+    setPower(state)
+  end
+
   local function handleFrame(f)
     local b = { f:byte(1, -1) }
     local header, cmd = b[1], b[2]
@@ -490,31 +568,27 @@ if Controls then
     for i = 1, n do data[i] = b[5 + i] end
     dbg("RX %s", hex(f))
 
-    lastReply = now()
+    necLastReply = now()
     everReplied = true
 
+    -- Every reply is recognised by its own command byte, so a late reply
+    -- to a command that already timed out cannot be taken for another one.
     if header == 0x20 and cmd == 0x85 then
-      -- RUNNING STATUS (16 data bytes) or MUTE STATUS reply; told apart
-      -- by which request is in flight.
-      if inFlight and inFlight.name == "muteStatus" then
-        if data[1] ~= nil then Controls.PictureMute.Boolean = data[1] == 0x01 end
-      elseif n >= 6 then
-        applyOpStatus(data[6], data[3], data[4], data[5])
-      end
+      if n >= 6 then necRunningStatus(data) end
     elseif header == 0x20 and cmd == 0x88 then
-      -- ERROR STATUS: any bit set in the error bytes means a fault.
-      local codes, any = {}, false
-      for i = 1, n do
-        if data[i] ~= 0 then any = true end
-        codes[i] = string.format("%02X", data[i])
+      if not pjActive() then
+        local codes, any = {}, false
+        for i = 1, n do
+          if data[i] ~= 0 then any = true end
+          codes[i] = string.format("%02X", data[i])
+        end
+        setError(any, T("projError") .. " (" .. table.concat(codes, " ") .. ")")
       end
-      Controls.Error.Boolean = any
-      Controls.ErrorText.String = any and (T("projError") .. " (" .. table.concat(codes, " ") .. ")") or ""
     elseif header == 0x22 then
       if cmd == 0x00 then
-        setPowerFeedback(false, true, false, T("warming"))
+        if power ~= "on" then setPower("warming") end
       elseif cmd == 0x01 then
-        setPowerFeedback(false, false, true, T("cooling"))
+        if power ~= "off" then setPower("cooling") end
       elseif cmd == 0x10 then
         Controls.PictureMute.Boolean = true
       elseif cmd == 0x11 then
@@ -528,10 +602,11 @@ if Controls then
       -- Error reply: DATA01/DATA02 give the reason (e.g. command not
       -- accepted in the current power state).
       print(string.format("Projector refused command %02Xh (error %02X %02X)", cmd, data[1] or 0, data[2] or 0))
-      if cmd == 0x16 or cmd == 0x17 then setShutterFeedback(shutterClosed) end
     end
 
-    inFlight = nil
+    if inFlight and inFlight.cmd == cmd then
+      inFlight = nil
+    end
     refreshOnline()
     sendNext()
   end
@@ -558,48 +633,145 @@ if Controls then
     end
   end
 
-  -- ---------- Socket ----------
-  local function disconnect()
-    connected = false
-    queue, inFlight, rxBuf = {}, nil, ""
-    sock:Disconnect()
+  sock.EventHandler = function(s, evt, err)
+    if evt == TcpSocket.Events.Connected then
+      dbg("NEC connected")
+      necConnected = true
+      necConnectedSince = now()
+      queue, inFlight, rxBuf = {}, nil, ""
+      send("runningStatus", CMD.runningStatus)
+    elseif evt == TcpSocket.Events.Data then
+      rxBuf = rxBuf .. s:Read(s.BufferLength)
+      parse()
+    elseif evt == TcpSocket.Events.Reconnect then
+      dbg("NEC reconnecting")
+    else
+      -- Closed, Error or Timeout: the socket reconnects by itself.
+      dbg("NEC socket %s %s", tostring(evt), tostring(err or ""))
+      necConnected = false
+      queue, inFlight, rxBuf = {}, nil, ""
+    end
+    refreshOnline()
   end
 
+  -- ============================================================
+  -- PJLink (power, picture mute and error feedback)
+  -- ============================================================
+  -- One short session per poll: read the greeting, ask POWR, AVMT and
+  -- ERST, then close. The projector drops idle PJLink sessions on its own.
+  local PJ_QUERIES = { "%1POWR ?", "%1AVMT ?", "%1ERST ?" }
+  local PJ_POWER = { ["0"] = "off", ["1"] = "on", ["2"] = "cooling", ["3"] = "warming" }
+  local ERST_NAMES = { "fan", "lamp/light", "temperature", "cover", "filter", "other" }
+  local pj = nil                 -- current session { sock, buf, step, prefix, started }
+
+  local function pjEnd(ok)
+    if not pj then return end
+    local s = pj.sock
+    pj = nil
+    s:Disconnect()
+    if ok then pjLastOk = now() end
+    refreshOnline()
+  end
+
+  local function pjSendNext()
+    pj.step = pj.step + 1
+    local q = PJ_QUERIES[pj.step]
+    if not q then pjEnd(true) return end
+    dbg("PJ TX %s", q)
+    pj.sock:Write(pj.prefix .. q .. "\r")
+    pj.prefix = ""
+  end
+
+  local function pjLine(line)
+    dbg("PJ RX %s", line)
+    if pj.step == 0 then
+      if line:match("^PJLINK 0") then
+        pj.prefix = ""
+      elseif line:match("^PJLINK 1 ") then
+        pj.prefix = md5hex(line:sub(10) .. PJ_PASSWORD)
+      elseif line:match("^PJLINK ERRA") then
+        pjAuthError = true
+        pjEnd(false)
+        return
+      else
+        return
+      end
+      pjSendNext()
+      return
+    end
+    if line:match("^PJLINK ERRA") then
+      pjAuthError = true
+      pjEnd(false)
+      return
+    end
+    pjAuthError = false
+    local key, val = line:match("^%%1(%u%u%u%u)=(.*)$")
+    if key == "POWR" then
+      if PJ_POWER[val] then setPower(PJ_POWER[val]) end
+    elseif key == "AVMT" then
+      -- 11 / 31 = video mute on; 10, 20, 21, 30 = video shown.
+      if val:match("^%d%d$") then Controls.PictureMute.Boolean = (val == "11" or val == "31") end
+    elseif key == "ERST" then
+      if val:match("^%d%d%d%d%d%d$") then
+        local bad = {}
+        for i = 1, 6 do
+          local c = val:sub(i, i)
+          if c ~= "0" then table.insert(bad, ERST_NAMES[i] .. (c == "2" and " error" or " warning")) end
+        end
+        setError(#bad > 0, T("projError") .. ": " .. table.concat(bad, ", "))
+      end
+    end
+    if key then pjSendNext() end
+  end
+
+  local function pjPoll()
+    local ip = Controls.IPAddress.String
+    if not USE_PJLINK or ip == "" or not Controls.Connect.Boolean then return end
+    if pj then
+      if now() - pj.started < 5 then return end
+      dbg("PJLink session timed out")
+      pjEnd(false)
+    end
+    local s = TcpSocket.New()
+    s.ReadTimeout = 0
+    s.WriteTimeout = 5
+    pj = { sock = s, buf = "", step = 0, prefix = "", started = now() }
+    local session = pj
+    s.EventHandler = function(sk, evt)
+      if pj ~= session then return end
+      if evt == TcpSocket.Events.Data then
+        pj.buf = pj.buf .. sk:Read(sk.BufferLength)
+        while pj == session do
+          local line, rest = pj.buf:match("^(.-)\r\n?(.*)$")
+          if not line then break end
+          pj.buf = rest
+          pjLine(line)
+        end
+      elseif evt ~= TcpSocket.Events.Connected and evt ~= TcpSocket.Events.Reconnect then
+        pjEnd(false)
+      end
+    end
+    s:Connect(ip, PJ_PORT)
+  end
+
+  -- ---------- Connect / poll ----------
   local function connect()
-    disconnect()
-    lastReply, everReplied = nil, false
+    necConnected = false
+    queue, inFlight, rxBuf = {}, nil, ""
+    sock:Disconnect()
+    pjEnd(false)
+    necLastReply, pjLastOk, everReplied, pjAuthError = nil, nil, false, false
+    lastRawStatus = nil
     clearFeedback()
     local ip = Controls.IPAddress.String
     if ip ~= "" and Controls.Connect.Boolean then
       dbg("Connecting to %s:%d", ip, PORT)
       sock:Connect(ip, PORT)
+      pjPoll()
     end
     refreshOnline()
   end
 
-  sock.EventHandler = function(s, evt, err)
-    if evt == TcpSocket.Events.Connected then
-      dbg("Connected")
-      connected = true
-      connectedSince = now()
-      queue, inFlight, rxBuf = {}, nil, ""
-      send("runningStatus", CMD.runningStatus)
-      send("muteStatus", CMD.muteStatus)
-    elseif evt == TcpSocket.Events.Data then
-      rxBuf = rxBuf .. s:Read(s.BufferLength)
-      parse()
-    elseif evt == TcpSocket.Events.Reconnect then
-      dbg("Reconnecting")
-    else
-      -- Closed, Error or Timeout: the socket reconnects by itself.
-      dbg("Socket %s %s", tostring(evt), tostring(err or ""))
-      connected = false
-      queue, inFlight, rxBuf = {}, nil, ""
-    end
-    refreshOnline()
-  end
-
-  -- ---------- Poll ----------
   local pollTimer = Timer.New()
   pollTimer.EventHandler = function()
     -- A command that never got a reply is dropped so the queue moves on.
@@ -608,12 +780,12 @@ if Controls then
       inFlight = nil
       sendNext()
     end
-    if connected then
+    if necConnected then
       pollStep = pollStep % 3 + 1
       send("runningStatus", CMD.runningStatus)
-      if pollStep == 2 then send("muteStatus", CMD.muteStatus) end
-      if pollStep == 3 then send("errorStatus", CMD.errorStatus) end
+      if pollStep == 3 and not pjActive() then send("errorStatus", CMD.errorStatus) end
     end
+    pjPoll()
     refreshOnline()
   end
 
@@ -645,7 +817,6 @@ if Controls then
   Controls.PictureMute.EventHandler = function(c)
     local want = c.Boolean
     send(want and "pictureMuteOn" or "pictureMuteOff", want and CMD.pictureMuteOn or CMD.pictureMuteOff)
-    send("muteStatus", CMD.muteStatus)
   end
 
   for _, btn in ipairs(LENS_BUTTONS) do
