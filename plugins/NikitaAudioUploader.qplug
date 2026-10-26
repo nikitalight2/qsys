@@ -14,8 +14,8 @@
 
 PluginInfo = {
   Name = "Nikita Visual Arts~Audio File Uploader",
-  Version = "1.0.0",
-  BuildVersion = "1.0.0.0",
+  Version = "1.1.0",
+  BuildVersion = "1.1.0.0",
   Id = "5e7c2a91-3d4b-4f6e-8a10-c9b2e47d6f35",
   Author = "Nikita Visual Arts – nikitavisual.art",
   Description = "Upload music and audio files to the Core from a web page on the local network, into a folder the plugin creates. Nikita Visual Arts – nikitavisual.art",
@@ -55,7 +55,7 @@ NikitaAssets = {
 -- ============================================================
 DEFAULT_PORT = 8080
 DEFAULT_FOLDER = "Uploads"
-DEFAULT_EXTENSIONS = "wav,mp3,flac,aac,m4a,ogg,aif,aiff"
+DEFAULT_EXTENSIONS = "wav,mp3,flac"   -- the formats QSC lists for the Audio Player
 MEDIA_ROOT = "media/Audio"   -- shown to users as "Audio/"
 
 function GetColor(props) return Nikita.BG end
@@ -337,6 +337,7 @@ footer img { height: 22px; width: auto; }
   var base = "";            // "" when served by the Core, "http://ip:port" when opened from disk
   var info = null;
   var busy = false;
+  var existing = {};        // names already in the selected folder
 
   function store(k, v) { try { localStorage.setItem(k, v); } catch (e) {} }
   function recall(k) { try { return localStorage.getItem(k) || ""; } catch (e) { return ""; } }
@@ -397,7 +398,9 @@ footer img { height: 22px; width: auto; }
   function loadFiles() {
     return request("GET", "/api/files", { folder: folder() }).then(function (d) {
       var ul = $("files"); ul.innerHTML = "";
+      existing = {};
       (d.files || []).forEach(function (f) {
+        existing[f.name] = true;
         var li = document.createElement("li");
         var n = document.createElement("span"); n.className = "name"; n.textContent = f.name; n.title = f.name;
         var s = document.createElement("span"); s.className = "size"; s.textContent = fmtSize(f.size);
@@ -420,18 +423,21 @@ footer img { height: 22px; width: auto; }
     if (!served) {
       var a = $("coreAddr").value.trim().replace(/^https?:\/\//, "").replace(/\/+$/, "");
       if (!a) { setStatus("Enter the Core address", "err"); return; }
+      if (!/:\d+$/.test(a)) a += ":8080";   // the plugin's default port
+      $("coreAddr").value = a;
       store("aud.core", a);
       base = "http://" + a;
     }
     setStatus("Connecting…", "wait");
+    info = null;
     request("GET", "/api/info").then(function (d) {
-      info = d;
       $("extView").textContent = (d.extensions || []).map(function (e) { return "." + e; }).join(" ");
       $("maxView").textContent = d.maxMB;
       $("ver").textContent = "Q-SYS plugin v" + d.version;
       $("picker").accept = (d.extensions || []).map(function (e) { return "." + e; }).join(",");
       $("pinRow").classList.toggle("hidden", !d.pinRequired);
       if (d.pinRequired && !$("pin").value) { setStatus("Enter the upload PIN", "wait"); $("pin").focus(); return; }
+      info = d;
       return loadFolders().then(function () { setStatus("Connected to " + (d.name || "Core"), "ok"); });
     }).catch(function (e) {
       setStatus(e.status === 401 ? "Wrong or missing PIN" : "Cannot reach the Core: " + e.message +
@@ -455,6 +461,11 @@ footer img { height: 22px; width: auto; }
   }
 
   function uploadOne(file, row, overwrite) {
+    // Ask before sending, so a large file is not sent only to be refused.
+    if (!overwrite && existing[file.name]) {
+      if (!confirm(file.name + " already exists in this folder. Replace it?")) { row.done(false, "Skipped"); return Promise.resolve(); }
+      overwrite = true;
+    }
     var params = { folder: folder(), name: file.name };
     if (overwrite) params.overwrite = "1";
     return request("POST", "/api/upload", params, file, row.progress).then(function () {
@@ -480,7 +491,8 @@ footer img { height: 22px; width: auto; }
       chain = chain.then(function () { return uploadOne(f, row, false); });
     });
     busy = true;
-    chain.then(function () { busy = false; return loadFiles(); }).catch(function () { busy = false; });
+    chain.then(function () { busy = false; return loadFiles(); })
+      .catch(function (e) { busy = false; setStatus(e.status === 401 ? "Wrong or missing PIN" : "Could not refresh the list: " + e.message, "err"); });
   }
 
   // Wiring
@@ -564,11 +576,31 @@ if Controls then
 
   -- One path segment: no separators, no reserved or control characters,
   -- no leading / trailing dots or spaces (so ".." can never get through).
+  local MAX_NAME = 120          -- bytes per file or folder name
+
+  -- Cuts s to at most n bytes without splitting a UTF-8 character.
+  local function cutUtf8(s, n)
+    if #s <= n then return s end
+    local ok, start = pcall(utf8.offset, s, 0, n + 1)
+    return s:sub(1, (ok and start or n + 1) - 1)
+  end
+
   local function cleanSegment(s)
     s = (s or ""):gsub("[%c/\\:%*%?\"<>|]", "")
     s = s:gsub("^[%s%.]+", ""):gsub("[%s%.]+$", "")
-    if #s > 120 then s = s:sub(1, 120) end
+    if #s > MAX_NAME then
+      -- Keep the extension so a long name is still accepted as audio.
+      local stem, ext = s:match("^(.*)(%.[^%.]+)$")
+      if stem and #ext <= 10 then s = cutUtf8(stem, MAX_NAME - #ext) .. ext else s = cutUtf8(s, MAX_NAME) end
+    end
     if s == "" then return nil end
+    return s
+  end
+
+  -- Name of something that already exists on the Core (listed by dir.get):
+  -- used as-is, only refused when it could leave its folder.
+  local function existingSegment(s)
+    if not s or s == "" or s == "." or s == ".." or s:find("[%c/\\]") then return nil end
     return s
   end
 
@@ -580,6 +612,15 @@ if Controls then
       if c then table.insert(parts, c) end
     end
     if #parts > 4 then return nil end
+    return table.concat(parts, "/")
+  end
+
+  local function existingFolder(f)
+    local parts = {}
+    for seg in (f or ""):gmatch("[^/]+") do
+      if not existingSegment(seg) then return nil end
+      table.insert(parts, seg)
+    end
     return table.concat(parts, "/")
   end
 
@@ -821,7 +862,13 @@ if Controls then
       code, REASONS[code] or "", ctype, #body, CORS)
     dbg("%s %s -> %d", c.method or "?", c.path or "?", code)
     pcall(function() c.sock:Write(head .. body) end)
-    Timer.CallAfter(function() closeConn(c) end, CLOSE_DELAY + #body / 1000000)
+    -- A client that asked for "100 Continue" and did not get it sends no body.
+    if c.expectContinue and not c.continued then c.unread = 0 end
+    -- Browsers read the answer only after sending the whole body. Closing
+    -- while it is still arriving resets the connection and loses the answer,
+    -- so an early error waits until the body is drained (or the idle timeout).
+    c.closeAfter = CLOSE_DELAY + #body / 1000000
+    if (c.unread or 0) <= 0 then Timer.CallAfter(function() closeConn(c) end, c.closeAfter) end
   end
 
   local function respondJson(c, code, t) respond(c, code, "application/json; charset=utf-8", json(t)) end
@@ -841,6 +888,12 @@ if Controls then
     respondJson(c, 200, { ok = true, path = shownPath(c.folder, c.name), size = c.got })
   end
 
+  -- Wall-clock seconds (os.clock counts CPU time, not elapsed time).
+  local function wallClock()
+    if Timer.Now then return Timer.Now() end
+    return os.time()
+  end
+
   local function writeBody(c, data)
     local left = c.need - c.got
     if #data > left then data = data:sub(1, left) end
@@ -853,25 +906,39 @@ if Controls then
     end
     c.got = c.got + #data
     if c.got >= c.need then return finishUpload(c) end
-    local now = os.clock()
+    local now = wallClock()
     if now - (c.shown or 0) > 0.25 then c.shown = now; updateActivity() end
   end
 
+  -- Folder for a new file or folder: an existing folder is used as named,
+  -- anything else is cleaned first.
+  local function resolveFolder(raw)
+    local f = existingFolder(raw)
+    if f and isDir(fsPath(f)) then return f end
+    return cleanFolder(raw)
+  end
+
   local function startUpload(c, q, rest)
-    local folder = cleanFolder(q.folder)
+    local folder = resolveFolder(q.folder)
     local name = cleanSegment(q.name)
     if folder == nil then return fail(c, 400, "Folder path too deep (max 4 levels)") end
     if not name then return fail(c, 400, "Missing file name") end
     if not EXTENSIONS[extOf(name)] then return fail(c, 415, "File type ." .. extOf(name) .. " is not allowed") end
-    local len = tonumber(c.headers["content-length"])
+    local len = c.length
+    if c.headers["transfer-encoding"] then return fail(c, 411, "Chunked uploads are not supported, send Content-Length") end
     if not len then return fail(c, 411, "Missing Content-Length") end
     if len > MAX_BYTES then return fail(c, 413, string.format("File is larger than %d MB", MAX_BYTES // 1048576)) end
     local ok, err = makeFolder(folder)
     if not ok then return fail(c, 500, err) end
     local path = fsPath(folder, name)
+    if isDir(path) then return fail(c, 409, "A folder with this name already exists") end
     if q.overwrite ~= "1" and fileExists(path) then return fail(c, 409, "A file with this name already exists") end
     local f, ferr = io.open(path, "wb")
     if not f then return fail(c, 500, "Cannot create the file: " .. tostring(ferr)) end
+    if c.expectContinue then
+      c.continued = true
+      pcall(function() c.sock:Write("HTTP/1.1 100 Continue\r\n\r\n") end)
+    end
     c.file, c.fpath, c.folder, c.name, c.need, c.got = f, path, folder, name, len, 0
     c.phase = "body"
     active[c] = true
@@ -900,12 +967,12 @@ if Controls then
       return respondJson(c, 200, { folders = listFolders() })
     end
     if c.method == "GET" and c.path == "/api/files" then
-      local folder = cleanFolder(q.folder)
+      local folder = existingFolder(q.folder)
       if folder == nil then return fail(c, 400, "Bad folder") end
       return respondJson(c, 200, { folder = folder, files = listFiles(folder) })
     end
     if c.method == "POST" and c.path == "/api/folder" then
-      local folder = cleanFolder(q.folder)
+      local folder = resolveFolder(q.folder)
       if not folder or folder == "" then return fail(c, 400, "Enter a valid folder name (max 4 levels)") end
       local ok, err = makeFolder(folder)
       if not ok then return fail(c, 500, err) end
@@ -914,7 +981,7 @@ if Controls then
     if c.method == "POST" and c.path == "/api/upload" then return startUpload(c, q, rest) end
     if c.method == "POST" and c.path == "/api/delete" then
       if not ALLOW_DELETE then return fail(c, 403, "Deleting is turned off in the plugin") end
-      local folder, name = cleanFolder(q.folder), cleanSegment(q.name)
+      local folder, name = existingFolder(q.folder), existingSegment(q.name)
       if folder == nil or not name then return fail(c, 400, "Bad file name") end
       local ok, res = pcall(os.remove, fsPath(folder, name))
       if not ok or not res then return fail(c, 404, "Could not delete the file") end
@@ -935,13 +1002,28 @@ if Controls then
     c.path, c.query = path, parseQuery(qs)
     c.headers = {}
     for k, v in head:gmatch("\r\n([^:\r\n]+):[ \t]*([^\r\n]*)") do c.headers[k:lower()] = v end
+    local cl = c.headers["content-length"]
+    if cl then
+      c.length = tonumber(cl:match("^%s*(%d+)%s*$"))
+      if not c.length then return false end
+    end
+    c.expectContinue = (c.headers["expect"] or ""):lower():find("100%-continue") ~= nil
     return true
   end
 
   local function onData(c, data)
-    if c.done then return end              -- response sent, ignore the rest
+    if c.phase == "body" or c.done then c.unread = (c.unread or 0) - #data end
+    if c.done then
+      -- Response already sent: drain the rest of the body, then close.
+      if c.unread and c.unread <= 0 and not c.closing then
+        c.closing = true
+        Timer.CallAfter(function() closeConn(c) end, c.closeAfter or CLOSE_DELAY)
+      end
+      return
+    end
     if c.phase == "body" then return writeBody(c, data) end
     c.buf = c.buf .. data
+    if c.buf:sub(1, 1) == "\r" or c.buf:sub(1, 1) == "\n" then c.buf = c.buf:gsub("^[\r\n]+", "") end
     local e = c.buf:find("\r\n\r\n", 1, true)
     if not e then
       if #c.buf > HEAD_LIMIT then fail(c, 431, "Request too large") end
@@ -950,6 +1032,7 @@ if Controls then
     local head, rest = c.buf:sub(1, e - 1), c.buf:sub(e + 4)
     c.buf = ""
     if not parseHead(c, head) then return fail(c, 400, "Bad request") end
+    c.unread = (c.length or 0) - #rest
     route(c, rest)
   end
 
@@ -1020,7 +1103,7 @@ if Controls then
   Controls.Refresh.EventHandler = function() showUrl(); refreshFiles() end
   -- Delete takes two presses within 3 s, so a single touch cannot remove a file.
   Controls.DeleteFile.EventHandler = function()
-    local name = cleanSegment(Controls.Files.String)
+    local name = existingSegment(Controls.Files.String)
     if not ALLOW_DELETE then Controls.FileCount.String = "Delete is off"; return end
     if not name then return end
     if not deleteArmed then

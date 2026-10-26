@@ -13,7 +13,7 @@ Q-SYS Designer plugins by Nikita Visual Arts.
 | Mic Mixer | `plugins/NikitaMicMixer.qplug` | 2.0.0 |
 | RGBW Fixture Selector | `plugins/NikitaRGBWSelector.qplug` | 1.0.0 |
 | NEC NP-PA04UL-B Projector | `plugins/NikitaNECProjector.qplug` | 1.1.0 |
-| Audio File Uploader | `plugins/NikitaAudioUploader.qplug` | 1.0.0 |
+| Audio File Uploader | `plugins/NikitaAudioUploader.qplug` | 1.1.0 |
 
 ## Mic Mixer
 
@@ -293,7 +293,7 @@ Multi-Track Player and Playlist blocks can play them.
 panel in a browser on the same network. Nothing has to be installed.
 
 **Option 2 – standalone page.** Open `web/AudioUploader.html` straight from
-your computer, type the Core address with the port (`192.168.1.50:8080`)
+your computer, type the Core address with the port (`192.168.1.50:8080`; with only the IP, port 8080 is used)
 and press **Connect**. It talks to the same plugin, so the plugin must be
 running in the design either way.
 
@@ -326,7 +326,7 @@ Then, in the Audio Player, choose the folder shown on the page (for example
 | Web Port | 8080 | TCP port of the web page. Pick another one if 8080 is used on your Core. |
 | Default Folder | Uploads | Folder under `Audio/` created and selected at start. |
 | Max File Size (MB) | 500 | Larger files are refused. |
-| Allowed Extensions | wav,mp3,flac,aac,m4a,ogg,aif,aiff | Comma-separated list of accepted file types. |
+| Allowed Extensions | wav,mp3,flac | Comma-separated list of accepted file types. WAV, MP3 and FLAC are the formats QSC lists for the Audio Player (AAC is listed as not supported). |
 | Upload PIN | empty | When set, the page asks for this PIN before listing, uploading or deleting. |
 | Allow Delete | on | Allows deleting files from the page and the panel. |
 | Debug | off | Prints every request to the debug output. |
@@ -349,6 +349,23 @@ Then, in the Audio Player, choose the folder shown on the page (for example
 - A file that stops halfway (browser closed, network lost) is deleted, so no
   broken files are left behind.
 
+### What changed in 1.1.0
+
+- Accepted file types default to WAV, MP3 and FLAC, the formats QSC
+  documents for the Audio Player.
+- When the Core refuses an upload (name exists, too large, wrong PIN), it
+  now reads the rest of the file before closing the connection, so the
+  browser always gets the reason instead of "Connection lost". The page
+  also asks *Replace?* before sending a file whose name is already there.
+- Malformed or chunked uploads are refused instead of leaving empty or
+  corrupted files; folder names that clash with a file name are reported.
+- Files and folders that already exist on the Core with unusual names (a
+  leading dot, very long Hebrew names) can be listed and deleted. Long new
+  names are shortened without breaking letters and keep their extension.
+- The panel progress meter now moves during an upload.
+- Uploads from command-line tools (curl) no longer pause 1 s at the start.
+- Standalone page: typing only the IP adds the default port 8080.
+
 ### Rebuilding
 
 The page is edited in `web/AudioUploader.template.html`. After a change run
@@ -365,7 +382,10 @@ browser (Chromium): PIN, creating folders, uploading several files with
 byte-for-byte comparison, replacing a file, refusing wrong types and
 oversize files, deleting, path-traversal attempts, an upload cut off
 halfway, turning the page off and on, and the panel controls. It was not
-loaded in Q-SYS Designer or run on a Core. To confirm there:
+loaded in Q-SYS Designer or run on a Core. Version 1.1.0 was also
+reviewed independently and checked against QSC's published Lua and Core
+Manager documentation; the review findings were fixed and each has its own
+test. To confirm there:
 
 - that the Core firmware lets a plugin open a listening port
   (`TcpSocketServer`) and write files with `io.open` / `dir.create` under
@@ -373,6 +393,6 @@ loaded in Q-SYS Designer or run on a Core. To confirm there:
 - the field names returned by `dir.get` (`name`, `type`, `size`); if the
   file list stays empty, enable *Debug* and send the debug output;
 - the address shown in the **URL** box (taken from `Network.Interfaces`);
-- which file types your Audio Player version accepts – adjust *Allowed
-  Extensions* to match;
+- that `Timer.Now` exists on your firmware (used for the progress meter;
+  without it the meter updates once per second);
 - upload speed and Core memory use with very large files.

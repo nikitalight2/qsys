@@ -124,6 +124,7 @@ footer img { height: 22px; width: auto; }
   var base = "";            // "" when served by the Core, "http://ip:port" when opened from disk
   var info = null;
   var busy = false;
+  var existing = {};        // names already in the selected folder
 
   function store(k, v) { try { localStorage.setItem(k, v); } catch (e) {} }
   function recall(k) { try { return localStorage.getItem(k) || ""; } catch (e) { return ""; } }
@@ -184,7 +185,9 @@ footer img { height: 22px; width: auto; }
   function loadFiles() {
     return request("GET", "/api/files", { folder: folder() }).then(function (d) {
       var ul = $("files"); ul.innerHTML = "";
+      existing = {};
       (d.files || []).forEach(function (f) {
+        existing[f.name] = true;
         var li = document.createElement("li");
         var n = document.createElement("span"); n.className = "name"; n.textContent = f.name; n.title = f.name;
         var s = document.createElement("span"); s.className = "size"; s.textContent = fmtSize(f.size);
@@ -207,18 +210,21 @@ footer img { height: 22px; width: auto; }
     if (!served) {
       var a = $("coreAddr").value.trim().replace(/^https?:\/\//, "").replace(/\/+$/, "");
       if (!a) { setStatus("Enter the Core address", "err"); return; }
+      if (!/:\d+$/.test(a)) a += ":8080";   // the plugin's default port
+      $("coreAddr").value = a;
       store("aud.core", a);
       base = "http://" + a;
     }
     setStatus("Connecting…", "wait");
+    info = null;
     request("GET", "/api/info").then(function (d) {
-      info = d;
       $("extView").textContent = (d.extensions || []).map(function (e) { return "." + e; }).join(" ");
       $("maxView").textContent = d.maxMB;
       $("ver").textContent = "Q-SYS plugin v" + d.version;
       $("picker").accept = (d.extensions || []).map(function (e) { return "." + e; }).join(",");
       $("pinRow").classList.toggle("hidden", !d.pinRequired);
       if (d.pinRequired && !$("pin").value) { setStatus("Enter the upload PIN", "wait"); $("pin").focus(); return; }
+      info = d;
       return loadFolders().then(function () { setStatus("Connected to " + (d.name || "Core"), "ok"); });
     }).catch(function (e) {
       setStatus(e.status === 401 ? "Wrong or missing PIN" : "Cannot reach the Core: " + e.message +
@@ -242,6 +248,11 @@ footer img { height: 22px; width: auto; }
   }
 
   function uploadOne(file, row, overwrite) {
+    // Ask before sending, so a large file is not sent only to be refused.
+    if (!overwrite && existing[file.name]) {
+      if (!confirm(file.name + " already exists in this folder. Replace it?")) { row.done(false, "Skipped"); return Promise.resolve(); }
+      overwrite = true;
+    }
     var params = { folder: folder(), name: file.name };
     if (overwrite) params.overwrite = "1";
     return request("POST", "/api/upload", params, file, row.progress).then(function () {
@@ -267,7 +278,8 @@ footer img { height: 22px; width: auto; }
       chain = chain.then(function () { return uploadOne(f, row, false); });
     });
     busy = true;
-    chain.then(function () { busy = false; return loadFiles(); }).catch(function () { busy = false; });
+    chain.then(function () { busy = false; return loadFiles(); })
+      .catch(function (e) { busy = false; setStatus(e.status === 401 ? "Wrong or missing PIN" : "Could not refresh the list: " + e.message, "err"); });
   }
 
   // Wiring
